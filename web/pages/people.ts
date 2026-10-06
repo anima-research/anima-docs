@@ -9,7 +9,7 @@ import { avatar, emptyState, errorMessage, issuerBadge, kindBadge, shownName, sp
 import { topBar } from './shell';
 
 export function mountPeople(root: HTMLElement, me: Me): () => void {
-  document.title = 'People · Archipelago Docs';
+  document.title = 'People · Anima Docs';
   let kind: 'all' | 'human' | 'agent' = 'all';
   let people: Person[] | null = null;
   let seq = 0;
@@ -63,7 +63,7 @@ export function mountPeople(root: HTMLElement, me: Me): () => void {
 }
 
 export function mountAdmin(root: HTMLElement, me: Me): () => void {
-  document.title = 'Admin · Archipelago Docs';
+  document.title = 'Admin · Anima Docs';
   const table = h('div.admin-table-wrap', { 'aria-busy': 'true' }, h('div.list-loading', null, spinner(26)));
   const searchInput = h('input.input.search-input', { type: 'search', placeholder: 'Filter', 'aria-label': 'Filter principals' });
   // Guests (people who opened an "anyone" link without signing in) are hidden unless asked for, e.g. to block one.

@@ -15,13 +15,13 @@ import { navigate } from '../router';
 export function mountLinkPage(root: HTMLElement, opts: { key: string; me: Me | null; onMe: (me: Me) => void }): () => void {
   let destroyed = false;
   const path = `/l/${opts.key}`;
-  document.title = 'Shared document · Archipelago Docs';
+  document.title = 'Shared document · Anima Docs';
 
   const frame = (...children: Child[]) => {
     if (destroyed) return;
     root.replaceChildren(h('main.signin.link-landing', null,
       h('div.signin-card.link-card', { role: 'region', 'aria-label': 'Share link' }, ...children),
-      h('p.signin-foot', null, 'Archipelago Docs: live documents where people and agents write together.')));
+      h('p.signin-foot', null, 'Anima Docs: live documents where people and agents write together.')));
     (root.querySelector('[autofocus]') as HTMLElement | null)?.focus();
   };
 
@@ -30,7 +30,7 @@ export function mountLinkPage(root: HTMLElement, opts: { key: string; me: Me | n
   const signInButton = (primary: boolean) => h('button.btn.lg.block', { type: 'button', class: primary ? 'primary' : '', onclick: () => startSignIn(path) }, icon('shield', 18), 'Sign in with Archipelago');
 
   const dead = (message?: string) => {
-    document.title = 'Link not working · Archipelago Docs';
+    document.title = 'Link not working · Anima Docs';
     frame(
       h('div.link-art.dead', { 'aria-hidden': 'true' }, icon('unlink', 26)),
       h('h1', null, 'This link no longer works'),
@@ -46,7 +46,7 @@ export function mountLinkPage(root: HTMLElement, opts: { key: string; me: Me | n
 
   /** "Members" links: sign in first (guests too: their guest identity can't use it). */
   const membersOnly = (peek: LinkPeek) => {
-    document.title = 'Sign in to open · Archipelago Docs';
+    document.title = 'Sign in to open · Anima Docs';
     frame(
       h('div.link-art', { 'aria-hidden': 'true' }, icon('users', 26)),
       h('h1', null, 'Sign in with Archipelago to open this document'),
@@ -57,7 +57,7 @@ export function mountLinkPage(root: HTMLElement, opts: { key: string; me: Me | n
 
   /** "Anyone" links, signed out: continue as a guest, or sign in. */
   const choose = (peek: LinkPeek, error?: string) => {
-    document.title = `${peek.title ?? 'Shared document'} · Archipelago Docs`;
+    document.title = `${peek.title ?? 'Shared document'} · Anima Docs`;
     const name = h('input.input.lg', { type: 'text', name: 'name', placeholder: 'How others will see you', autocomplete: 'nickname', maxlength: '40', 'aria-label': 'Your name (optional)', 'aria-describedby': 'guest-name-hint', autofocus: true });
     const hint = h('p.field-hint#guest-name-hint');
     const drawHint = () => {

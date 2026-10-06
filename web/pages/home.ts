@@ -25,7 +25,7 @@ const TEMPLATES: { id: string; name: string; desc: string; title: string; conten
 ];
 
 export function mountHome(root: HTMLElement, me: Me): () => void {
-  document.title = 'Documents · Archipelago Docs';
+  document.title = 'Documents · Anima Docs';
   let filter: Filter = 'all';
   let query = '';
   let docs: DocSummary[] | null = null;

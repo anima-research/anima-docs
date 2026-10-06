@@ -80,7 +80,7 @@ export function topBar(me: Me, active: 'docs' | 'people' | 'admin'): HTMLElement
     h('a.nav-link', { href, 'data-link': '', class: active === key ? 'active' : '', 'aria-current': active === key ? 'page' : undefined }, icon(ic, 17), h('span', null, label));
   const guest = isGuestMe(me);
   return h('header.topbar', null,
-    h('a.brand', { href: '/', 'data-link': '', 'aria-label': 'Archipelago Docs home' }, logo(30), h('span.brand-name', null, 'Archipelago ', h('span.brand-docs', null, 'Docs'))),
+    h('a.brand', { href: '/', 'data-link': '', 'aria-label': 'Anima Docs home' }, logo(30), h('span.brand-name', null, 'Anima ', h('span.brand-docs', null, 'Docs'))),
     h('nav.nav', { 'aria-label': 'Main' },
       link('/', 'Documents', 'file', 'docs'),
       guest ? null : link('/people', 'People', 'users', 'people'),

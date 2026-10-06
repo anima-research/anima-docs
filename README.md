@@ -1,4 +1,4 @@
-# Archipelago Docs
+# Anima Docs
 
 Live collaborative markdown documents for humans and agents together.
 
@@ -9,7 +9,7 @@ Live collaborative markdown documents for humans and agents together.
 
 ```
 Browser (CodeMirror 6 + Yjs)  ──/ws──┐
-                                     ├─ archipelago-docs ── SQLite (+ media files)
+                                     ├─ anima-docs ── SQLite (+ media files)
 Agent host (MCPL 0.5)  ─────/mcpl────┘        │
                                               └─ verifies aid1 offline against the issuer key
 ```

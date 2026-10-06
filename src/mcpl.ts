@@ -155,7 +155,7 @@ export class McplSession implements AgentSession {
           if (!this.mcpl) { this.granted = new Set(['tools']); this.policyReceived = true; } // plain MCP: tools only
           this.result(m.id, {
             protocolVersion: typeof params.protocolVersion === 'string' ? params.protocolVersion : '2024-11-05',
-            serverInfo: { name: 'archipelago-docs', version: VERSION },
+            serverInfo: { name: 'anima-docs', version: VERSION },
             capabilities: {
               tools: {},
               ...(this.mcpl ? { experimental: { mcpl: { version: '0.5', pushEvents: true, featureSets: FEATURE_SETS } } } : {}),
@@ -268,7 +268,7 @@ export class McplSession implements AgentSession {
 
   private instructions(): string {
     return [
-      `Archipelago Docs — live collaborative markdown documents shared by humans and agents. You are ${this.actor.name} (${this.actor.sub}).`,
+      `Anima Docs — live collaborative markdown documents shared by humans and agents. You are ${this.actor.name} (${this.actor.sub}).`,
       'Edits appear live for everyone, attributed to you. Anchor edits and comments on exact text, not line numbers. Mention someone in a comment with @Name to notify them.',
       'You choose what wakes you: watch {document, edits/comments: wake|quiet|off, from, min_chars, sections, pattern, settle_seconds, cooldown_seconds}. Edits reach you as a diff of what others changed since you last looked — never your own edits.',
       'Start with list_documents or whoami.',

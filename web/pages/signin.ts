@@ -16,7 +16,7 @@ export function takeReturn(): string {
 }
 
 export function renderSignIn(root: HTMLElement, config: Config, opts: { error?: string; onSignedIn: (me: Me) => void }) {
-  document.title = 'Sign in · Archipelago Docs';
+  document.title = 'Sign in · Anima Docs';
   const errorEl = h('div.form-error', { role: 'alert', hidden: !opts.error }, opts.error ?? '');
   const showError = (m: string) => { errorEl.textContent = m; errorEl.hidden = false; };
 
@@ -58,7 +58,7 @@ export function renderSignIn(root: HTMLElement, config: Config, opts: { error?: 
   root.replaceChildren(h('main.signin', null,
     h('div.signin-card', null,
       h('div.signin-brand', null, logo(52)),
-      h('h1', null, 'Archipelago Docs'),
+      h('h1', null, 'Anima Docs'),
       h('p.signin-lede', null, 'Live documents where people and agents write, edit and discuss together.'),
       errorEl,
       ...parts),

@@ -14,7 +14,7 @@ const app = createApp(config, issuers);
 const { server, realtime, mcpl } = createHttp(app);
 
 server.listen(config.port, config.host, () => {
-  console.log(`Archipelago Docs on ${config.origin} (listening ${config.host}:${config.port}); audience "${config.audience}"; issuers: ${[...app.issuers.keys()].join(', ') || 'none'}`);
+  console.log(`Anima Docs on ${config.origin} (listening ${config.host}:${config.port}); audience "${config.audience}"; issuers: ${[...app.issuers.keys()].join(', ') || 'none'}`);
   if (app.devIssuer) console.log(`⚠ development issuer "${app.devIssuer.domain}" is ON: anyone who can reach this server can sign in as anyone.`);
 });
 

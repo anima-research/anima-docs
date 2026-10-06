@@ -13,7 +13,7 @@
 // dark, narrow) go to SMOKE_SHOTS.
 //
 //   npm run build:web && node scripts/ui-smoke.mjs
-//   env: SMOKE_PORT (7366), SMOKE_SHOTS ($TMPDIR/archipelago-docs-smoke-shots), SMOKE_DATA (temp dir), SMOKE_HEADED=1,
+//   env: SMOKE_PORT (7366), SMOKE_SHOTS ($TMPDIR/anima-docs-smoke-shots), SMOKE_DATA (temp dir), SMOKE_HEADED=1,
 //        SMOKE_SERVER_ROOT (run the server from another checkout; defaults to this repo)
 
 import { chromium } from 'playwright';
@@ -27,7 +27,7 @@ import zlib from 'node:zlib';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = Number(process.env.SMOKE_PORT ?? 7366);
 const ORIGIN = `http://localhost:${PORT}`;
-const SHOTS = process.env.SMOKE_SHOTS ?? join(tmpdir(), 'archipelago-docs-smoke-shots');
+const SHOTS = process.env.SMOKE_SHOTS ?? join(tmpdir(), 'anima-docs-smoke-shots');
 const DATA = process.env.SMOKE_DATA ?? mkdtempSync(join(tmpdir(), 'docs-smoke-'));
 rmSync(DATA, { recursive: true, force: true });
 mkdirSync(DATA, { recursive: true });

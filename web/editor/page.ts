@@ -74,7 +74,7 @@ export function mountDocPage(root: HTMLElement, me: Me, docId: string): () => vo
   let destroyed = false;
   const resyncs: number[] = [];
   root.replaceChildren(h('div.doc-loading-page', null, spinner(28), h('p', null, 'Opening document…')));
-  document.title = 'Archipelago Docs';
+  document.title = 'Anima Docs';
 
   const start = (restoreScroll?: number) => void api.doc(docId).then((detail) => {
     if (destroyed) return;
@@ -143,7 +143,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
       title = d.title;
       titleBefore = d.title;
       titleInput.value = d.title;
-      document.title = `${title} · Archipelago Docs`;
+      document.title = `${title} · Anima Docs`;
     } catch (e) {
       toast(errorMessage(e), { kind: 'error' });
       titleInput.value = titleBefore;
@@ -237,7 +237,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   const app = h('div.doc-app', null, h('div.doc-chrome', null, header, h('div.doc-toolbar-wrap', null, toolbar)), body);
   pageEl.append(syncVeil);
   root.replaceChildren(app);
-  document.title = `${title} · Archipelago Docs`;
+  document.title = `${title} · Anima Docs`;
 
   // ------------------------------------------------------------------ editor
 
@@ -364,7 +364,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     if (d.title && d.title !== title) {
       title = d.title;
       if (document.activeElement !== titleInput) { titleInput.value = title; titleBefore = title; }
-      document.title = `${title} · Archipelago Docs`;
+      document.title = `${title} · Anima Docs`;
     }
     if (d.owner) {
       const name = splitLabel(d.owner.label).name;
@@ -654,7 +654,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     rail.cancelDraft();
     panel.close();
     provider.destroy();
-    document.title = 'Archipelago Docs';
+    document.title = 'Anima Docs';
   };
 }
 

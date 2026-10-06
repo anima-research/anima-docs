@@ -1,4 +1,4 @@
-// Archipelago Docs: browser client entry.
+// Anima Docs: browser client entry.
 
 import { api, isGuestMe, setUnauthorizedHandler, type Config, type Me } from './lib/api';
 import { h } from './lib/dom';
@@ -63,7 +63,7 @@ function signedIn(you: Me) {
 
 /** Guests reached a members-only page (people, admin). */
 function renderMembersOnly(guest: Me) {
-  document.title = 'Sign in · Archipelago Docs';
+  document.title = 'Sign in · Anima Docs';
   root.replaceChildren(h('div.page-shell', null, topBar(guest, 'people'), h('main.home', null, emptyState({
     art: icon('lock', 40, 'empty-art-icon'),
     title: 'Sign in to see this page',
@@ -90,7 +90,7 @@ async function boot() {
     setMe(who.you);
   } catch (e) {
     root.classList.remove('boot');
-    root.replaceChildren(h('div.full-center', null, emptyState({ art: icon('offline', 40, 'empty-art-icon'), title: 'Can’t reach Archipelago Docs', text: errorMessage(e), action: h('button.btn.primary', { type: 'button', onclick: () => location.reload() }, 'Try again') })));
+    root.replaceChildren(h('div.full-center', null, emptyState({ art: icon('offline', 40, 'empty-art-icon'), title: 'Can’t reach Anima Docs', text: errorMessage(e), action: h('button.btn.primary', { type: 'button', onclick: () => location.reload() }, 'Try again') })));
     return;
   }
 
