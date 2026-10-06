@@ -193,6 +193,9 @@ DOCS_DEV_ISSUER=dev.local DOCS_ISSUERS= npm run dev
 | `DOCS_ADMINS` | none | subs that are workspace admins (the `docs:admin` scope also works) |
 | `DOCS_DEFAULT_ACCESS` | `restricted` | general access for new documents |
 | `DOCS_DEBUG` | | log every push with its coalescing outcome |
+| `DOCS_CLIENT_IP_HEADER` | none | header the proxy sets and overwrites with the client address, used for the guest rate limit (`x-real-ip` on Railway) |
+| `DOCS_TRUSTED_PROXY_HOPS` | 1 on https, else 0 | otherwise: proxies that append to `X-Forwarded-For` |
+| `DOCS_DEBUG_CLIENT` | | `1` serves `/debug/client`: the forwarding headers your proxy sets |
 
 ### Registering with the home node
 
@@ -208,7 +211,7 @@ Grant `docs:use` to the roles that should have it (`config/roles.json`). For age
 
 The `Dockerfile` builds everything. On Railway:
 - one service with a volume mounted at `/data`;
-- variables `DOCS_ORIGIN=https://<domain>`, `DOCS_ISSUERS=id.animalabs.ai=ed25519:<issuer key>`, `DOCS_REQUIRED_SCOPES=docs:use`, `DOCS_ADMINS=<sub>`, `PORT=8080`;
+- variables `DOCS_ORIGIN=https://<domain>`, `DOCS_ISSUERS=id.animalabs.ai=ed25519:<issuer key>`, `DOCS_REQUIRED_SCOPES=docs:use`, `DOCS_ADMINS=<sub>`, `DOCS_CLIENT_IP_HEADER=x-real-ip`, `PORT=8080`;
 - the domain pointed at port 8080.
 
 Run one replica only: state is a single SQLite file.
@@ -227,7 +230,7 @@ Run one replica only: state is a single SQLite file.
 - **Spoofing:** awareness (cursor names) is overwritten with the session identity, so a browser cannot appear as someone else.
 - **Images:** PNG, JPEG, GIF and WebP only, checked by magic bytes; SVG is refused. Agent URL imports are https-only and are checked against private, loopback, link-local and CGNAT (tailnet) ranges at connect time, so DNS rebinding can't get around the check.
 - **Media URLs:** content-addressed and unguessable (128-bit), and served only to visitors with a session (members, or guests holding a link). Uploads belong to a document you can edit, members only, and each principal gets a 500 MB daily quota.
-- **Share links:** keys are 144-bit and random. A link's role is capped at editor; "anyone" links are owner-only. Access through a link is re-derived on every check, so revoking or expiring it takes effect at once. The client address used for the guest rate limit is the last `X-Forwarded-For` hop, the one the proxy adds.
+- **Share links:** keys are 144-bit and random. A link's role is capped at editor; "anyone" links are owner-only. Access through a link is re-derived on every check, so revoking or expiring it takes effect at once. The client address used for the guest rate limit comes from a header the proxy overwrites (`DOCS_CLIENT_IP_HEADER`; Railway's `X-Real-IP`), never from a client-supplied one.
 - **Mentions:** a mention of someone without access does not notify them. The author gets a warning to share first.
 - **Revocation:** once someone loses access, deliveries about that document stop, including queued ones. A comment edit or deletion after revocation never reaches the former recipient.
 - **Bounded work:** user content is parsed without backtracking regexes. Wake filters are keyword lists, not regexes. Diffs are time-bounded, with a section summary as the fallback. `replace_all` is capped. Documents are limited to 2M characters.

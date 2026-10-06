@@ -181,6 +181,9 @@ test('M4: the rate-limit key is the trusted proxy hop, and IPv6 is bucketed by /
   assert.equal(clientNetwork(req('6.6.6.6, 1.2.3.4', '10.0.0.1'), 1), '1.2.3.4', 'behind one proxy: the hop it added');
   assert.equal(clientNetwork(req('6.6.6.6', '10.0.0.1'), 0), '10.0.0.1', 'no proxy: X-Forwarded-For is ignored');
   assert.equal(clientNetwork(req(undefined, '::ffff:9.9.9.9'), 0), '9.9.9.9');
+  const railway = { headers: { 'x-forwarded-for': '7.7.7.7, 152.233.76.11', 'x-real-ip': '7.7.7.7' }, socket: { remoteAddress: '100.64.0.1' } } as unknown as IncomingMessage;
+  assert.equal(clientNetwork(railway, 1, 'x-real-ip'), '7.7.7.7', 'a proxy-set header wins over X-Forwarded-For');
+  assert.equal(clientNetwork(railway, 2), '7.7.7.7', 'or count both hops');
   assert.equal(clientNetwork(req('2001:db8:1:2:aaaa::1', 'x'), 1), clientNetwork(req('2001:db8:1:2:bbbb::9', 'x'), 1));
   assert.notEqual(clientNetwork(req('2001:db8:1:2::1', 'x'), 1), clientNetwork(req('2001:db8:1:3::1', 'x'), 1));
 });

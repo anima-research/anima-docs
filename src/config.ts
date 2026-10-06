@@ -31,6 +31,8 @@ export interface Config {
   devIssuer: string | null;
   /** Proxies in front that append to X-Forwarded-For (1 behind Railway's edge; 0 when exposed directly). */
   trustedProxyHops: number;
+  /** A client-address header the proxy sets and overwrites (Railway: x-real-ip); preferred over X-Forwarded-For. */
+  clientIpHeader: string | null;
   /** How often open sockets' roles are re-derived (link expiry has no event). */
   roleSweepMs: number;
 }
@@ -67,6 +69,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     defaultAccess,
     devIssuer,
     roleSweepMs: Math.max(100, Number(env.DOCS_ROLE_SWEEP_MS ?? 10_000) || 10_000),
+    clientIpHeader: env.DOCS_CLIENT_IP_HEADER?.trim() || null,
     trustedProxyHops: env.DOCS_TRUSTED_PROXY_HOPS !== undefined ? Math.max(0, Number(env.DOCS_TRUSTED_PROXY_HOPS) || 0) : origin.startsWith('https:') ? 1 : 0,
   };
 }

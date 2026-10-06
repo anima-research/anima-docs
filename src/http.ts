@@ -39,14 +39,16 @@ class GuestLimiter {
 }
 
 /**
- * The client's network for rate limiting. Behind `hops` trusted proxies that
- * each append to X-Forwarded-For, the client is the entry `hops` from the end
- * (anything before it is client-supplied). IPv6 is bucketed by /64, since a
- * single host can rotate through its whole prefix.
+ * The client's network for rate limiting.
+ * - `header`: a header the proxy sets and overwrites (Railway: x-real-ip) wins.
+ * - Otherwise, behind `hops` trusted proxies that each append to X-Forwarded-For,
+ *   the client is the entry `hops` from the end (anything before it is client-supplied).
+ * IPv6 is bucketed by /64, since a single host can rotate through its whole prefix.
  */
-export function clientNetwork(req: IncomingMessage, hops: number): string {
+export function clientNetwork(req: IncomingMessage, hops: number, header: string | null = null): string {
+  const fromHeader = header ? String(req.headers[header.toLowerCase()] ?? '').split(',')[0].trim() : '';
   const xff = String(req.headers['x-forwarded-for'] ?? '').split(',').map((x) => x.trim()).filter(Boolean);
-  const raw = hops > 0 && xff.length >= hops ? xff[xff.length - hops] : (req.socket.remoteAddress ?? '?');
+  const raw = fromHeader || (hops > 0 && xff.length >= hops ? xff[xff.length - hops] : (req.socket.remoteAddress ?? '?'));
   const ip = raw.replace(/^::ffff:/, '');
   if (!ip.includes(':')) return ip;
   const [head, tail = ''] = ip.toLowerCase().split('::');
@@ -170,6 +172,12 @@ export function createHttp(app: App) {
       const method = req.method ?? 'GET';
 
       if (path === '/health') { app.db.prepare('SELECT 1').get(); send(200, { ok: true }); return; }
+      // Operator diagnostic (off unless DOCS_DEBUG_CLIENT=1): which forwarding headers the hosting proxy sets.
+      if (path === '/debug/client' && process.env.DOCS_DEBUG_CLIENT === '1') {
+        const pick = ['x-forwarded-for', 'x-real-ip', 'x-envoy-external-address', 'forwarded', 'cf-connecting-ip', 'true-client-ip', 'x-railway-request-id', 'via'];
+        send(200, { headers: Object.fromEntries(pick.map((h) => [h, req.headers[h] ?? null])), remote: req.socket.remoteAddress, network: clientNetwork(req, app.config.trustedProxyHops, app.config.clientIpHeader) });
+        return;
+      }
 
       // Same-origin rule for every cookie-authenticated mutation.
       if (!['GET', 'HEAD', 'OPTIONS'].includes(method) && !req.headers.authorization && req.headers.origin !== app.config.origin) {
@@ -276,7 +284,7 @@ export function createHttp(app: App) {
         }
         if (info.audience !== 'anyone') throw new Fault(401, 'Sign in with Archipelago to open this link.');
         const linkId = app.docs.linkById(key)?.id ?? '?';
-        if (!guestLimiter.take(clientNetwork(req, proxyHops), linkId)) throw new Fault(429, 'Too many new visitors just now. Try again later, or sign in.');
+        if (!guestLimiter.take(clientNetwork(req, proxyHops, app.config.clientIpHeader), linkId)) throw new Fault(429, 'Too many new visitors just now. Try again later, or sign in.');
         // The guest, their session and the redemption stand or fall together.
         const made = app.db.transaction(() => {
           const g = app.principals.createGuest(typeof b.name === 'string' ? b.name : undefined);
