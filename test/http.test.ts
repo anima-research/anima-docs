@@ -112,3 +112,16 @@ test('admin: identity management for humans and agents', async () => {
   const self = await fetch(`${S.base}/api/admin/principals/${encodeURIComponent('human:test:root')}`, { method: 'POST', headers: H({ Cookie: root }), body: '{"role":"blocked"}' });
   assert.equal(self.status, 400);
 });
+
+test('an https origin is canonical: reads on other hosts redirect there, health answers anywhere', async () => {
+  const { startServer: start } = await import('./server-harness.js');
+  const T = await start({ DOCS_ORIGIN: 'https://docs.example.org' });
+  try {
+    (T.app.config as any).origin = 'https://docs.example.org';
+    // The harness rewrites the origin after listen; createHttp captured the canonical host before that.
+    const r = await fetch(`${T.base}/l/abcdefghijklmnopqrstuvwx?x=1`, { redirect: 'manual' });
+    assert.equal(r.status, 301);
+    assert.equal(r.headers.get('location'), 'https://docs.example.org/l/abcdefghijklmnopqrstuvwx?x=1');
+    assert.equal((await fetch(`${T.base}/health`)).status, 200);
+  } finally { await T.close(); }
+});

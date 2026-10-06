@@ -149,6 +149,8 @@ export function createHttp(app: App) {
   };
 
   const realtime = new Realtime(app, webSession, sessionValid);
+  // Only an https origin is canonical (local development answers on any host).
+  const canonicalHost = app.config.origin.startsWith('https:') ? new URL(app.config.origin).host.toLowerCase() : null;
 
   // ---------------------------------------------------------------- server
 
@@ -172,6 +174,13 @@ export function createHttp(app: App) {
       const method = req.method ?? 'GET';
 
       if (path === '/health') { app.db.prepare('SELECT 1').get(); send(200, { ok: true }); return; }
+      // One public address: page and API reads arriving on another host (the platform's
+      // default domain, say) are sent to the origin, so old links keep working.
+      if (canonicalHost && (method === 'GET' || method === 'HEAD') && String(req.headers.host ?? '').toLowerCase() !== canonicalHost && !path.startsWith('/debug/')) {
+        res.writeHead(301, { Location: `${app.config.origin}${req.url ?? '/'}`, 'Cache-Control': 'no-store' });
+        res.end();
+        return;
+      }
       // Operator diagnostic (off unless DOCS_DEBUG_CLIENT=1): which forwarding headers the hosting proxy sets.
       if (path === '/debug/client' && process.env.DOCS_DEBUG_CLIENT === '1') {
         const pick = ['x-forwarded-for', 'x-real-ip', 'x-envoy-external-address', 'forwarded', 'cf-connecting-ip', 'true-client-ip', 'x-railway-request-id', 'via'];
