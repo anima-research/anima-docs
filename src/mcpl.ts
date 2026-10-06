@@ -22,7 +22,7 @@ export const FEATURE_SETS: Record<FeatureSet, { description: string; uses: strin
   'docs.comment': { description: 'Comment threads: comment, reply, resolve, assign, @mention.', uses: ['tools'] },
   'docs.share': { description: 'Manage who can access documents, and share links.', uses: ['tools'] },
   'docs.watch': {
-    description: 'Notifications: edit diffs and comment activity (RFC-006 deferred), @mentions/assignments/replies (addressed), shares. Set your own wake gates with watch.',
+    description: 'Push events: @mentions, assignments and replies to you (one per comment; edits replace, deletions withdraw); for watched documents, one attributed diff per document of what others changed (RFC-006 deferred: rendered when the agent is about to read it) and a comment digest; shares. Each event is tagged docs:wake or docs:quiet by the gates the agent sets with watch. Hosts should advertise eventCoalescing; gate rules: source <id> + docs:wake → always, source <id> → defer.',
     uses: ['tools', 'pushEvents'],
     tagOntology: {
       coreTags: ['chat:mention', 'chat:reply', 'chat:addressed', 'chat:edited', 'chat:deleted', 'chat:from-human', 'chat:from-agent'],
@@ -202,7 +202,9 @@ export class McplSession implements AgentSession {
           if (!this.enabled.has(tool.featureSet)) { this.error(m.id, -32001, `Feature set not enabled: ${tool.featureSet}`, { featureSet: tool.featureSet }); return; }
           // Re-admit on every call: a blocked principal or revoked access takes effect immediately.
           const actor = this.app.principals.admit({ sub: this.actor.sub, name: this.actor.name, kind: this.actor.kind as PrincipalKind, issuer: this.actor.issuer, scopes: this.actor.scopes, claims: {}, exp: this.actor.exp }, 'mcpl');
-          this.result(m.id, await runTool(this.app, actor, params.name, params.arguments));
+          const out = await runTool(this.app, actor, params.name, params.arguments);
+          if (params.name === 'whoami' && !out.isError) out.content.push({ type: 'text', text: this.connectionGuide() });
+          this.result(m.id, out);
           return;
         }
         case 'push/render': {
@@ -268,10 +270,37 @@ export class McplSession implements AgentSession {
 
   private instructions(): string {
     return [
-      `Anima Docs — live collaborative markdown documents shared by humans and agents. You are ${this.actor.name} (${this.actor.sub}).`,
-      'Edits appear live for everyone, attributed to you. Anchor edits and comments on exact text, not line numbers. Mention someone in a comment with @Name to notify them.',
-      'You choose what wakes you: watch {document, edits/comments: wake|quiet|off, from, min_chars, sections, pattern, settle_seconds, cooldown_seconds}. Edits reach you as a diff of what others changed since you last looked — never your own edits.',
-      'Start with list_documents or whoami.',
+      `Anima Docs — live collaborative markdown documents shared by people and agents (${this.app.config.origin}). You are ${this.actor.name} (${this.actor.sub}).`,
+      this.connectionGuide(),
+    ].join('\n\n');
+  }
+
+  /**
+   * How this agent will hear from the service, tailored to what its host
+   * declared at initialize: shown in the instructions and appended to whoami
+   * (hosts don't all surface instructions; every agent can call whoami).
+   */
+  connectionGuide(): string {
+    const c = this.hostCoalescing;
+    const coalescing = !this.mcpl
+      ? 'Your host connected as plain MCP: tools only, no push events. Use changes {document} to see what others changed since you last looked.'
+      : c.deferred
+        ? 'Your host supports MCPL event coalescing with deferred rendering (RFC-006): each watched document holds one pending slot, and its diff is written when you are about to read it, so a burst of typing costs you one diff.'
+        : c.plain
+          ? 'Your host supports plain event coalescing but not deferred rendering: diffs arrive ready-made and are appended as they happen. A host with deferred coalescing (agent-framework with RFC-006) keeps one current diff per document instead.'
+          : 'Your host does not advertise MCPL event coalescing, so every diff arrives as its own event and accumulates in your context. Ask your operator for an agent-framework with RFC-006 event coalescing before watching busy documents.';
+    return [
+      'What reaches you (feature set docs.watch):',
+      '- Addressed to you: an @mention, a thread assigned to you, or a reply in a thread you started or joined. One event per comment: an edit replaces it, a deletion withdraws it. These come without watching anything; offline, they wait for you.',
+      '- Documents you watch: edits arrive as one diff per document of what others changed since you last looked (never your own edits), with authors and section names. Comment activity arrives as a digest. A full read_document counts as looking.',
+      '- Documents shared with you: a short notice.',
+      'Every event carries docs:wake or docs:quiet according to the gates you set with watch (per document, or document "*" for defaults): edits / comments / replies / shares: wake | quiet | off; mentions: wake | quiet; from: anyone | humans | agents | names; guests; min_chars; sections; keywords; settle_seconds; cooldown_seconds; quiet_until. A first watch without options means edits quiet, comments wake, from humans.',
+      'Wake rules: your host gate decides what those tags do, and docs events are usually skipped until it has rules for them. Add two rules once, using the id you deployed this server under as source (here assumed "docs"):',
+      '  wake_add_rule {"name": "docs-quiet", "match": {"source": "docs"}, "behavior": "defer", "position": "prepend"}',
+      '  wake_add_rule {"name": "docs-wake", "match": {"source": "docs", "tagsAny": ["docs:wake"]}, "behavior": "always", "position": "prepend"}',
+      '  (The second prepend puts docs-wake first; both match only this server, so your other rules are untouched.)',
+      `Coalescing: ${coalescing}`,
+      'Answering: reply to comments with reply_comment (or add_comment); plain prose after a docs wake has nowhere to go. Anchor edits and comments on exact text, not line numbers. A share link someone gives you works anywhere a document is expected.',
     ].join('\n');
   }
 }

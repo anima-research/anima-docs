@@ -120,7 +120,7 @@ export const TOOLS: ToolDef[] = [
   // ------------------------------------------------------------------ docs.read
   {
     name: 'whoami', featureSet: 'docs.read', toolClass: 'notes',
-    description: 'Who this service thinks you are, your standing, and how notifications reach you.',
+    description: 'Start here: who you are, what events will reach you and how, the two wake rules to add to your host, and whether your host coalesces events.',
     inputSchema: { type: 'object', properties: {} },
     run(app, actor) {
       const star = app.attention.settings(actor.sub, '*');

@@ -113,23 +113,31 @@ Defaults:
 - `watch {document}` with no options means `edits: quiet, comments: wake, from: humans`.
 - `create_document` watches the new document that way automatically.
 
-### Connecting a Connectome resident
+### Connecting an agent
 
-Recipe `mcpServers` entry. `access` makes the host mint a fresh `aid1` for audience `docs` on every dial, so no secret sits in the recipe:
+Agents enrolled with Archipelago, holding `docs:use`, connect themselves. Send them:
 
-```json
-"docs": { "url": "wss://<host>/mcpl", "transport": "websocket", "access": "docs", "toolPrefix": "docs",
-          "reconnect": true, "reconnectIntervalMs": 5000, "reconnectMaxIntervalMs": 60000 }
+> Anima Docs (https://docs.animalabs.ai) is a shared document service: markdown documents that people and agents edit together live, with comments. You have access through your Archipelago identity. To connect:
+> 1. `mcpl_deploy {"id": "docs", "url": "wss://docs.animalabs.ai/mcpl", "access": "docs", "toolPrefix": "docs"}`
+> 2. Call its `whoami` tool. It explains what events will reach you, gives the two `wake_add_rule` calls to add, and says whether your host coalesces events.
+
+What `whoami` asks them to add (both match only this server, so other rules are untouched):
+
+```
+wake_add_rule {"name": "docs-quiet", "match": {"source": "docs"}, "behavior": "defer", "position": "prepend"}
+wake_add_rule {"name": "docs-wake", "match": {"source": "docs", "tagsAny": ["docs:wake"]}, "behavior": "always", "position": "prepend"}
 ```
 
-Add the gate rules above.
+Requirements and fallbacks:
+- **Self-deploy:** needs the host's `mcplAdmin` and `identity` modules. Without them, an operator adds the recipe entry instead (a fresh `aid1` is minted per dial, so no secret sits in the recipe):
 
-Hosts negotiate as follows:
-- **Coalescing hosts:** hosts that advertise `eventCoalescing` (agent-framework ≥ #197) get deferred rendering.
-- **Hosts without coalescing:** they receive ready-made diffs, append-only.
-- **Plain MCP clients** (no MCPL): tools only.
+  ```json
+  "docs": { "url": "wss://docs.animalabs.ai/mcpl", "transport": "websocket", "access": "docs", "toolPrefix": "docs",
+            "reconnect": true, "reconnectIntervalMs": 5000, "reconnectMaxIntervalMs": 60000 }
+  ```
 
-Agent principals must be enrolled on the home node with `docs` among their allowed audiences.
+- **Coalescing:** hosts advertising `eventCoalescing` (agent-framework with RFC-006) get one deferred diff per document. Hosts without it receive each diff as it happens; `whoami` tells the agent which case applies.
+- **Plain MCP clients:** tools only.
 
 ### Tools
 

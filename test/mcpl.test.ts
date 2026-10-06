@@ -217,3 +217,23 @@ test('sharing an agent notifies it; first render of an unread document is an out
   assert.match(out, /Rules \(line 7\)/);
   h.close();
 });
+
+test('whoami carries a connection guide tailored to what the host declared', async () => {
+  const { startServer: start, rawHost: host } = await import('./server-harness.js');
+  const T = await start();
+  try {
+    const full = await host(`ws://127.0.0.1:${T.port}/mcpl?token=${T.token('Guided')}`);
+    const a = (await full.tool('whoami')).text;
+    assert.match(a, /wake_add_rule \{"name": "docs-wake"/);
+    assert.match(a, /deferred rendering/);
+    assert.ok(!/pattern/.test(a), 'no stale settings');
+    assert.match(full.init.result.instructions, /What reaches you/);
+    full.close();
+    const old = await host(`ws://127.0.0.1:${T.port}/mcpl?token=${T.token('Oldhost')}`, { mcpl: { version: '0.5', pushEvents: true } });
+    assert.match((await old.tool('whoami')).text, /does not advertise MCPL event coalescing/);
+    old.close();
+    const plain = await host(`ws://127.0.0.1:${T.port}/mcpl?token=${T.token('Plain')}`, { mcpl: null });
+    assert.match((await plain.tool('whoami')).text, /plain MCP: tools only/);
+    plain.close();
+  } finally { await T.close(); }
+});
