@@ -1,0 +1,62 @@
+{
+  "name": "archipelago-docs",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Live collaborative markdown documents for humans and agents: Archipelago identity, Google-Docs-style comments, network MCPL with RFC-006 coalescing.",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "npm run build:web && tsc -p tsconfig.json",
+    "build:web": "node scripts/build-web.mjs",
+    "start": "node dist/index.js",
+    "check": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p web/tsconfig.json",
+    "test": "tsx --test test/*.test.ts"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.11.1",
+    "diff": "^9.0.0",
+    "lib0": "^0.2.119",
+    "undici": "^7.30.0",
+    "ws": "^8.22.0",
+    "y-protocols": "^1.0.7",
+    "yjs": "^13.6.33"
+  },
+  "devDependencies": {
+    "@codemirror/autocomplete": "^6.20.3",
+    "@codemirror/commands": "^6.11.1",
+    "@codemirror/lang-css": "^6.3.1",
+    "@codemirror/lang-go": "^6.0.1",
+    "@codemirror/lang-html": "^6.4.12",
+    "@codemirror/lang-javascript": "^6.2.5",
+    "@codemirror/lang-json": "^6.0.2",
+    "@codemirror/lang-markdown": "^6.5.2",
+    "@codemirror/lang-python": "^6.2.1",
+    "@codemirror/lang-sql": "^6.10.0",
+    "@codemirror/lang-yaml": "^6.1.3",
+    "@codemirror/language": "^6.12.4",
+    "@codemirror/language-data": "^6.5.2",
+    "@codemirror/legacy-modes": "^6.5.4",
+    "@codemirror/search": "^6.7.2",
+    "@codemirror/state": "^6.7.6",
+    "@codemirror/view": "^6.43.13",
+    "@lezer/highlight": "^1.2.5",
+    "@lezer/markdown": "^1.7.2",
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/diff": "^7.0.2",
+    "@types/dompurify": "^3.0.5",
+    "@types/markdown-it": "^14.2.0",
+    "@types/node": "^20.19.43",
+    "@types/ws": "^8.18.2",
+    "codemirror": "^6.0.2",
+    "dompurify": "^3.4.16",
+    "esbuild": "^0.28.2",
+    "markdown-it": "^15.0.2",
+    "playwright": "1.62.1",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "y-codemirror.next": "^0.3.6"
+  }
+}

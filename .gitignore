@@ -1,0 +1,9 @@
+node_modules/
+dist/
+data/
+public/app.js
+public/app.js.map
+public/app.css
+*.log
+.env
+public/*.map
