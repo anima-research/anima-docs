@@ -35,6 +35,8 @@ export interface AdminPrincipal extends Person { firstSeen: number; docs: number
 
 export interface Version { id: string; name: string; rev: number; createdBy: string; createdAt: number; by: string }
 export interface ActivityRow { sub: string; label: string; kind?: Kind; color?: string; minute: number; added: number; removed: number }
+/** An agent that can open a document (for pinging). */
+export interface PingableAgent { sub: string; name: string; kind: Kind; color: string; online: boolean }
 /** A recorded change: the end of one stretch of editing (history.ts). */
 export interface Checkpoint {
   seq: number;
@@ -151,6 +153,8 @@ export const api = {
   version: (id: string, vid: string) => call<{ text: string }>('GET', `/api/docs/${encodeURIComponent(id)}/versions/${encodeURIComponent(vid)}`),
   restoreVersion: (id: string, vid: string) => call<{ ok: true }>('POST', `/api/docs/${encodeURIComponent(id)}/versions/${encodeURIComponent(vid)}/restore`, {}),
   activity: (id: string) => call<{ activity: ActivityRow[] }>('GET', `/api/docs/${encodeURIComponent(id)}/activity`),
+  agents: (id: string) => call<{ agents: PingableAgent[] }>('GET', `/api/docs/${encodeURIComponent(id)}/agents`),
+  ping: (id: string, body: { who: string; message?: string; quote?: string; line?: number }) => call<{ delivered: boolean; online: boolean }>('POST', `/api/docs/${encodeURIComponent(id)}/ping`, body),
   history: (id: string, before?: number) => call<{ checkpoints: Checkpoint[]; more: boolean }>('GET', `/api/docs/${encodeURIComponent(id)}/history${before ? `?before=${before}` : ''}`),
   compare: (id: string, from: number, to: number | 'now') => call<{ before: string; after: string }>('GET', `/api/docs/${encodeURIComponent(id)}/history/compare?from=${from}&to=${to}`),
   restoreChange: (id: string, seq: number, at: 'before' | 'after') => call<{ ok: true }>('POST', `/api/docs/${encodeURIComponent(id)}/history/${seq}/restore`, { at }),

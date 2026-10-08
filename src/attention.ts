@@ -263,7 +263,9 @@ export class Attention {
         }
       }
       if (st.comments !== 'off' && this.comments.lastSeq(docId) > base.commentSeq) {
-        const evs = this.comments.eventsSince(docId, base.commentSeq).filter((e) => e.actor !== s.sub && !(st.guests === 'off' && isGuest(e.actor)));
+        // Only what the digest would show: not your own, not what already reached you addressed.
+        const addressed = this.addressedReasons(s.sub);
+        const evs = this.comments.eventsSince(docId, base.commentSeq).filter((e) => this.digestable(s.sub, st, addressed, e));
         if (evs.length) {
           const acc = this.commentAccum(s.sub, docId);
           for (const e of evs) { acc.actors.add(e.actor); if (this.qualifies(st, e.actor)) acc.qualifying = true; }
@@ -558,18 +560,12 @@ export class Attention {
       const evs = this.comments.eventsSince(docId, since, 500);
       const last = evs.length ? evs[evs.length - 1].seq : since;
       this.saveBaseline(sub, docId, { commentSeq: last });
-      const addressed = new Map((this.db.prepare('SELECT comment_id, reason FROM addressed WHERE sub = ?').all(sub) as { comment_id: string; reason: string }[]).map((r) => [r.comment_id, r.reason]));
+      const addressed = this.addressedReasons(sub);
       const lines: string[] = [];
       const shownSuggestions = new Set<string>();
       const st = this.settings(sub, docId);
       for (const e of evs) {
-        if (e.actor === sub) continue;
-        if (st.guests === 'off' && isGuest(e.actor)) continue;
-        const reason = addressed.get(e.commentId);
-        if (reason && (e.kind === 'created' || e.kind === 'replied' || e.kind === 'edited')) continue;
-        // A decision reached you as a notice only if it was on your suggestion.
-        if (reason === 'decision' && (e.kind === 'accepted' || e.kind === 'rejected')) continue;
-        if (e.kind === 'edited' && e.commentId === e.threadId && this.comments.get(e.threadId)?.suggestion) continue; // revisions
+        if (!this.digestable(sub, st, addressed, e)) continue;
         const line = this.describeCommentEvent(e);
         if (line) { lines.push(line); if (e.kind === 'created') shownSuggestions.add(e.threadId); }
       }
@@ -579,6 +575,22 @@ export class Attention {
       return `Comment activity on “${doc.title}” (${docId}):\n` + shown.join('\n')
         + (lines.length > shown.length ? `\n… ${lines.length - shown.length} earlier items not shown (list_comments for everything).` : '');
     });
+  }
+
+  private addressedReasons(sub: string): Map<string, string> {
+    return new Map((this.db.prepare('SELECT comment_id, reason FROM addressed WHERE sub = ?').all(sub) as { comment_id: string; reason: string }[]).map((r) => [r.comment_id, r.reason]));
+  }
+
+  /** Does a comment event belong in `sub`'s digest (rather than being theirs, or having reached them addressed)? */
+  private digestable(sub: string, st: WatchSettings, addressed: Map<string, string>, e: CommentEvent): boolean {
+    if (e.actor === sub) return false;
+    if (st.guests === 'off' && isGuest(e.actor)) return false;
+    const reason = addressed.get(e.commentId);
+    if (reason && (e.kind === 'created' || e.kind === 'replied' || e.kind === 'edited')) return false;
+    // A decision reached you as a notice only if it was on your suggestion.
+    if (reason === 'decision' && (e.kind === 'accepted' || e.kind === 'rejected')) return false;
+    if (e.kind === 'edited' && e.commentId === e.threadId && this.comments.get(e.threadId)?.suggestion) return false; // revisions
+    return true;
   }
 
   private describeCommentEvent(e: CommentEvent): string | null {
@@ -608,6 +620,62 @@ export class Attention {
       case 'reopened': return `• ${who} reopened thread ${e.threadId}${on}`;
       case 'assigned': return root?.assignee ? `• ${who} assigned thread ${e.threadId}${on} to ${this.principals.label(root.assignee)}` : `• ${who} unassigned thread ${e.threadId}`;
     }
+  }
+
+  // ------------------------------------------------------------------ pings
+
+  private pings = new Map<string, number[]>();
+
+  /** Agents (and services) who can open a document, and whether each is connected now. */
+  pingable(docId: string): { sub: string; name: string; kind: string; color: string; online: boolean }[] {
+    return this.principals.list({ limit: 500 })
+      .filter((p) => (p.kind === 'agent' || p.kind === 'service') && p.role !== 'blocked' && this.access(p.sub, docId))
+      .map((p) => ({ sub: p.sub, name: p.name, kind: p.kind, color: p.color, online: this.live(p.sub).length > 0 }))
+      .sort((a, b) => Number(b.online) - Number(a.online) || a.name.localeCompare(b.name));
+  }
+
+  /**
+   * Someone asks an agent to look at a document: an addressed event (wakes
+   * by the agent's mentions setting), queued if it's offline. Repeated pings
+   * from the same person about the same document replace each other.
+   */
+  async ping(from: { sub: string; kind: string }, targetSub: string, docId: string, opts: { message?: string; quote?: string; line?: number } = {}):
+    Promise<{ delivered: boolean; online: boolean }> {
+    if (isGuest(from.sub)) throw new Fault(403, 'Sign in with Archipelago to ping agents.');
+    const target = this.principals.get(targetSub);
+    if (!target || (target.kind !== 'agent' && target.kind !== 'service')) throw new Fault(400, 'Only agents can be pinged; mention people in a comment instead.');
+    if (target.sub === from.sub) throw new Fault(400, 'You can’t ping yourself.');
+    const doc = this.docs.get(docId);
+    if (!doc || !this.access(from.sub, docId)) throw new Fault(404, `No document ${docId}.`);
+    if (!this.access(target.sub, docId)) throw new Fault(409, `${target.name} can’t open this document. Share it with them first.`);
+    // At most 6 pings a person per agent per 10 minutes, 30 a person per hour.
+    const now = Date.now();
+    const pair = `${from.sub}\0${target.sub}`, mine = `${from.sub}\0*`;
+    const recentPair = (this.pings.get(pair) ?? []).filter((t) => now - t < 600_000);
+    const recentAll = (this.pings.get(mine) ?? []).filter((t) => now - t < 3600_000);
+    if (recentPair.length >= 6 || recentAll.length >= 30) throw new Fault(429, `You’ve pinged ${recentPair.length >= 6 ? target.name : 'agents'} a lot just now. Give them a moment.`);
+    this.pings.set(pair, [...recentPair, now]);
+    this.pings.set(mine, [...recentAll, now]);
+    if (this.pings.size > 5000) for (const [k, v] of this.pings) if (!v.some((t) => now - t < 3600_000)) this.pings.delete(k);
+    const message = String(opts.message ?? '').trim().slice(0, 2000);
+    const quote = String(opts.quote ?? '').trim().slice(0, 1000);
+    const st = this.settings(target.sub, docId);
+    const wake = st.mentions === 'wake' && !this.quietNow(st);
+    const who = this.principals.label(from.sub);
+    const lines = [`${who} pinged you about “${doc.title}” (${docId})${message ? ':' : ' and asks you to take a look.'}`];
+    if (message) lines.push(...message.split('\n').map((l) => `  ${l}`));
+    if (quote) lines.push(`  about${opts.line ? ` line ${opts.line}` : ''}: “${clip(quote, 600)}”`);
+    lines.push(`Read it with read_document {"document":"${docId}"}${quote ? ` (section or from_line to see the part they mean)` : ''}. Answer in the document (a comment, a suggestion or an edit): a reply in plain prose has nowhere to go.`);
+    const sessions = this.live(target.sub);
+    const params: PushParams = {
+      featureSet: FEATURE_SET, eventId: eventId('png'), timestamp: iso(),
+      tags: ['docs:ping', 'chat:mention', 'chat:addressed', from.kind === 'agent' || from.kind === 'service' ? 'chat:from-agent' : 'chat:from-human', wake ? 'docs:wake' : 'docs:quiet'],
+      origin: { documentId: docId, title: doc.title, by: from.sub, byName: this.principals.get(from.sub)?.name },
+      coalesce: { key: `ping:${docId}:${from.sub}` },
+      payload: { content: [{ type: 'text', text: lines.join('\n') }] },
+    };
+    const delivered = await this.sendOrQueue(target.sub, params, docId);
+    return { delivered, online: sessions.length > 0 };
   }
 
   // ------------------------------------------------------------------ suggestions

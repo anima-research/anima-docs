@@ -4,12 +4,14 @@
 // Alice types in stretches (the server runs with short checkpoint timings),
 // so the Activity panel lists several changes. She opens one and sees its
 // diff, undoes a single change while later ones stay, compares a range, and
-// restores the document to before it. Screenshots go to HISTORY_SHOTS.
+// restores the document to before it. Then she pings a connected agent about
+// the selected text. Screenshots go to HISTORY_SHOTS.
 //
 //   npm run build:web && node scripts/ui-history.mjs
 //   env: HISTORY_PORT (7369), HISTORY_SHOTS ($TMPDIR/anima-docs-history-shots), SMOKE_HEADED=1
 
 import { chromium } from 'playwright';
+import WebSocket from 'ws';
 import { spawn } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -219,6 +221,43 @@ try {
     await alice.locator('.side-panel.open').getByRole('tab', { name: 'By person' }).click();
     await alice.locator('.side-panel.open .activity-person', { hasText: 'Alice Chen' }).waitFor();
     await shot(alice, '04-after-restore');
+  });
+
+  await step('Alice pings a connected agent about the selected text; it arrives as an addressed event', async () => {
+    const mint = await fetch(`${ORIGIN}/dev/token`, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: ORIGIN }, body: JSON.stringify({ name: 'Quill', kind: 'agent' }) }).then((r) => r.json());
+    // A minimal MCPL host for the agent, so it is online and receives pushes.
+    const ws = new WebSocket(`ws://localhost:${PORT}/mcpl?token=${encodeURIComponent(mint.token)}`);
+    const pushes = []; const wait = new Map(); let id = 0;
+    ws.on('message', (raw) => {
+      const m = JSON.parse(raw.toString());
+      if (m.method === 'push/event') { pushes.push(m.params); ws.send(JSON.stringify({ jsonrpc: '2.0', id: m.id, result: { accepted: true } })); return; }
+      if (wait.has(m.id)) { wait.get(m.id)(m); wait.delete(m.id); }
+    });
+    await new Promise((r, j) => { ws.once('open', r); ws.once('error', j); });
+    const call = (method, params = {}) => new Promise((r) => { const i = ++id; wait.set(i, r); ws.send(JSON.stringify({ jsonrpc: '2.0', id: i, method, params })); });
+    try {
+      await call('initialize', { protocolVersion: '2024-11-05', clientInfo: { name: 'ui', version: '0' }, capabilities: { experimental: { mcpl: { version: '0.5', pushEvents: true } } } });
+      ws.send(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }));
+      await call('featureSets/update', { effectiveCapabilities: ['tools', 'pushEvents'] });
+      const shared = await alice.evaluate((i) => fetch(`/api/docs/${i}/share`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ who: '@Quill', role: 'viewer' }) }).then((r) => r.ok), docId);
+      assert(shared, 'shared with Quill');
+      await selectInEditor(alice, 'The river was high.');
+      await alice.locator('.ping-btn').click();
+      const dlg = alice.locator('dialog.ping-dialog');
+      const row = dlg.locator('.ping-agent', { hasText: 'Quill' });
+      await row.locator('.ping-state.online').waitFor();
+      await row.click();
+      await dlg.getByLabel('Message').fill('Can you check the river line?');
+      await shot(alice, '05-ping-dialog');
+      await dlg.getByRole('button', { name: 'Ping', exact: true }).click();
+      await alice.locator('.toast', { hasText: 'Pinged Quill' }).waitFor();
+      for (let i = 0; i < 100 && !pushes.some((p) => p.tags.includes('docs:ping')); i++) await sleep(30);
+      const p = pushes.find((x) => x.tags.includes('docs:ping'));
+      assert(p, `ping push arrived: ${JSON.stringify(pushes.map((x) => x.tags))}`);
+      const text = p.payload.content[0].text;
+      assert(/Alice Chen.* pinged you about “Field notes”/.test(text) && text.includes('Can you check the river line?') && text.includes('about line 3: “The river was high.”'), text);
+      assert(p.tags.includes('docs:wake'), 'it wakes the agent');
+    } finally { ws.close(); }
   });
 
   await step('no uncaught errors in any page', async () => {

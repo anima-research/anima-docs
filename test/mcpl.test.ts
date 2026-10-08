@@ -237,3 +237,70 @@ test('whoami carries a connection guide tailored to what the host declared', asy
     plain.close();
   } finally { await T.close(); }
 });
+
+test('reconnect catch-up skips comment activity that already reached the agent addressed', async () => {
+  const ada = human('AdaRC');
+  let h = await rawHost(url(S.token('Catcher')));
+  const d = S.app.docs.create(ada, 'Catch', 'text here\n');
+  S.app.docs.share(d.id, ada, 'agent:catcher@test.local', 'editor');
+  await h.tool('read_document', { document: d.id });
+  await h.tool('watch', { document: d.id, comments: 'wake', edits: 'quiet', from: 'anyone' });
+  const started = await h.tool('add_comment', { document: d.id, quote: 'text', text: 'a question' });
+  const thread = /thread (c\w+)/.exec(started.text)![1];
+  h.close();
+  await sleep(50);
+  // While away: a reply in the agent's thread (it waits in the outbox as an addressed event).
+  S.app.comments.reply(thread, ada as any, 'an answer');
+  await sleep(100);
+  h = await rawHost(url(S.token('Catcher')));
+  try {
+    await until(() => h.pushes.some((p) => p.tags.includes('chat:reply')), 'the addressed reply arrives');
+    await sleep(300);
+    assert.equal(h.pushes.filter((p) => p.tags.includes('docs:comment') && !p.tags.includes('chat:addressed')).length, 0,
+      `no empty digest: ${JSON.stringify(h.pushes.map((p) => p.tags))}`);
+  } finally { h.close(); }
+});
+
+test('ping: a person asks an agent to look; online it wakes, offline it waits; people and agents without access are refused; rate-limited', async () => {
+  const exch = async (name: string) => {
+    const r = await fetch(`${S.base}/auth/login`, { redirect: 'manual' });
+    const login = /docs_login=([^;]+)/.exec(r.headers.get('set-cookie') ?? '')![1];
+    const ex = await fetch(`${S.base}/auth/exchange`, { method: 'POST', headers: { 'content-type': 'application/json', cookie: `docs_login=${login}`, origin: S.base }, body: JSON.stringify({ token: S.iss.mint(name, 'human', 'docs') }) });
+    return `docs_session=${/docs_session=([^;]+)/.exec(ex.headers.get('set-cookie') ?? '')![1]}`;
+  };
+  const cookie = await exch('PingAnn');
+  const call = (method: string, path: string, body?: unknown, c = cookie) => fetch(`${S.base}${path}`, { method, headers: { cookie: c, origin: S.base, 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined }).then(async (r) => ({ status: r.status, json: await r.json() }));
+  const ann = S.app.principals.get('human:test:pingann')!;
+  const d = S.app.docs.create(ann as any, 'Ping me', 'one\ntwo\nthree\n');
+  const host = await rawHost(url(S.token('Pingee')));
+  try {
+    S.app.docs.share(d.id, ann as any, 'agent:pingee@test.local', 'viewer');
+    S.app.principals.admit({ sub: 'agent:stranger@test.local', name: 'Stranger', kind: 'agent', issuer: 'test.local', scopes: [], claims: {}, exp: Date.now() / 1000 + 3600 }, 'mcpl');
+    const list = await call('GET', `/api/docs/${d.id}/agents`);
+    assert.deepEqual(list.json.agents.map((a: any) => [a.name, a.online]), [['Pingee', true]]);
+    host.pushes.length = 0;
+    const r = await call('POST', `/api/docs/${d.id}/ping`, { who: 'agent:pingee@test.local', message: 'Is line two right?', quote: 'two', line: 2 });
+    assert.equal(r.status, 200, JSON.stringify(r.json));
+    assert.deepEqual(r.json, { delivered: true, online: true });
+    const p = host.pushes.find((x) => x.tags.includes('docs:ping'));
+    assert.ok(p && p.tags.includes('docs:wake') && p.tags.includes('chat:addressed') && p.tags.includes('chat:from-human'));
+    assert.match(p.payload.content[0].text, /PingAnn.* pinged you about “Ping me”[\s\S]*Is line two right\?[\s\S]*about line 2: “two”/);
+    // Refusals: someone without access, a person, a guest.
+    assert.equal((await call('POST', `/api/docs/${d.id}/ping`, { who: 'agent:stranger@test.local' })).status, 409);
+    assert.equal((await call('POST', `/api/docs/${d.id}/ping`, { who: 'human:test:pingann' })).status, 400);
+    // Offline: queued, delivered on reconnect.
+    host.close();
+    await sleep(50);
+    const off = await call('POST', `/api/docs/${d.id}/ping`, { who: 'agent:pingee@test.local' });
+    assert.deepEqual(off.json, { delivered: false, online: false });
+    const back = await rawHost(url(S.token('Pingee')));
+    try {
+      await until(() => back.pushes.some((x) => x.tags.includes('docs:ping')), 'queued ping delivered');
+      assert.match(back.pushes.find((x) => x.tags.includes('docs:ping')).payload.content[0].text, /asks you to take a look/);
+    } finally { back.close(); }
+    // Rate limit: six per agent per ten minutes.
+    const statuses: number[] = [];
+    for (let i = 0; i < 6; i++) statuses.push((await call('POST', `/api/docs/${d.id}/ping`, { who: 'agent:pingee@test.local' })).status);
+    assert.ok(statuses.includes(429), statuses.join(','));
+  } finally { host.close(); }
+});

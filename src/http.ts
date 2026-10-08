@@ -426,6 +426,24 @@ export function createHttp(app: App) {
             send(200, { activity: app.docs.activity(id, Date.now() - 30 * 86400_000).map((r) => ({ ...r, label: P.label(r.sub), kind: P.get(r.sub)?.kind, color: P.get(r.sub)?.color })) });
             return;
           }
+          // ---------------------------------------------------------- pings
+          if (rest === '/agents' && method === 'GET') {
+            app.docs.require(id, a, 'commenter');
+            send(200, { agents: app.attention.pingable(id) });
+            return;
+          }
+          if (rest === '/ping' && method === 'POST') {
+            app.docs.require(id, a, 'commenter');
+            const b = await json(req);
+            const r = await app.attention.ping({ sub: a.sub, kind: a.kind }, String(b.who ?? ''), id, {
+              message: typeof b.message === 'string' ? b.message : undefined,
+              quote: typeof b.quote === 'string' ? b.quote : undefined,
+              line: Number.isInteger(b.line) ? b.line : undefined,
+            });
+            send(200, r);
+            return;
+          }
+
           // ---------------------------------------------------------- history (automatic checkpoints)
           if (rest === '/history' && method === 'GET') {
             app.docs.require(id, a, 'viewer');

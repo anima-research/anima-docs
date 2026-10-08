@@ -32,6 +32,7 @@ export const FEATURE_SETS: Record<FeatureSet, { description: string; uses: strin
         'docs:edit': { desc: 'Document text changed; rendered as an attributed diff since the recipient last looked.' },
         'docs:comment': { desc: 'Comment activity.' },
         'docs:assigned': { desc: 'A comment thread was assigned to the recipient.', implies: ['chat:addressed'] },
+        'docs:ping': { desc: 'Someone asked the recipient to look at a document (a ping from the web page), with an optional message and quoted text.', implies: ['chat:addressed'] },
         'docs:suggestion': { desc: 'Suggested edits on a document the recipient owns, awaiting their decision; or a decision (accepted / rejected) on the recipient\'s own suggestions.', implies: ['chat:addressed'] },
         'docs:share': { desc: 'A document was shared with (or unshared from) the recipient.' },
         'docs:from-guest': { desc: 'Activity by a guest: someone who opened an "anyone with the link" share link without signing in. Never wakes unless the recipient set guests: wake.' },
@@ -293,6 +294,7 @@ export class McplSession implements AgentSession {
     return [
       'What reaches you (feature set docs.watch):',
       '- Addressed to you: an @mention, a thread assigned to you, or a reply in a thread you started or joined. One event per comment: an edit replaces it, a deletion withdraws it. These come without watching anything; offline, they wait for you.',
+      '- Pings (docs:ping): someone asks you to look at a document, maybe with a message and the text they mean. They wake you by your mentions setting; answer in the document.',
       '- Suggestions (docs:suggestion): when someone suggests edits on a document you own, one event per burst (after they pause) lists the changes; you accept_suggestion or reject_suggestion. When your own suggestions are decided, you hear that too. To change a document that isn\'t yours, use suggest_edit: the owner reviews it.',
       '- Documents you watch: edits arrive as one diff per document of what others changed since you last looked (never your own edits), with authors and section names. Comment activity arrives as a digest. A full read_document counts as looking.',
       '- Documents shared with you: a short notice.',

@@ -1138,3 +1138,16 @@ dialog.busy .dialog-body { opacity: 0.75; }
 .dl-fold:hover { background: var(--hover); }
 .diff-empty { margin: 0; padding: 24px; color: var(--text-3); text-align: center; }
 .btn.danger-outline { color: var(--danger); }
+
+/* ---------------------------------------------------------------- ping an agent */
+.ping-agents { display: flex; flex-direction: column; gap: 2px; max-height: 280px; overflow: auto; margin: 0 -6px; }
+.ping-agent { display: flex; align-items: center; gap: 10px; padding: 7px 8px; border: 1px solid transparent; border-radius: 10px; background: none; color: var(--text); font: inherit; text-align: left; cursor: pointer; }
+.ping-agent:hover { background: var(--hover); }
+.ping-agent.on { background: var(--accent-soft); border-color: var(--accent-line); }
+.ping-name { flex: 1; font-weight: 600; }
+.ping-state { font-size: 12px; color: var(--text-3); }
+.ping-state.online { color: var(--success); }
+.ping-state.online::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 5px; border-radius: 50%; background: var(--success); vertical-align: 1px; }
+.ping-quote { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; color: var(--text-2); cursor: pointer; }
+.ping-quote .card-quote { margin: 6px 0 0; }
+@media (max-width: 900px) { .ping-btn .btn-label { display: none; } }

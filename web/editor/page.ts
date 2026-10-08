@@ -30,6 +30,7 @@ import { openShareDialog } from './share';
 import { SidePanel } from './panels';
 import { formatKeymap, insertBlock, insertLink, insertRule, insertTable, lineKindAt, selectedText, setLineKind, toggleCodeBlock, toggleInline, type LineKind } from './commands';
 import { SuggestSession, sharedCoords, suggestionOverlays, type Coords } from './suggest';
+import { openPingDialog } from './ping';
 
 type Mode = 'edit' | 'split' | 'preview';
 const MAX_IMAGE = 15 * 1024 * 1024;
@@ -173,6 +174,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   const ownerEl = h('span.doc-owner');
   const presenceEl = h('div.presence', { 'aria-label': 'People in this document' });
   const commentsCount = h('span.count-badge', { hidden: true });
+  const pingBtn = h('button.btn.ghost.ping-btn', { type: 'button', 'aria-label': 'Ping an agent', 'data-tip': 'Ask an agent to look at this', onclick: () => pingAgent() }, icon('bell', 18), h('span.btn-label', null, 'Ping'));
   const commentsBtn = h('button.btn.ghost.comments-btn', { type: 'button', 'aria-label': 'Show all comments', 'data-tip': 'All comments', onclick: () => toggleList() }, icon('comment', 18), h('span.btn-label', null, 'Comments'), commentsCount);
   const modeBtns = (['edit', 'split', 'preview'] as Mode[]).map((m) => h('button.seg-btn', {
     type: 'button', role: 'radio', 'data-mode': m, 'aria-label': m === 'edit' ? 'Edit mode' : m === 'split' ? 'Split view' : 'Preview mode',
@@ -186,7 +188,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   const header = h('header.doc-header', null,
     h('a.doc-home', { href: '/', 'data-link': '', 'aria-label': 'All documents', 'data-tip': 'All documents' }, icon('file', 22)),
     h('div.doc-titlebox', null, titleInput, h('div.doc-subline', null, rolePill, ownerEl, statusEl)),
-    h('div.doc-header-right', null, presenceEl, commentsBtn, modeSwitch, shareSlot, moreBtn, userMenuButton(me, { compact: true })));
+    h('div.doc-header-right', null, presenceEl, guest ? null : pingBtn, commentsBtn, modeSwitch, shareSlot, moreBtn, userMenuButton(me, { compact: true })));
 
   // ------------------------------------------------------------------ toolbar
 
@@ -399,6 +401,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     app.classList.toggle('can-edit', canEdit());
     app.classList.toggle('can-comment', atLeast(role, 'commenter'));
     commentTool.hidden = !atLeast(role, 'commenter');
+    pingBtn.hidden = !atLeast(role, 'commenter');
     rail.refreshPermissions();
     if (announce && prev !== next) {
       toast(h('span', null, 'Your access changed to ', h('strong', null, ROLE_LABEL[next].toLowerCase()), '.'), { kind: atLeast(next, prev) ? 'success' : 'info' });
@@ -701,12 +704,20 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
       { label: 'Activity', icon: 'activity', onSelect: () => openPanel('activity') },
     ];
     if (atLeast(role, 'commenter')) items.push({ label: 'Comment on whole document', icon: 'comment', onSelect: () => void rail.commentOnDocument() });
+    if (atLeast(role, 'commenter') && !guest) items.push({ label: 'Ping an agent…', icon: 'bell', onSelect: () => pingAgent() });
     items.push('separator',
       { label: 'Download as Markdown (.md)', icon: 'download', onSelect: () => { const a = h('a', { href: api.exportUrl(docId), download: '' }); document.body.append(a); a.click(); a.remove(); } },
       // A guest's /d/ address opens only for them: there's nothing useful to copy.
       ...(guest ? [] : [{ label: 'Copy link', icon: 'link', onSelect: () => { void navigator.clipboard.writeText(`${location.origin}/d/${docId}`).then(() => toast('Link copied', { kind: 'success', timeout: 2000 }), () => toast(`${location.origin}/d/${docId}`)); } }]));
     if (atLeast(role, 'owner')) items.push('separator', { label: 'Delete document', icon: 'trash', danger: true, onSelect: () => void deleteDoc() });
     return items;
+  }
+
+  /** Ask an agent to look at this document (about the selection, if any). */
+  function pingAgent(preselect?: string) {
+    const sel = view.state.selection.main;
+    const selection = sel.empty ? null : { text: view.state.sliceDoc(sel.from, sel.to), line: view.state.doc.lineAt(sel.from).number };
+    openPingDialog({ docId, selection, preselect });
   }
 
   function openPanel(kind: 'versions' | 'activity') {
