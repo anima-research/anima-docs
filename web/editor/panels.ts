@@ -1,6 +1,8 @@
-// Side panels: version history and activity.
+// Side panels: version history and activity (recorded changes, with diffs,
+// restore and undo; and editing by person).
 
-import { api, atLeast, type ActivityRow, type Role, type Version } from '../lib/api';
+import { api, atLeast, type ActivityRow, type Checkpoint, type Role, type Version } from '../lib/api';
+import { renderDiff } from './diffview';
 import { h } from '../lib/dom';
 import { icon } from '../lib/icons';
 import { clockTime, dayLabel, fullTime, relTime } from '../lib/format';
@@ -16,6 +18,12 @@ export class SidePanel {
   private titleEl: HTMLElement;
   kind: PanelKind | null = null;
   onClose: () => void = () => {};
+  private tab: 'changes' | 'people' = 'changes';
+  private checkpoints: Checkpoint[] = [];
+  private moreHistory = false;
+  private activityRows: ActivityRow[] = [];
+  private comparing = false;
+  private picked: Checkpoint[] = [];
 
   constructor(private deps: { docId: string; role: () => Role | null; title: () => string }) {
     this.titleEl = h('h2');
@@ -31,6 +39,7 @@ export class SidePanel {
     this.el.setAttribute('aria-hidden', 'false');
     this.el.setAttribute('aria-label', kind === 'versions' ? 'Version history' : 'Activity');
     this.titleEl.textContent = kind === 'versions' ? 'Version history' : 'Activity';
+    this.comparing = false;
     void this.refresh();
   }
 
@@ -48,7 +57,14 @@ export class SidePanel {
     this.bodyEl.replaceChildren(h('div.side-loading', null, spinner(22)));
     try {
       if (kind === 'versions') this.renderVersions((await api.versions(this.deps.docId)).versions);
-      else this.renderActivity((await api.activity(this.deps.docId)).activity);
+      else {
+        const [hist, act] = await Promise.all([api.history(this.deps.docId), api.activity(this.deps.docId)]);
+        this.checkpoints = hist.checkpoints;
+        this.moreHistory = hist.more;
+        this.activityRows = act.activity;
+        this.picked = [];
+        this.renderActivityPanel();
+      }
     } catch (e) {
       this.bodyEl.replaceChildren(emptyState({ title: 'Couldn’t load', text: errorMessage(e), action: h('button.btn', { type: 'button', onclick: () => void this.refresh() }, 'Try again') }));
     }
@@ -136,10 +152,137 @@ export class SidePanel {
 
   // ------------------------------------------------------------------ activity
 
-  private renderActivity(rows: ActivityRow[]) {
+  private renderActivityPanel() {
+    const tabs = h('div.seg.activity-tabs', { role: 'tablist', 'aria-label': 'Activity view' },
+      ...([['changes', 'Changes'], ['people', 'By person']] as const).map(([k, label]) => h('button.seg-btn', {
+        type: 'button', role: 'tab', 'aria-selected': String(this.tab === k), class: this.tab === k ? 'on' : '',
+        onclick: () => { this.tab = k; this.renderActivityPanel(); },
+      }, label)));
+    const content = this.tab === 'changes' ? this.renderChanges() : this.renderActivity(this.activityRows);
+    this.bodyEl.replaceChildren(tabs, content);
+  }
+
+  // ------------------------------------------------------------------ changes (recorded checkpoints)
+
+  private renderChanges(): HTMLElement {
+    const wrap = h('div.changes');
+    const edits = this.checkpoints.filter((c) => !c.baseline);
+    const bar = h('div.changes-bar');
+    if (this.comparing) {
+      const n = this.picked.length;
+      bar.append(
+        h('span.changes-hint', null, n === 0 ? 'Pick the first and last change to compare.' : n === 1 ? 'Now pick the other end.' : 'Ready to compare.'),
+        h('button.btn.primary.sm', { type: 'button', disabled: n !== 2, onclick: () => { const [a, b] = [...this.picked].sort((x, y) => x.seq - y.seq); this.comparing = false; this.picked = []; this.renderActivityPanel(); void this.openDiff(a, b); } }, 'Compare'),
+        h('button.btn.ghost.sm', { type: 'button', onclick: () => { this.comparing = false; this.picked = []; this.renderActivityPanel(); } }, 'Cancel'));
+    } else {
+      bar.append(h('span.changes-hint', null, 'Each stretch of editing, newest first. Open one to see what changed.'));
+      if (edits.length > 1) bar.append(h('button.btn.ghost.sm', { type: 'button', onclick: () => { this.comparing = true; this.picked = []; this.renderActivityPanel(); } }, icon('columns', 15), 'Compare'));
+      bar.append(h('button.icon-btn.sm', { type: 'button', 'aria-label': 'Refresh', 'data-tip': 'Refresh', onclick: () => void this.refresh() }, icon('reopen', 16)));
+    }
+    wrap.append(bar);
+    if (!edits.length) {
+      wrap.append(emptyState({ art: icon('history', 34, 'empty-art-icon'), title: 'No recorded changes yet', text: 'From now on, every stretch of editing is recorded here: who changed what, with a diff you can open, restore or undo.' }));
+      return wrap;
+    }
+    const list = h('ol.change-list');
+    let day = '';
+    for (const c of this.checkpoints) {
+      const d = dayLabel(c.start);
+      if (d !== day) { day = d; list.append(h('li.change-day', null, d)); }
+      if (c.baseline) {
+        list.append(h('li.change-start', null, icon('history', 14), `Recording began ${clockTime(c.end)}. Earlier edits are summed up under By person.`));
+        continue;
+      }
+      const picked = this.picked.some((p) => p.seq === c.seq);
+      const names = c.authors.map((a) => a.name).join(', ') || 'Someone';
+      const when = c.end - c.start >= 60_000 ? `${clockTime(c.start)}–${clockTime(c.end)}` : clockTime(c.end);
+      const row = h('button.change-row', {
+        type: 'button', class: picked ? 'picked' : '', 'aria-pressed': this.comparing ? String(picked) : undefined,
+        title: `${fullTime(c.start)} – ${fullTime(c.end)}`,
+        onclick: () => {
+          if (!this.comparing) { void this.openDiff(c, c); return; }
+          if (picked) this.picked = this.picked.filter((p) => p.seq !== c.seq);
+          else this.picked = [...this.picked.slice(-1), c];
+          this.renderActivityPanel();
+        },
+      },
+      h('span.change-avatars', null, ...c.authors.slice(0, 3).map((a) => avatar({ name: a.name, color: a.color, kind: a.kind }, 22))),
+      h('span.change-main', null,
+        h('span.change-who', null, names, ...c.authors.filter((a) => a.kind !== 'human').slice(0, 1).map((a) => kindBadge(a.kind))),
+        h('span.change-meta', null, when, c.label ? h('span.change-label', null, ' · ', this.labelText(c.label)) : null)),
+      h('span.change-delta', null, c.added ? h('span.add', null, `+${c.added.toLocaleString()}`) : null, c.removed ? h('span.del', null, ` −${c.removed.toLocaleString()}`) : null));
+      list.append(h('li', null, row));
+    }
+    wrap.append(list);
+    if (this.moreHistory) {
+      const more: HTMLButtonElement = h('button.btn.ghost.sm.changes-more', { type: 'button', onclick: async () => {
+        more.disabled = true;
+        try {
+          const r = await api.history(this.deps.docId, this.checkpoints[this.checkpoints.length - 1].seq);
+          this.checkpoints = [...this.checkpoints, ...r.checkpoints];
+          this.moreHistory = r.more;
+          this.renderActivityPanel();
+        } catch (e) { toast(errorMessage(e), { kind: 'error' }); more.disabled = false; }
+      } }, 'Show earlier changes');
+      wrap.append(more);
+    }
+    return wrap;
+  }
+
+  /** "Undid h12" → "Undid the change at 3:04 PM" (agents see the ids; people see times). */
+  private labelText(label: string): string {
+    return label.replace(/\bh(\d+)\b/g, (_m, n) => {
+      const c = this.checkpoints.find((x) => x.seq === Number(n));
+      return c ? `the change at ${clockTime(c.start)}` : 'an earlier change';
+    });
+  }
+
+  /** The diff of one change (from = to) or a range, with ways back. */
+  private async openDiff(from: Checkpoint, to: Checkpoint | 'now') {
+    const single = to !== 'now' && from.seq === to.seq;
+    const canEdit = atLeast(this.deps.role(), 'editor');
+    const names = (cs: Checkpoint[]) => [...new Set(cs.flatMap((c) => c.authors.map((a) => a.name)))].join(', ') || 'someone';
+    const span = to === 'now' ? this.checkpoints.filter((c) => c.seq >= from.seq) : this.checkpoints.filter((c) => c.seq >= from.seq && c.seq <= to.seq);
+    const edits = span.filter((c) => !c.baseline);
+    const title = single
+      ? h('span', null, `Change by ${names([from])}`, h('span.dialog-sub', null, ` · ${dayLabel(from.start)}, ${clockTime(from.start)}${from.end - from.start >= 60_000 ? `–${clockTime(from.end)}` : ''}${from.label ? ` · ${this.labelText(from.label)}` : ''}`))
+      : h('span', null, to === 'now' ? `Changes since ${dayLabel(from.start)}, ${clockTime(from.start)}` : `${edits.length} changes`,
+        h('span.dialog-sub', null, ` · ${to === 'now' ? 'up to now' : dayLabel(from.start) === dayLabel(to.end) ? `${dayLabel(from.start)}, ${clockTime(from.start)}–${clockTime(to.end)}` : `${dayLabel(from.start)}, ${clockTime(from.start)} – ${dayLabel(to.end)}, ${clockTime(to.end)}`} · by ${names(edits)}`));
+    const stats = h('div.diff-stats');
+    const body = h('div.diff-body', null, h('div.side-loading', null, spinner(22)));
+    const act = (label: string, run: () => Promise<unknown>, confirm: { title: string; message: string; label: string; done: string; danger?: boolean }) =>
+      h('button.btn', { type: 'button', class: confirm.danger ? 'danger-outline' : '', onclick: async () => {
+        if (!(await confirmDialog({ title: confirm.title, message: confirm.message, confirmLabel: confirm.label }))) return;
+        try { await run(); toast(confirm.done, { kind: 'success' }); d.close(); void this.refresh(); } catch (e) { toast(errorMessage(e), { kind: 'error', timeout: 9000 }); }
+      } }, label);
+    const last = to === 'now' ? null : to;
+    const footer: (HTMLElement | null)[] = [
+      single ? h('button.btn.ghost', { type: 'button', onclick: () => { d.close(); void this.openDiff(from, 'now'); } }, 'Compare with now') : null,
+      h('span.spacer'),
+      canEdit && single ? act('Undo this change', () => api.undoChange(this.deps.docId, from.seq),
+        { title: 'Undo this change?', message: 'Only this change is taken out; edits made since stay. Everyone sees it live, and it is recorded as a new change you can undo too.', label: 'Undo change', done: 'Change undone' }) : null,
+      canEdit ? act(single ? 'Restore to before' : 'Restore to start', () => api.restoreChange(this.deps.docId, from.seq, 'before'),
+        { title: 'Restore the earlier state?', message: `The document goes back to how it was just before ${single ? 'this change' : 'these changes'}; everything after is taken out. It is recorded as a new change, so you can come back.`, label: 'Restore', done: 'Restored' }) : null,
+      canEdit && last ? act(single ? 'Restore to after' : 'Restore to end', () => api.restoreChange(this.deps.docId, last.seq, 'after'),
+        { title: 'Restore this state?', message: `The document goes back to how it was just after ${single ? 'this change' : 'the last of these changes'}; later edits are taken out. It is recorded as a new change, so you can come back.`, label: 'Restore', done: 'Restored' }) : null,
+      h('button.btn.ghost', { type: 'button', onclick: () => d.close() }, 'Close'),
+    ];
+    const d = openDialog({ title, size: 'xl', className: 'diff-dialog', body: h('div', null, stats, body), footer: footer.filter(Boolean) as HTMLElement[] });
+    try {
+      const r = await api.compare(this.deps.docId, from.seq, to === 'now' ? 'now' : to.seq);
+      const view = renderDiff(r.before, r.after);
+      stats.replaceChildren(...(view.same ? [] : [h('span.add', null, `+${view.added} line${view.added === 1 ? '' : 's'}`), h('span.del', null, `−${view.removed} line${view.removed === 1 ? '' : 's'}`)]));
+      body.replaceChildren(view.el);
+    } catch (e) {
+      body.replaceChildren(emptyState({ title: 'Couldn’t load this change', text: errorMessage(e) }));
+    }
+  }
+
+  // ------------------------------------------------------------------ by person
+
+  private renderActivity(rows: ActivityRow[]): HTMLElement {
     if (!rows.length) {
-      this.bodyEl.replaceChildren(emptyState({ art: icon('activity', 34, 'empty-art-icon'), title: 'No edits in the last 30 days', text: 'Edits by people and agents show up here, grouped by who made them.' }));
-      return;
+      return emptyState({ art: icon('activity', 34, 'empty-art-icon'), title: 'No edits in the last 30 days', text: 'Edits by people and agents show up here, grouped by who made them.' });
     }
     // Group by person; within a person, merge minutes into sessions (gaps under 15 minutes).
     const byPerson = new Map<string, { row: ActivityRow; rows: ActivityRow[]; added: number; removed: number; last: number }>();
@@ -172,6 +315,6 @@ export class SidePanel {
             h('span.as-delta', null, s.added ? h('span.add', null, `+${s.added.toLocaleString()}`) : null, s.removed ? h('span.del', null, ` −${s.removed.toLocaleString()}`) : null));
         }), sessions.length > 12 ? h('li.as-more', null, `and ${sessions.length - 12} earlier sessions`) : null)));
     }
-    this.bodyEl.replaceChildren(h('p.side-note', null, 'Edits in the last 30 days, by person or agent.'), list);
+    return h('div', null, h('p.side-note', null, 'Edits in the last 30 days, by person or agent.'), list);
   }
 }

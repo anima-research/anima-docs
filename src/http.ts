@@ -66,9 +66,9 @@ function guestAllowed(method: string, path: string): boolean {
   const m = /^\/api\/docs\/[A-Za-z0-9]+(\/.*)?$/.exec(path);
   if (!m) return false;
   const rest = m[1] ?? '';
-  if (method === 'GET') return rest === '' || rest === '/versions' || /^\/versions\/[a-z0-9]+$/.test(rest) || rest === '/activity' || rest === '/export.md';
+  if (method === 'GET') return rest === '' || rest === '/versions' || /^\/versions\/[a-z0-9]+$/.test(rest) || rest === '/activity' || rest === '/history' || rest === '/history/compare' || rest === '/export.md';
   // Editors through a link may rename, name versions and restore them, as any editor can.
-  return (method === 'PATCH' && rest === '') || (method === 'POST' && (rest === '/versions' || /^\/versions\/[a-z0-9]+\/restore$/.test(rest)));
+  return (method === 'PATCH' && rest === '') || (method === 'POST' && (rest === '/versions' || /^\/versions\/[a-z0-9]+\/restore$/.test(rest) || /^\/history\/\d+\/(restore|undo)$/.test(rest)));
 }
 
 async function readBody(req: IncomingMessage, limit = 1024 * 1024): Promise<Buffer> {
@@ -424,6 +424,34 @@ export function createHttp(app: App) {
           if (rest === '/activity' && method === 'GET') {
             app.docs.require(id, a, 'viewer');
             send(200, { activity: app.docs.activity(id, Date.now() - 30 * 86400_000).map((r) => ({ ...r, label: P.label(r.sub), kind: P.get(r.sub)?.kind, color: P.get(r.sub)?.color })) });
+            return;
+          }
+          // ---------------------------------------------------------- history (automatic checkpoints)
+          if (rest === '/history' && method === 'GET') {
+            app.docs.require(id, a, 'viewer');
+            const before = Number(url.searchParams.get('before') ?? '') || undefined;
+            const limit = Math.min(200, Number(url.searchParams.get('limit') ?? '') || 100);
+            const list = app.history.list(id, { before, limit: limit + 1 });
+            const person = (sub: string) => { const p = P.get(sub); return { sub, name: p?.name ?? sub, kind: p?.kind ?? 'human', color: p?.color ?? '#5f6368' }; };
+            send(200, { checkpoints: list.slice(0, limit).map((c) => ({ ...c, authors: c.authors.map(person) })), more: list.length > limit });
+            return;
+          }
+          if (rest === '/history/compare' && method === 'GET') {
+            app.docs.require(id, a, 'viewer');
+            const from = Number(url.searchParams.get('from'));
+            const toRaw = url.searchParams.get('to') ?? '';
+            const to = toRaw === 'now' ? 'now' as const : Number(toRaw || from);
+            if (!Number.isInteger(from) || (to !== 'now' && !Number.isInteger(to))) throw new Fault(400, 'from and to must be change numbers (to may be "now").');
+            const c = app.history.compare(id, from, to);
+            send(200, { before: c.before, after: c.after, from: c.from, to: c.to });
+            return;
+          }
+          const hr = /^\/history\/(\d+)\/(restore|undo)$/.exec(rest);
+          if (hr && method === 'POST') {
+            const b = await json(req);
+            if (hr[2] === 'restore') app.history.restore(id, { ...a, via: 'http' }, Number(hr[1]), b.at === 'before' ? 'before' : 'after');
+            else app.history.undo(id, { ...a, via: 'http' }, Number(hr[1]));
+            send(200, { ok: true, rev: app.docs.get(id)!.rev });
             return;
           }
           if (rest === '/export.md' && method === 'GET') {

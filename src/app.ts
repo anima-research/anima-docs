@@ -8,6 +8,7 @@ import { Documents } from './documents.js';
 import { Comments } from './comments.js';
 import { Media } from './media.js';
 import { Attention } from './attention.js';
+import { History, type HistoryOptions } from './history.js';
 import { DevIssuer, JtiCache, publicKeyFromString, verifyAid1, type Identity } from './auth.js';
 import type { Config } from './config.js';
 
@@ -19,6 +20,7 @@ export interface App {
   comments: Comments;
   media: Media;
   attention: Attention;
+  history: History;
   issuers: Map<string, KeyObject>;
   devIssuer: DevIssuer | null;
   jti: JtiCache;
@@ -26,7 +28,7 @@ export interface App {
   close(): void;
 }
 
-export function createApp(config: Config, issuers: Map<string, KeyObject>, opts: { attentionLog?: (m: string) => void; commentSettleMs?: number; suggestSettleMs?: number } = {}): App {
+export function createApp(config: Config, issuers: Map<string, KeyObject>, opts: { attentionLog?: (m: string) => void; commentSettleMs?: number; suggestSettleMs?: number; history?: HistoryOptions } = {}): App {
   const db = openDatabase(config.dataDir === ':memory:' ? ':memory:' : join(config.dataDir, 'docs.db'));
   const homeIssuer = config.devIssuer ?? config.issuers[0]?.domain ?? 'id.animalabs.ai';
   const principals = new Principals(db, { admins: config.admins, homeIssuer });
@@ -34,6 +36,7 @@ export function createApp(config: Config, issuers: Map<string, KeyObject>, opts:
   const comments = new Comments(db, docs, principals);
   const media = new Media(db, config.dataDir === ':memory:' ? join(process.cwd(), 'data') : config.dataDir);
   const attention = new Attention(db, docs, comments, principals, { log: opts.attentionLog, commentSettleMs: opts.commentSettleMs, suggestSettleMs: opts.suggestSettleMs });
+  const history = new History(db, docs, principals, opts.history ?? config.history);
   let devIssuer: DevIssuer | null = null;
   if (config.devIssuer) {
     devIssuer = new DevIssuer(config.devIssuer, config.dataDir === ':memory:' ? join(process.cwd(), 'data') : config.dataDir);
@@ -41,6 +44,7 @@ export function createApp(config: Config, issuers: Map<string, KeyObject>, opts:
   }
   const verifierOpts = { audience: config.audience, issuers, requiredScopes: config.requiredScopes };
   // Housekeeping: unload idle documents (gc is off, so loaded docs carry history), prune old state.
+  let lastHistoryPrune = 0;
   const maintenance = setInterval(() => {
     try {
       docs.sweep();
@@ -48,14 +52,15 @@ export function createApp(config: Config, issuers: Map<string, KeyObject>, opts:
       db.prepare('DELETE FROM used_jti WHERE expires_at < ?').run(Date.now());
       db.prepare('DELETE FROM sessions WHERE expires_at < ?').run(Date.now());
       pruneLinksAndGuests(db);
+      if (Date.now() - lastHistoryPrune > 3600_000) { lastHistoryPrune = Date.now(); history.prune(); }
     } catch (e) { console.error('[maintenance]', (e as Error).message); }
   }, 5 * 60_000);
   maintenance.unref();
   return {
-    config, db, principals, docs, comments, media, attention, issuers, devIssuer,
+    config, db, principals, docs, comments, media, attention, history, issuers, devIssuer,
     jti: new JtiCache(),
     verify: (token: string) => verifyAid1(token, verifierOpts),
-    close() { clearInterval(maintenance); attention.close(); db.close(); },
+    close() { clearInterval(maintenance); history.shutdown(); attention.close(); db.close(); },
   };
 }
 

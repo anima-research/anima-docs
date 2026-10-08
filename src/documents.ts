@@ -42,6 +42,8 @@ export interface ChangeOrigin {
   via: 'web' | 'mcpl' | 'http' | 'system';
   /** Browser connection id, so the room doesn't echo an update to its sender. */
   conn?: string;
+  /** Names a server-side edit in the history (an accepted suggestion, a restore). */
+  label?: string;
 }
 
 export interface DocChange {
@@ -394,6 +396,7 @@ export class Documents extends EventEmitter {
     for (const u of updates) Y.applyUpdate(doc, u.data, 'load');
     this.wire(docId, doc);
     this.live.set(docId, doc);
+    try { this.emit('loaded', { docId }); } catch (e) { console.error(`[documents] ${docId}: loaded listener failed:`, e); }
     return doc;
   }
 
@@ -431,6 +434,13 @@ export class Documents extends EventEmitter {
         this.failed.add(docId);
       }
     };
+
+    // Before a change lands: the history closes a stretch of editing here, with the state before it.
+    doc.on('beforeTransaction', (txn: Y.Transaction) => {
+      const o = txn.origin as ChangeOrigin | undefined;
+      if (!o || typeof o !== 'object' || !o.sub) return;
+      try { this.emit('beforeChange', { docId, origin: o }); } catch (e) { console.error(`[documents] ${docId}: beforeChange listener failed:`, e); }
+    });
 
     doc.on('update', (update: Uint8Array, origin: unknown) => {
       if (origin === 'load' || this.failed.has(docId)) return;
@@ -621,7 +631,7 @@ export class Documents extends EventEmitter {
    * is the actor's (not the server's) everywhere: cursors, history, agent diffs.
    * Returns the transaction's delete set and the client id used.
    */
-  edit(docId: string, actor: Pick<Actor, 'sub'> & { via?: ChangeOrigin['via'] }, fn: (text: Y.Text) => void): { client: number; deleteSet: DeleteSet } {
+  edit(docId: string, actor: Pick<Actor, 'sub'> & { via?: ChangeOrigin['via']; label?: string }, fn: (text: Y.Text) => void): { client: number; deleteSet: DeleteSet } {
     const doc = this.ydoc(docId);
     const client = this.serverClientFor(docId, actor.sub);
     const saved = doc.clientID;
@@ -631,7 +641,7 @@ export class Documents extends EventEmitter {
       doc.transact((txn) => {
         fn(doc.getText('body'));
         ds = txn.deleteSet;
-      }, { sub: actor.sub, via: actor.via ?? 'mcpl' } satisfies ChangeOrigin);
+      }, { sub: actor.sub, via: actor.via ?? 'mcpl', ...(actor.label ? { label: actor.label } : {}) } satisfies ChangeOrigin);
     } finally {
       doc.clientID = saved;
     }
@@ -703,7 +713,8 @@ export class Documents extends EventEmitter {
   restoreVersion(docId: string, actor: Actor, versionId: string) {
     this.require(docId, actor, 'editor');
     const target = this.textAt(docId, this.versionSnapshot(docId, versionId));
-    this.edit(docId, { sub: actor.sub, via: actor.via }, (t) => Documents.replaceMinimal(t, 0, t.length, target));
+    const name = (this.db.prepare('SELECT name FROM versions WHERE id = ?').get(versionId) as { name: string } | undefined)?.name ?? versionId;
+    this.edit(docId, { sub: actor.sub, via: actor.via, label: `Restored version “${name.slice(0, 80)}”` }, (t) => Documents.replaceMinimal(t, 0, t.length, target));
   }
 
   activity(docId: string, sinceMs = 0): { sub: string; minute: number; added: number; removed: number }[] {

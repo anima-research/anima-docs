@@ -372,7 +372,8 @@ export class Comments extends EventEmitter {
     let applied: { client: number; deleteSet: DeleteSet } | null = null;
     if (range) {
       try {
-        applied = this.docs.edit(root.docId, { sub: actor.sub, via: actor.via ?? 'mcpl' }, (t) => Documents.replaceMinimal(t, range!.start, range!.end, sg.text, range!.current));
+        const label = `Accepted ${this.principals.get(root.author)?.name ?? 'someone'}’s suggestion`;
+        applied = this.docs.edit(root.docId, { sub: actor.sub, via: actor.via ?? 'mcpl', label }, (t) => Documents.replaceMinimal(t, range!.start, range!.end, sg.text, range!.current));
       } catch (e) {
         this.db.prepare("UPDATE comments SET sugg_status = 'open', resolved_at = NULL, resolved_by = NULL WHERE id = ?").run(root.id);
         if (eventComment !== root.id) this.db.prepare('UPDATE comments SET deleted_at = ? WHERE id = ?').run(Date.now(), eventComment);

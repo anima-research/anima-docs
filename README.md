@@ -24,8 +24,8 @@ Agent host (MCPL 0.5)  ─────/mcpl────┘        │
 | Suggestions | Suggesting mode, as in Google Docs: type into the document and your changes become suggestions (struck-through deletions, underlined additions) instead of edits. Editors accept or reject each one, or all at once; accepting applies it as the editor's edit. Commenters always suggest; editors switch between Editing and Suggesting. Agents suggest with `suggest_edit`. See [Suggestions](#suggestions). |
 | Identity | Archipelago `aid1` (ed25519, offline verification, multi-issuer). Humans sign in by redirect and get an opaque session cookie. Agents present the token per connection. There is a principal directory (humans and agents, issuer badge), workspace roles (member / admin / blocked; blocking takes effect immediately, including on open sockets), and per-document roles (viewer / commenter / editor / owner) plus general access for everyone signed in. See [Access](#access). |
 | Share links | Secret links that grant viewer, commenter or editor on one document, to anyone (no sign-in; visitors become guests) or to Archipelago members only. Optional label and expiry; revoking a link ends the access of everyone who came in through it, live. |
-| Agents | Network MCPL at `/mcpl`, 35 tools in 5 feature sets, RFC-006 event coalescing, RFC-008 tool classes, per-agent wake gates, offline outbox. The same tools are also available over HTTP at `/api/operations/<tool>`. |
-| History | Named versions, diff against a version, restore (as a new attributed edit), and a per-person activity summary. |
+| Agents | Network MCPL at `/mcpl`, 36 tools in 5 feature sets, RFC-006 event coalescing, RFC-008 tool classes, per-agent wake gates, offline outbox. The same tools are also available over HTTP at `/api/operations/<tool>`. |
+| History | Every stretch of editing is recorded as a change you can open as a diff, compare across a range, restore to (before or after it), or undo on its own. Plus named versions and a per-person summary. See [History](#history). |
 
 ## Access
 
@@ -67,6 +67,30 @@ Archipelago decides who may use the service; the service decides who may open ea
 - `read_document` lists open suggestions after the text, or shows them in place as CriticMarkup with `suggestions: "inline"`: `{~~old~>new~~}`, `{++added++}`, `{--deleted--}`, each followed by `{>>id<<}`. `list_comments {only: "suggestions"}` shows them in full.
 - The owner of a document gets one `docs:suggestion` event per burst of suggestions, after the suggester pauses (about 20 s, at most 2 min), listing each change. It wakes them by their `mentions` setting.
 - A suggester gets one event when theirs are accepted or rejected (with any note), by their `replies` setting.
+
+## History
+
+The server records a **checkpoint** at the end of every stretch of editing. A checkpoint is a Yjs snapshot of a few KB; garbage collection is off, so it renders the document exactly as it was.
+
+- **When a stretch ends:**
+  - editing pauses (people: 3 minutes; an agent: 1 minute);
+  - 10 minutes of continuous editing pass, so a long session becomes many changes;
+  - a different kind of editor takes over (people, or a particular agent);
+  - around a labelled edit (an accepted suggestion, a restore, an undo), which gets its own checkpoint.
+- **Boundaries are exact.** A stretch closes just before the change that ends it.
+- **Thinning:** older history is merged into one change per hour after a week, and one per day after a month. Labelled changes are kept.
+- **Starting point:** recording began with this feature. Each document's history starts at the state it had when first opened after that; earlier editing still shows per person.
+
+**In the browser:** *Activity → Changes* lists the changes, newest first, with who and how much.
+- Open one to see its diff: changed lines, with the changed words marked and long unchanged stretches folded.
+- *Compare* picks a range.
+- Editors can **restore** the document to just before or just after a change (or a range), or **undo** a single change while keeping everything since. An undo is refused when later edits touched the same lines.
+- Restores and undos are recorded as changes too, so they can be undone.
+
+**For agents:**
+- `versions` lists recorded changes as `h123`.
+- `changes {from, to}` gives the attributed diff of one change (`from` = `to`) or a range.
+- `restore_version {version: "h123", at: "before" | "after"}` restores to a change; `undo_change {change}` undoes one.
 
 ## How agents experience it
 
@@ -163,7 +187,7 @@ Requirements and fallbacks:
 | feature set | tools |
 |---|---|
 | `docs.read` | `whoami`, `open_link`, `list_documents`, `read_document`, `outline`, `search`, `list_comments`, `changes`, `view_image`, `people`, `versions` |
-| `docs.write` | `create_document`, `edit_document`, `rename_document`, `insert_image`, `save_version`, `restore_version`, `delete_document`, `accept_suggestion`, `reject_suggestion` |
+| `docs.write` | `create_document`, `edit_document`, `rename_document`, `insert_image`, `save_version`, `restore_version`, `undo_change`, `delete_document`, `accept_suggestion`, `reject_suggestion` |
 | `docs.comment` | `add_comment`, `reply_comment`, `resolve_comment`, `edit_comment`, `delete_comment`, `assign_comment`, `suggest_edit` |
 | `docs.share` | `list_access` (with links), `share_document`, `set_general_access`, `create_link`, `revoke_link` |
 | `docs.watch` (uses `pushEvents`) | `watch`, `unwatch`, `list_watches` |
@@ -225,6 +249,7 @@ DOCS_DEV_ISSUER=dev.local DOCS_ISSUERS= npm run dev
 | `DOCS_CLIENT_IP_HEADER` | none | header the proxy sets and overwrites with the client address, used for the guest rate limit (`x-real-ip` on Railway) |
 | `DOCS_TRUSTED_PROXY_HOPS` | 1 on https, else 0 | otherwise: proxies that append to `X-Forwarded-For` |
 | `DOCS_DEBUG_CLIENT` | | `1` serves `/debug/client`: the forwarding headers your proxy sets |
+| `DOCS_HISTORY_IDLE_MS` / `DOCS_HISTORY_AGENT_IDLE_MS` / `DOCS_HISTORY_MAX_MS` | 180000 / 60000 / 600000 | when a recorded change ends: a pause in people's editing, a pause in an agent's, the longest stretch |
 
 ### Registering with the home node
 

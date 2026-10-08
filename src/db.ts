@@ -6,7 +6,7 @@ import { dirname } from 'node:path';
 
 export type DB = Database.Database;
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 export function openDatabase(file: string): DB {
   if (file !== ':memory:') mkdirSync(dirname(file), { recursive: true });
@@ -284,6 +284,29 @@ export function openDatabase(file: string): DB {
           at          INTEGER NOT NULL,
           PRIMARY KEY (sub, comment_id)
         );
+      `);
+      db.pragma('user_version = 4');
+    })();
+  }
+  if ((db.pragma('user_version', { simple: true }) as number) < 5) {
+    // v5: automatic history. A checkpoint is the document's state (a Yjs
+    // snapshot) at the end of a stretch of editing; its change is the
+    // difference from the one before. See history.ts.
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS checkpoints (
+          seq         INTEGER PRIMARY KEY AUTOINCREMENT,
+          doc_id      TEXT NOT NULL,
+          start_at    INTEGER NOT NULL,
+          end_at      INTEGER NOT NULL,
+          snapshot    BLOB NOT NULL,
+          authors     TEXT NOT NULL DEFAULT '[]',
+          added       INTEGER NOT NULL DEFAULT 0,
+          removed     INTEGER NOT NULL DEFAULT 0,
+          label       TEXT,
+          kind        TEXT NOT NULL DEFAULT 'edit' CHECK (kind IN ('edit','baseline'))
+        );
+        CREATE INDEX IF NOT EXISTS checkpoints_doc ON checkpoints(doc_id, seq);
       `);
       db.pragma(`user_version = ${SCHEMA_VERSION}`);
     })();

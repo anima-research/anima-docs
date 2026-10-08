@@ -35,6 +35,18 @@ export interface AdminPrincipal extends Person { firstSeen: number; docs: number
 
 export interface Version { id: string; name: string; rev: number; createdBy: string; createdAt: number; by: string }
 export interface ActivityRow { sub: string; label: string; kind?: Kind; color?: string; minute: number; added: number; removed: number }
+/** A recorded change: the end of one stretch of editing (history.ts). */
+export interface Checkpoint {
+  seq: number;
+  start: number;
+  end: number;
+  authors: { sub: string; name: string; kind: Kind; color: string }[];
+  added: number;
+  removed: number;
+  label: string | null;
+  /** Where the recorded history begins (no change of its own). */
+  baseline: boolean;
+}
 
 export interface ThreadPerson { sub: string; name: string; kind: Kind; color: string; label: string }
 export interface ThreadComment { id: string; author: ThreadPerson; body: string; createdAt: number; editedAt: number | null; mentions: string[] }
@@ -139,6 +151,10 @@ export const api = {
   version: (id: string, vid: string) => call<{ text: string }>('GET', `/api/docs/${encodeURIComponent(id)}/versions/${encodeURIComponent(vid)}`),
   restoreVersion: (id: string, vid: string) => call<{ ok: true }>('POST', `/api/docs/${encodeURIComponent(id)}/versions/${encodeURIComponent(vid)}/restore`, {}),
   activity: (id: string) => call<{ activity: ActivityRow[] }>('GET', `/api/docs/${encodeURIComponent(id)}/activity`),
+  history: (id: string, before?: number) => call<{ checkpoints: Checkpoint[]; more: boolean }>('GET', `/api/docs/${encodeURIComponent(id)}/history${before ? `?before=${before}` : ''}`),
+  compare: (id: string, from: number, to: number | 'now') => call<{ before: string; after: string }>('GET', `/api/docs/${encodeURIComponent(id)}/history/compare?from=${from}&to=${to}`),
+  restoreChange: (id: string, seq: number, at: 'before' | 'after') => call<{ ok: true }>('POST', `/api/docs/${encodeURIComponent(id)}/history/${seq}/restore`, { at }),
+  undoChange: (id: string, seq: number) => call<{ ok: true }>('POST', `/api/docs/${encodeURIComponent(id)}/history/${seq}/undo`, {}),
   exportUrl: (id: string) => `/api/docs/${encodeURIComponent(id)}/export.md`,
 
   links: (id: string) => call<{ links: ShareLink[] }>('GET', `/api/docs/${encodeURIComponent(id)}/links`),

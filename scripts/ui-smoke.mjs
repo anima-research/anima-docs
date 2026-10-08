@@ -4,7 +4,8 @@
 // Starts the server on a fresh data directory (dev issuer), then: two people
 // sign in, create a document, edit concurrently and see each other's text and
 // cursors, insert a table and an image, comment with an @mention, reply and
-// resolve, change sharing to commenter (whose typing becomes suggestions), an
+// resolve, recorded changes with diffs, change sharing to commenter (whose
+// typing becomes suggestions), an
 // agent edits and comments over the operations API, and preview renders the
 // table. Share links: the owner makes an "anyone" link in the share dialog, a
 // signed-out visitor continues as a guest (can comment, typing suggests, can
@@ -401,6 +402,15 @@ try {
     await alice.locator('dialog.version-dialog').getByRole('button', { name: 'Close', exact: true }).click();
     await alice.getByRole('button', { name: 'More document actions' }).click();
     await alice.getByRole('menuitem', { name: 'Activity' }).click();
+    // Recorded changes: the agent's edit is its own change, the people's edits theirs.
+    await alice.locator('.change-row', { hasText: 'Quill' }).first().waitFor();
+    await alice.locator('.change-row', { hasText: 'Bob Rivera' }).first().waitFor();
+    await shot(alice, '16-activity-changes');
+    await alice.locator('.change-row', { hasText: 'Quill' }).first().click();
+    await alice.locator('dialog.diff-dialog .diff-view .dl.add').first().waitFor();
+    await shot(alice, '16b-agent-change-diff');
+    await alice.locator('dialog.diff-dialog').getByRole('button', { name: 'Close' }).last().click();
+    await alice.getByRole('tab', { name: 'By person' }).click();
     await alice.locator('.activity-person', { hasText: 'Quill' }).waitFor();
     await alice.locator('.activity-person', { hasText: 'Bob Rivera' }).waitFor();
     await shot(alice, '16-activity');

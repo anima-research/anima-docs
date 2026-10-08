@@ -35,6 +35,8 @@ export interface Config {
   clientIpHeader: string | null;
   /** How often open sockets' roles are re-derived (link expiry has no event). */
   roleSweepMs: number;
+  /** Recorded history: the pause that ends a stretch of people's / an agent's editing, and the longest stretch. */
+  history: { idleMs: number; agentIdleMs: number; maxMs: number };
 }
 
 const list = (v: string | undefined) => (v ?? '').split(',').map((s) => s.trim()).filter(Boolean);
@@ -69,6 +71,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     defaultAccess,
     devIssuer,
     roleSweepMs: Math.max(100, Number(env.DOCS_ROLE_SWEEP_MS ?? 10_000) || 10_000),
+    history: {
+      idleMs: Math.max(50, Number(env.DOCS_HISTORY_IDLE_MS ?? 180_000) || 180_000),
+      agentIdleMs: Math.max(50, Number(env.DOCS_HISTORY_AGENT_IDLE_MS ?? 60_000) || 60_000),
+      maxMs: Math.max(100, Number(env.DOCS_HISTORY_MAX_MS ?? 600_000) || 600_000),
+    },
     clientIpHeader: env.DOCS_CLIENT_IP_HEADER?.trim() || null,
     trustedProxyHops: env.DOCS_TRUSTED_PROXY_HOPS !== undefined ? Math.max(0, Number(env.DOCS_TRUSTED_PROXY_HOPS) || 0) : origin.startsWith('https:') ? 1 : 0,
   };

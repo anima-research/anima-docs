@@ -25,10 +25,15 @@ interface Run { from: number; to: number; sub: string | null }
 
 export function textChanges(docs: Documents, principals: Principals, docId: string, base: Y.Snapshot, opts: {
   title: string; maxChars?: number; context?: number;
+  /** Compare against this later state instead of now. */
+  to?: Y.Snapshot;
+  /** How the header describes the span (default "changed since you last looked"). */
+  what?: string;
 }): ChangeSummary {
   const doc = docs.ydoc(docId);
   const ytext = doc.getText('body');
-  const now = Y.snapshot(doc);
+  const now = opts.to ?? Y.snapshot(doc);
+  const what = opts.what ?? 'changed since you last looked';
   const delta = ytext.toDelta(now, base, (type: 'added' | 'removed', id: Y.ID) => ({ type, client: id.client, clock: id.clock })) as
     { insert: unknown; attributes?: { ychange?: { type: 'added' | 'removed'; client: number; clock: number } } }[];
 
@@ -51,7 +56,7 @@ export function textChanges(docs: Documents, principals: Principals, docId: stri
   if (before === after) return { changed: false, text: '', authors: [], hunks: 0, added: 0, removed: 0 };
 
   const patch = structuredPatch('before', 'after', before, after, '', '', { context: opts.context ?? 2, timeout: 500 } as any) as ReturnType<typeof structuredPatch> | undefined;
-  if (!patch) return summarizeLarge(principals, docId, opts.title, after, addedRuns, removedRuns, added, removed);
+  if (!patch) return summarizeLarge(principals, docId, opts.title, after, addedRuns, removedRuns, added, removed, what);
   const beforeStarts = lineStarts(before), afterStarts = lineStarts(after);
   const heads = outline(after);
   const allAuthors = new Set<string>();
@@ -92,7 +97,7 @@ export function textChanges(docs: Documents, principals: Principals, docId: stri
     const p = principals.get(s);
     return p ? `${principals.label(s)} (${p.kind})` : s;
   });
-  const header = `“${opts.title}” (${docId}) changed since you last looked — ${patch.hunks.length} change${patch.hunks.length === 1 ? '' : 's'}`
+  const header = `“${opts.title}” (${docId}) ${what} — ${patch.hunks.length} change${patch.hunks.length === 1 ? '' : 's'}`
     + (authorLabels.length ? ` by ${authorLabels.join(', ')}` : '') + ` (+${added}/−${removed} chars):`;
 
   const max = opts.maxChars ?? 6000;
@@ -112,7 +117,7 @@ export function textChanges(docs: Documents, principals: Principals, docId: stri
 }
 
 /** Too large to diff line-by-line in bounded time: say who changed which sections, and how much. */
-function summarizeLarge(principals: Principals, docId: string, title: string, after: string, addedRuns: Run[], removedRuns: Run[], added: number, removed: number): ChangeSummary {
+function summarizeLarge(principals: Principals, docId: string, title: string, after: string, addedRuns: Run[], removedRuns: Run[], added: number, removed: number, what = 'changed since you last looked'): ChangeSummary {
   const heads = outline(after);
   const bySection = new Map<string, { add: number; who: Set<string> }>();
   for (const r of addedRuns) {
@@ -125,7 +130,7 @@ function summarizeLarge(principals: Principals, docId: string, title: string, af
   const authors = new Set([...addedRuns, ...removedRuns].map((r) => r.sub).filter((s): s is string => !!s));
   const names = (subs: Iterable<string>) => [...subs].map((s) => (s === '?' ? 'someone' : principals.label(s))).join(', ');
   const lines = [...bySection].slice(0, 40).map(([sec, e]) => `• ${sec}: +${e.add} chars by ${names(e.who)}`);
-  const text = `“${title}” (${docId}) changed substantially since you last looked (+${added}/−${removed} chars by ${names(authors) || 'someone'}). Too large to show as a diff; sections with new text:\n${lines.join('\n') || '(only deletions)'}\nUse read_document to see the current text.`;
+  const text = `“${title}” (${docId}) ${what}, substantially (+${added}/−${removed} chars by ${names(authors) || 'someone'}). Too large to show as a diff; sections with new text:\n${lines.join('\n') || '(only deletions)'}\nUse read_document to see the current text.`;
   return { changed: true, text, authors: [...authors], hunks: 0, added, removed };
 }
 

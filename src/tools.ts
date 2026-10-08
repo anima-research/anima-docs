@@ -11,6 +11,7 @@ import { Media, fetchImage } from './media.js';
 import { textChanges } from './diff.js';
 import { findSections, lineOf, lineStarts, outline, withLineNumbers, images } from './markdown.js';
 import { BASE_SETTINGS, WATCH_PRESET, type WatchSettings } from './attention.js';
+import { parseCheckpointId } from './history.js';
 
 export type FeatureSet = 'docs.read' | 'docs.write' | 'docs.comment' | 'docs.share' | 'docs.watch';
 
@@ -371,14 +372,26 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: 'changes', featureSet: 'docs.read', toolClass: 'notes',
-    description: 'What changed in a document since you last looked (or since a saved version), as an attributed diff. Useful if your host does not deliver push events.',
+    description: 'What changed in a document, as an attributed diff: since you last looked (default), since a saved version, or for one recorded change or a range of them (ids like "h123" from versions).',
     inputSchema: { type: 'object', required: ['document'], properties: {
       ...docArg, since_version: S('Diff from this saved version id instead (see versions).'),
-      mark_read: { type: 'boolean', description: 'Advance your "last looked" point to now (default true; ignored with since_version).' },
+      from: S('A recorded change id ("h123") or saved version id: diff from the state just before it.'),
+      to: S('With from: a recorded change id; diff up to the state just after it (default: now). from = to shows one change.'),
+      mark_read: { type: 'boolean', description: 'Advance your "last looked" point to now (default true; ignored with since_version or from).' },
     } },
     async run(app, actor, a) {
       const id = need(a, 'document');
       const { doc } = app.docs.require(id, actor, 'viewer');
+      if (a.from) {
+        const fromSeq = parseCheckpointId(a.from);
+        const base = fromSeq !== null ? app.history.snapshotBefore(id, fromSeq) : app.docs.versionSnapshot(id, String(a.from));
+        const toSeq = a.to ? parseCheckpointId(a.to) : null;
+        if (a.to && toSeq === null) throw new Fault(400, 'to must be a recorded change id like "h123".');
+        app.history.flush(id);
+        const what = toSeq !== null ? (fromSeq === toSeq ? `changed in ${a.from}` : `changed from ${a.from} through ${a.to}`) : `changed since ${a.from}`;
+        const c = textChanges(app.docs, app.principals, id, base, { title: doc.title, maxChars: 20_000, to: toSeq !== null ? app.history.snapshotAfter(id, toSeq) : undefined, what });
+        return text(c.changed ? c.text : 'No changes in that span.');
+      }
       if (a.since_version) {
         const c = textChanges(app.docs, app.principals, id, app.docs.versionSnapshot(id, a.since_version), { title: doc.title, maxChars: 20_000 });
         return text(c.changed ? c.text.replace('since you last looked', `since version ${a.since_version}`) : 'No changes since that version.');
@@ -428,11 +441,16 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: 'versions', featureSet: 'docs.read', toolClass: 'notes',
-    description: 'Named versions of a document and recent editing activity by person.',
-    inputSchema: { type: 'object', required: ['document'], properties: { ...docArg } },
+    description: 'A document\'s history: recorded changes (each stretch of editing, with who and how much; ids like "h123"), named versions, and editing by person. Diff with changes {from, to}; go back with restore_version or undo_change.',
+    inputSchema: { type: 'object', required: ['document'], properties: { ...docArg, limit: { type: 'integer', minimum: 1, maximum: 100, description: 'Recorded changes to list (default 20).' } } },
     run(app, actor, a) {
       const id = need(a, 'document');
       app.docs.require(id, actor, 'viewer');
+      const cps = app.history.list(id, { limit: Math.min(100, a.limit ?? 20) });
+      const fmt = (ms: number) => new Date(ms).toISOString().slice(5, 16).replace('T', ' ');
+      const changes = cps.length ? `Recorded changes (newest first; UTC):\n${cps.map((c) => c.baseline
+        ? `  h${c.seq}  ${fmt(c.end)}  — where history begins`
+        : `  h${c.seq}  ${fmt(c.start)}–${fmt(c.end).slice(6)}  ${c.authors.map((s) => app.principals.get(s)?.name ?? s).join(', ') || 'someone'}  +${c.added}/−${c.removed}${c.label ? `  (${c.label})` : ''}`).join('\n')}` : 'No recorded changes yet.';
       const v = app.docs.versions(id);
       const act = app.docs.activity(id, Date.now() - 7 * 86400_000);
       const bySub = new Map<string, { added: number; removed: number; last: number }>();
@@ -442,6 +460,7 @@ export const TOOLS: ToolDef[] = [
         bySub.set(r.sub, x);
       }
       return text([
+        changes,
         v.length ? `Versions:\n${v.map((x) => `  ${x.id}  “${x.name}” — rev ${x.rev}, by ${app.principals.label(x.createdBy)}, ${ago(x.createdAt)}`).join('\n')}` : 'No named versions (save_version creates one).',
         bySub.size ? `Editing in the last 7 days:\n${[...bySub].sort((x, y) => y[1].last - x[1].last).map(([s, x]) => `  ${app.principals.label(s)}: +${x.added}/−${x.removed} chars, last ${ago(x.last)}`).join('\n')}` : 'No edits in the last 7 days.',
       ].join('\n\n'));
@@ -550,13 +569,31 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: 'restore_version', featureSet: 'docs.write', toolClass: 'notes',
-    description: 'Make the document text equal to a saved version (as a new, attributed edit; history is kept).',
-    inputSchema: { type: 'object', required: ['document', 'version'], properties: { ...docArg, version: S('Version id from versions.') } },
+    description: 'Make the document text what it was at a saved version, or just after (or before) a recorded change ("h123"), as a new attributed edit; history is kept.',
+    inputSchema: { type: 'object', required: ['document', 'version'], properties: {
+      ...docArg, version: S('A saved version id, or a recorded change id like "h123" (see versions).'),
+      at: S('For a recorded change: "after" (default) or "before" it.', { enum: ['after', 'before'] }),
+    } },
     run(app, actor, a) {
       const id = need(a, 'document');
-      app.docs.restoreVersion(id, actor, need(a, 'version'));
+      const seq = parseCheckpointId(a.version);
+      if (seq !== null) app.history.restore(id, { ...actor, via: 'mcpl' }, seq, a.at === 'before' ? 'before' : 'after');
+      else app.docs.restoreVersion(id, actor, need(a, 'version'));
       app.attention.markRead(actor.sub, id);
-      return text(`Restored ${a.version}. Current rev ${app.docs.get(id)!.rev}.`);
+      return text(`Restored ${a.version}${seq !== null ? ` (${a.at === 'before' ? 'before' : 'after'} it)` : ''}. Current rev ${app.docs.get(id)!.rev}.`);
+    },
+  },
+  {
+    name: 'undo_change', featureSet: 'docs.write', toolClass: 'notes',
+    description: 'Undo one recorded change ("h123", see versions), keeping everything since, as a new attributed edit. Refused if later edits touched the same lines; then restore_version to an earlier state instead.',
+    inputSchema: { type: 'object', required: ['document', 'change'], properties: { ...docArg, change: S('Recorded change id, like "h123".') } },
+    run(app, actor, a) {
+      const id = need(a, 'document');
+      const seq = parseCheckpointId(a.change);
+      if (seq === null) throw new Fault(400, 'change must be a recorded change id like "h123".');
+      app.history.undo(id, { ...actor, via: 'mcpl' }, seq);
+      app.attention.markRead(actor.sub, id);
+      return text(`Undid h${seq}. Current rev ${app.docs.get(id)!.rev}.`);
     },
   },
   {
