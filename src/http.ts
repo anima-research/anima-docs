@@ -102,9 +102,15 @@ export function createHttp(app: App) {
 
   // ---------------------------------------------------------------- sessions
 
+  // A sign-in token proves who you are once (it lives minutes); the session is
+  // ours: it lasts SESSION_MS from last use, renewed at most daily, and never
+  // past SESSION_MAX_MS from sign-in. Blocking and sign-out still end it at once.
+  const SESSION_MS = app.config.sessionDays * 86400_000;
+  const SESSION_MAX_MS = Math.max(SESSION_MS, app.config.sessionMaxDays * 86400_000);
+  const RENEW_AFTER_MS = Math.min(86400_000, SESSION_MS / 4);
   const createSession = (who: Identity): { token: string; maxAge: number } => {
     const token = opaque();
-    const expires = Math.min(who.exp * 1000, Date.now() + 30 * 86400_000);
+    const expires = Date.now() + SESSION_MS;
     app.db.prepare('INSERT INTO sessions (token_hash, sub, identity, expires_at, created_at) VALUES (?, ?, ?, ?, ?)')
       .run(tokenHash(token), who.sub, JSON.stringify(who), expires, Date.now());
     app.db.prepare('DELETE FROM sessions WHERE expires_at < ?').run(Date.now());
@@ -136,6 +142,20 @@ export function createHttp(app: App) {
     } catch { return null; }
   };
   const sessionActor = (req: IncomingMessage): Actor | null => webSession(req)?.actor ?? null;
+  /** Keep an active member's session alive (at most once a day), within the limit from sign-in. */
+  const renewSession = (req: IncomingMessage, res: ServerResponse) => {
+    const t = cookies(req).docs_session;
+    if (!t) return;
+    const hash = tokenHash(t);
+    const r = app.db.prepare('SELECT sub, expires_at, created_at FROM sessions WHERE token_hash = ?').get(hash) as { sub: string; expires_at: number; created_at: number } | undefined;
+    const now = Date.now();
+    if (!r || r.expires_at < now || isGuest(r.sub)) return;
+    if (r.expires_at - now > SESSION_MS - RENEW_AFTER_MS) return; // renewed recently
+    const next = Math.min(now + SESSION_MS, r.created_at + SESSION_MAX_MS);
+    if (next <= r.expires_at) return;
+    app.db.prepare('UPDATE sessions SET expires_at = ? WHERE token_hash = ?').run(next, hash);
+    res.appendHeader('Set-Cookie', cookie('docs_session', t, (next - now) / 1000));
+  };
   const sessionValid = (s: WebSession) => {
     const r = app.db.prepare('SELECT expires_at FROM sessions WHERE token_hash = ?').get(s.tokenHash) as { expires_at: number } | undefined;
     return !!r && r.expires_at > Date.now();
@@ -263,6 +283,8 @@ export function createHttp(app: App) {
       // ------------------------------------------------ identify
       let actor: Actor | null = bearerActor(req) ?? sessionActor(req);
       viewer = actor;
+      // Reads by a signed-in browser keep its session alive (they never set cookies of their own).
+      if (actor && method === 'GET' && path.startsWith('/api/') && !req.headers.authorization) renewSession(req, res);
 
       if (path === '/api/config') {
         send(200, { audience: app.config.audience, issuer: app.config.issuers[0]?.domain ?? null, dev: !!app.devIssuer, origin: app.config.origin });

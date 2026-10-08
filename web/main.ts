@@ -113,6 +113,18 @@ async function boot() {
     }
   }
   startRouter(render);
+  keepSessionAlive();
+}
+
+/**
+ * A tab left open for days (one document, only its live connection) still
+ * renews the session: the server extends it on any read, at most daily.
+ */
+function keepSessionAlive() {
+  let last = Date.now();
+  const touch = () => { if (!me || Date.now() - last < 3600_000) return; last = Date.now(); void api.me().catch(() => undefined); };
+  window.setInterval(touch, 6 * 3600_000);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') touch(); });
 }
 
 /** After a failed callback the sign-in page is up; route normally once signed in. */

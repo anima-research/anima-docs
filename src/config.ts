@@ -35,6 +35,13 @@ export interface Config {
   clientIpHeader: string | null;
   /** How often open sockets' roles are re-derived (link expiry has no event). */
   roleSweepMs: number;
+  /**
+   * Browser sessions: signed in for this many days since you last used the
+   * service (renewed at most daily), but never longer than `sessionMaxDays`
+   * after signing in (then sign in again, so roles are re-read).
+   */
+  sessionDays: number;
+  sessionMaxDays: number;
   /** Recorded history: the pause that ends a stretch of people's / an agent's editing, and the longest stretch. */
   history: { idleMs: number; agentIdleMs: number; maxMs: number };
 }
@@ -71,6 +78,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     defaultAccess,
     devIssuer,
     roleSweepMs: Math.max(100, Number(env.DOCS_ROLE_SWEEP_MS ?? 10_000) || 10_000),
+    sessionDays: Math.max(1, Number(env.DOCS_SESSION_DAYS ?? 30) || 30),
+    sessionMaxDays: Math.max(1, Number(env.DOCS_SESSION_MAX_DAYS ?? 90) || 90),
     history: {
       idleMs: Math.max(50, Number(env.DOCS_HISTORY_IDLE_MS ?? 180_000) || 180_000),
       agentIdleMs: Math.max(50, Number(env.DOCS_HISTORY_AGENT_IDLE_MS ?? 60_000) || 60_000),

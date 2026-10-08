@@ -81,3 +81,25 @@ test('comments over the socket with client anchors; threads broadcast; an MCPL a
   assert.equal(reply.ok, true);
   a.close(); agentHost.close();
 });
+
+test('a live connection outlasts its session’s original expiry when the session was renewed', async () => {
+  const { startServer, browserClient, sleep } = await import('./server-harness.js');
+  const S2 = await startServer();
+  try {
+    const token = S2.iss.mint('Rena', 'human', 'docs', { ttl: 600 });
+    const r = await fetch(`${S2.base}/auth/exchange`, { method: 'POST', headers: { Origin: S2.base, 'Content-Type': 'application/json', Cookie: 'docs_login=x' }, body: JSON.stringify({ token }) });
+    const cookie = `docs_session=${/docs_session=([^;]+)/.exec(r.headers.get('set-cookie') ?? '')![1]}`;
+    const rena = S2.app.principals.get('human:test:rena')!;
+    const d = S2.app.docs.create(rena as any, 'Long', 'x\n');
+    // The session ends in 300 ms...
+    S2.app.db.prepare("UPDATE sessions SET expires_at = ? WHERE sub = 'human:test:rena'").run(Date.now() + 300);
+    const c = await browserClient(S2, cookie, d.id);
+    // ...but is renewed before then: the socket stays open past the original expiry.
+    S2.app.db.prepare("UPDATE sessions SET expires_at = ? WHERE sub = 'human:test:rena'").run(Date.now() + 86400_000);
+    let closed: number | null = null;
+    c.ws.on('close', (code: number) => { closed = code; });
+    await sleep(600);
+    assert.equal(closed, null, 'still connected');
+    c.close();
+  } finally { await S2.close(); }
+});

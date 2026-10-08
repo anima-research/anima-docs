@@ -125,3 +125,34 @@ test('an https origin is canonical: reads on other hosts redirect there, health 
     assert.equal((await fetch(`${T.base}/health`)).status, 200);
   } finally { await T.close(); }
 });
+
+test('sessions: a 10-minute sign-in token gives a 30-day session; reads renew it daily, never past 90 days from sign-in', async () => {
+  const token = S.iss.mint('Lena', 'human', 'docs', { ttl: 600 }); // like the home node's sign-in tokens
+  const r = await fetch(`${S.base}/auth/exchange`, { method: 'POST', headers: H({ Cookie: 'docs_login=x' }), body: JSON.stringify({ token }) });
+  assert.equal(r.status, 200);
+  const set = r.headers.get('set-cookie') ?? '';
+  const maxAge = Number(/docs_session=[^;]+;[^]*?Max-Age=(\d+)/.exec(set)![1]);
+  assert.ok(maxAge > 29 * 86400 && maxAge <= 30 * 86400, `Max-Age ${maxAge}`);
+  const cookie = `docs_session=${/docs_session=([^;]+)/.exec(set)![1]}`;
+  const hash = (S.app.db.prepare("SELECT token_hash FROM sessions WHERE sub = 'human:test:lena' ORDER BY created_at DESC").get() as { token_hash: string }).token_hash;
+  const row = () => S.app.db.prepare('SELECT expires_at, created_at FROM sessions WHERE token_hash = ?').get(hash) as { expires_at: number; created_at: number };
+  // Fresh: a read doesn't renew (renewed at most daily).
+  let me = await fetch(`${S.base}/api/me`, { headers: { Cookie: cookie } });
+  assert.equal((await me.json()).you.name, 'Lena');
+  assert.equal(me.headers.get('set-cookie'), null);
+  // Ten days later (simulated): a read extends it to 30 days from now and re-sends the cookie.
+  S.app.db.prepare('UPDATE sessions SET expires_at = ?, created_at = ? WHERE token_hash = ?').run(Date.now() + 20 * 86400_000, Date.now() - 10 * 86400_000, hash);
+  me = await fetch(`${S.base}/api/me`, { headers: { Cookie: cookie } });
+  assert.match(me.headers.get('set-cookie') ?? '', /docs_session=.*Max-Age=25(8|9)\d{4}/);
+  assert.ok(row().expires_at > Date.now() + 29 * 86400_000);
+  // Near the limit: it renews only up to 90 days after sign-in.
+  S.app.db.prepare('UPDATE sessions SET expires_at = ?, created_at = ? WHERE token_hash = ?').run(Date.now() + 2 * 86400_000, Date.now() - 85 * 86400_000, hash);
+  await fetch(`${S.base}/api/me`, { headers: { Cookie: cookie } });
+  const capped = row();
+  assert.ok(Math.abs(capped.expires_at - (capped.created_at + 90 * 86400_000)) < 1000, 'capped at 90 days from sign-in');
+  // Expired: no renewal, signed out.
+  S.app.db.prepare('UPDATE sessions SET expires_at = ? WHERE token_hash = ?').run(Date.now() - 1000, hash);
+  me = await fetch(`${S.base}/api/me`, { headers: { Cookie: cookie } });
+  assert.equal((await me.json()).you, null);
+  assert.equal(me.headers.get('set-cookie'), null);
+});

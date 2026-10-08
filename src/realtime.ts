@@ -128,9 +128,17 @@ export class Realtime {
     const actor = session.actor;
     const room = this.room(docId);
     // The socket lives no longer than the session that opened it.
-    const expiry = setTimeout(() => ws.close(4001, 'Session expired'), Math.min(2 ** 31 - 1, Math.max(1, session.expiresAt - Date.now())));
-    expiry.unref?.();
-    const conn: Conn = { id: `w${randomBytes(4).toString('hex')}`, docId, ws, actor, role, clients: new Set(), session, checkedAt: Date.now(), expiry };
+    // At the session's end, look again: an active session has been renewed meanwhile.
+    const arm = (ms: number): NodeJS.Timeout => {
+      const t = setTimeout(() => {
+        if (this.sessionValid(session)) conn.expiry = arm(3600_000);
+        else ws.close(4001, 'Session expired');
+      }, Math.min(2 ** 31 - 1, Math.max(1, ms)));
+      t.unref?.();
+      return t;
+    };
+    const conn: Conn = { id: `w${randomBytes(4).toString('hex')}`, docId, ws, actor, role, clients: new Set(), session, checkedAt: Date.now(), expiry: undefined as unknown as NodeJS.Timeout };
+    conn.expiry = arm(session.expiresAt - Date.now());
     room.conns.set(conn.id, conn);
 
     ws.on('message', (data, isBinary) => {

@@ -255,6 +255,7 @@ DOCS_DEV_ISSUER=dev.local DOCS_ISSUERS= npm run dev
 | `DOCS_CLIENT_IP_HEADER` | none | header the proxy sets and overwrites with the client address, used for the guest rate limit (`x-real-ip` on Railway) |
 | `DOCS_TRUSTED_PROXY_HOPS` | 1 on https, else 0 | otherwise: proxies that append to `X-Forwarded-For` |
 | `DOCS_DEBUG_CLIENT` | | `1` serves `/debug/client`: the forwarding headers your proxy sets |
+| `DOCS_SESSION_DAYS` / `DOCS_SESSION_MAX_DAYS` | 30 / 90 | browser sessions: days since last use, and the most days since sign-in |
 | `DOCS_HISTORY_IDLE_MS` / `DOCS_HISTORY_AGENT_IDLE_MS` / `DOCS_HISTORY_MAX_MS` | 180000 / 60000 / 600000 | when a recorded change ends: a pause in people's editing, a pause in an agent's, the longest stretch |
 
 ### Registering with the home node
@@ -265,7 +266,7 @@ Add an audience on the issuer (`config/audiences.json`, which hot-reloads):
 "docs": { "redirect": "https://<docs-origin>/auth/callback", "api": "https://<docs-origin>", "requiredScopes": ["docs:use"] }
 ```
 
-Grant `docs:use` to the roles that should have it (`config/roles.json`). For agents, add `docs` to their `audiences` and `docs:use` to their scopes (`data/principals.json`). Humans land on `/auth/callback#token=…`; the page exchanges the token once (single-use `jti`) for an HttpOnly session cookie that never outlives the token.
+Grant `docs:use` to the roles that should have it (`config/roles.json`). For agents, add `docs` to their `audiences` and `docs:use` to their scopes (`data/principals.json`). Humans land on `/auth/callback#token=…`; the page exchanges the token once (single-use `jti`) for an HttpOnly session cookie. The sign-in token lives minutes; the session is the service's own: 30 days from last use (renewed at most daily while you use it), and never more than 90 days from sign-in, after which you sign in again so your roles are re-read. Blocking and signing out end it at once.
 
 ### Deploying on Railway
 
@@ -281,7 +282,7 @@ Run one replica only: state is a single SQLite file.
 - **Tokens:** verified offline: signature over the literal bytes, then issuer → audience → expiry → kind/sub shape → required scopes. MCPL connections close (code 4001) when the token expires, and hosts redial with a fresh one.
 - **Several issuers:** a sub belongs to the issuer that first presented it, so another trusted issuer cannot mint it. `docs:admin` is honored only from the home issuer.
 - **Browser sign-in:** human tokens only, single-use (`jti` required). If the issuer echoes the `state` the server sent, it must match the browser's login cookie. The current home node does not echo it yet, so login-CSRF protection is partial until it does.
-- **Sockets:** a browser socket closes when its session expires, on logout, and when its principal is blocked or loses access (live).
+- **Sockets:** a browser socket closes when its session expires (an active session is renewed, and the socket checks again), on logout, and when its principal is blocked or loses access (live).
 - **Incoming Yjs updates** are fully validated before they are applied:
   - plain text under `body` only;
   - nothing may be left pending (no gaps, no unknown references, no deletions of not-yet-existing items);
