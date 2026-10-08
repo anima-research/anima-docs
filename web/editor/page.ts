@@ -462,6 +462,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
       const s = new SuggestSession({ provider, meSub: me.sub });
       s.onChange = sessionChanged;
       s.onError = (m) => toast(`A suggestion couldn’t be saved: ${m}`, { kind: 'error' });
+      s.onNotice = (m) => toast(m, { kind: 'info', timeout: 8000 });
       session = s;
       view.dispatch({ effects: syncC.reconfigure(suggestSync(s)) });
       s.onThreads(rail.threads);

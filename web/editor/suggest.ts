@@ -53,6 +53,11 @@ type Op =
 const SYNC_DEBOUNCE = 900;
 const SYNC_MAX_WAIT = 4000;
 const MAX_TRIES = 3;
+/** The server's limit for one suggestion's original or replacement. */
+const MAX_SUGGESTION = 100_000;
+/** One save message carries at most this many ops and characters (the socket refuses big frames). */
+const BATCH_OPS = 200;
+const BATCH_CHARS = 900_000;
 
 let keySeq = 0;
 const newKey = () => `r${Date.now().toString(36)}${(++keySeq).toString(36)}`;
@@ -106,6 +111,8 @@ export class SuggestSession {
   onChange: () => void = () => {};
   /** A suggestion couldn't be saved after retries. */
   onError: (message: string) => void = () => {};
+  /** Something happened to your suggestions the person should know about. */
+  onNotice: (message: string) => void = () => {};
 
   constructor(private deps: { provider: DocProvider; meSub: string }) {}
 
@@ -200,14 +207,24 @@ export class SuggestSession {
     }
     const R = ChangeSet.of(specs, this.S.length);
     const forView = R.map(this.P, true);
+    // Regions whose original text the change deleted entirely: what they replaced is gone.
+    const collapsed = new Set<string>();
     const before = this.regions.map((r) => {
       const from = R.mapPos(r.from, 1), to = Math.max(from, R.mapPos(r.to, -1));
+      if (r.to > r.from && to <= from) collapsed.add(r.key);
       return { ...r, from, to };
     });
     this.P = this.P.map(R);
     this.S = R.apply(this.S);
     this.derive(before);
     this.view?.dispatch({ changes: forView, annotations: [suggestAnn.of('remote'), Transaction.addToHistory.of(false)] });
+    if (collapsed.size) {
+      // Don't let the replacement drift onto the next word: drop it here. A saved
+      // one stays on the server, where it now shows as outdated.
+      this.rebuild(this.regions.filter((r) => !collapsed.has(r.key)));
+      this.onNotice('Someone deleted text you were suggesting a change to, so that suggestion no longer applies.');
+      return;
+    }
     // Someone edited text a suggestion of yours covers: it needs a fresh anchor.
     if (this.regions.some((r) => r.sent && !same(r.sent, this.state(r)))) this.schedule();
     else this.onChange();
@@ -221,6 +238,7 @@ export class SuggestSession {
   private derive(previous: Region[]) {
     // 1. P's changes, trimmed to what actually differs.
     const raw: { from: number; to: number; text: string; vFrom: number; vTo: number }[] = [];
+    // Touching changes report as one (a deletion plus what you typed in its place is one replacement).
     this.P.iterChanges((fromA, toA, fromB, toB, ins) => {
       const orig = this.S.sliceString(fromA, toA);
       const text = ins.toString();
@@ -251,26 +269,38 @@ export class SuggestSession {
       const first = g.raws[0], last = g.raws[g.raws.length - 1];
       return { key: '', id: null, from: g.from, to: g.to, text, vFrom: first.vFrom - (first.from - g.from), vTo: last.vTo + (g.to - last.to), sent: null, failed: null };
     });
+    // Identity: first by real overlap, then (for what's left) by touching.
     const used = new Set<Region>();
-    for (const n of next) {
-      const hits = previous.filter((o) => !used.has(o) && n.from <= o.to && o.from <= n.to)
-        .sort((a, b) => (a.id ? 0 : 1) - (b.id ? 0 : 1) || a.from - b.from);
-      const keep = hits[0];
-      if (keep) { used.add(keep); n.key = keep.key; n.id = keep.id; n.sent = keep.sent; n.failed = keep.failed; }
-      else n.key = newKey();
-    }
+    const overlaps = (n: { from: number; to: number }, o: { from: number; to: number }) =>
+      (n.from < o.to && o.from < n.to)
+      || (n.from === n.to && o.from < n.from && n.from < o.to)
+      || (o.from === o.to && n.from < o.from && o.from < n.to)
+      || (n.from === n.to && o.from === o.to && n.from === o.from);
+    const touches = (n: { from: number; to: number }, o: { from: number; to: number }) => n.from <= o.to && o.from <= n.to;
+    const adopt = (n: Region, test: typeof overlaps) => {
+      const keep = previous.filter((o) => !used.has(o) && test(n, o)).sort((a, b) => (a.id ? 0 : 1) - (b.id ? 0 : 1) || a.from - b.from)[0];
+      if (!keep) return false;
+      used.add(keep); n.key = keep.key; n.id = keep.id; n.sent = keep.sent; n.failed = keep.failed;
+      return true;
+    };
+    const unmatched = next.filter((n) => !adopt(n, overlaps));
+    for (const n of unmatched) if (!adopt(n, touches)) n.key = newKey();
     for (const o of previous) if (!used.has(o) && o.id && !next.some((n) => n.id === o.id)) this.withdraw.add(o.id);
     this.regions = next;
   }
 
-  /** Replace P with these regions and move the editor to match. */
+  /**
+   * Replace P with these regions and move the editor to match. Regions that
+   * truly overlap an earlier one are dropped (and withdrawn, if saved).
+   */
   private rebuild(regions: Region[]) {
     if (!this.view) return;
     const sorted = [...regions].sort((a, b) => a.from - b.from || a.to - b.to);
     const keep: Region[] = [];
     for (const r of sorted) {
       const prev = keep[keep.length - 1];
-      if (prev && (r.from < prev.to || (r.from === prev.to && (r.from === r.to || prev.from === prev.to)))) continue; // overlapping: keep the first
+      const clash = prev && (r.from < prev.to || (r.from === r.to && prev.from === prev.to && r.from === prev.from));
+      if (clash) { if (r.id) this.withdraw.add(r.id); continue; }
       keep.push(r);
     }
     const nextP = ChangeSet.of(keep.map((r) => ({ from: r.from, to: r.to, insert: r.text })), this.S.length);
@@ -355,33 +385,61 @@ export class SuggestSession {
       if (same(r.sent, st)) continue;
       if (r.failed && r.failed.count >= MAX_TRIES && same(r.failed.state, st)) continue;
       if (r.from === r.to && !r.text) continue;
+      if (st.text.length > MAX_SUGGESTION || st.original.length > MAX_SUGGESTION) {
+        // The server would refuse it: say so once, don't send it.
+        r.failed = { state: st, count: MAX_TRIES, message: `This change is too large to suggest (over ${MAX_SUGGESTION.toLocaleString()} characters). Split it into smaller changes.` };
+        this.onError(r.failed.message);
+        continue;
+      }
       states.set(r.key, st);
       const anchor = anchorFor(ytext, r.from, r.to);
       ops.push(r.id ? { op: 'update', key: r.key, id: r.id, anchor, original: st.original, text: st.text } : { op: 'create', key: r.key, anchor, original: st.original, text: st.text });
     }
     for (const id of this.withdraw) ops.push({ op: 'withdraw', id });
-    if (!ops.length) { this.onChange(); return true; }
+    if (!ops.length) { this.onChange(); this.redraw(); return true; }
+    // Batches small enough for one socket frame.
+    const batches: Op[][] = [];
+    let cur: Op[] = [], chars = 0;
+    for (const op of ops) {
+      const size = op.op === 'withdraw' ? 64 : op.text.length + op.original.length + 256;
+      if (cur.length && (cur.length >= BATCH_OPS || chars + size > BATCH_CHARS)) { batches.push(cur); cur = []; chars = 0; }
+      cur.push(op); chars += size;
+    }
+    if (cur.length) batches.push(cur);
     let all = true;
+    const fail = (op: Op, message: string) => {
+      all = false;
+      if (op.op === 'withdraw') return;
+      const r = this.regions.find((y) => y.key === op.key);
+      const st = states.get(op.key)!;
+      if (!r) return;
+      const count = r.failed && same(r.failed.state, st) ? r.failed.count + 1 : 1;
+      r.failed = { state: st, count, message };
+      if (count === MAX_TRIES) this.onError(message);
+    };
     try {
-      const res = await this.deps.provider.request<{ results: SyncResult[] }>({ type: 'suggestion.sync', ops });
-      res.results.forEach((x, i) => {
-        const op = ops[i];
-        if (op.op === 'withdraw') { if (x.ok) this.withdraw.delete(op.id); else all = false; return; }
-        const r = this.regions.find((y) => y.key === op.key);
-        const st = states.get(op.key)!;
-        if (x.ok) {
-          if (r) { if (x.id) r.id = x.id; r.sent = st; r.failed = null; }
-          else if (op.op === 'create' && x.id) this.withdraw.add(x.id); // the region vanished while saving
-          return;
+      for (const batch of batches) {
+        let res: { results: SyncResult[] };
+        try {
+          res = await this.deps.provider.request<{ results: SyncResult[] }>({ type: 'suggestion.sync', ops: batch });
+        } catch (e) {
+          if (this.deps.provider.status !== 'online') return false; // offline: saved when the connection is back (the page calls sync)
+          // The server refused the whole message: count it against each change, so it can't loop.
+          for (const op of batch) fail(op, (e as Error).message || 'Couldn’t save this suggestion.');
+          continue;
         }
-        all = false;
-        if (!r) return;
-        const count = r.failed && same(r.failed.state, st) ? r.failed.count + 1 : 1;
-        r.failed = { state: st, count, message: x.error ?? 'Couldn’t save this suggestion.' };
-        if (count === MAX_TRIES) this.onError(r.failed.message);
-      });
-    } catch {
-      return false; // offline: saved when the connection is back (the page calls sync)
+        res.results.forEach((x, i) => {
+          const op = batch[i];
+          if (op.op === 'withdraw') { if (x.ok) this.withdraw.delete(op.id); else all = false; return; }
+          const r = this.regions.find((y) => y.key === op.key);
+          if (x.ok) {
+            if (r) { if (x.id) r.id = x.id; r.sent = states.get(op.key)!; r.failed = null; }
+            else if (op.op === 'create' && x.id) this.withdraw.add(x.id); // the region vanished while saving
+            return;
+          }
+          fail(op, x.error ?? 'Couldn’t save this suggestion.');
+        });
+      }
     } finally {
       this.redraw();
       this.onChange();

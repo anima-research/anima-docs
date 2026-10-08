@@ -12,7 +12,7 @@
 // and can't be accepted.
 
 import { EventEmitter } from 'node:events';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import * as Y from 'yjs';
 import type { DB } from './db.js';
 import { Fault } from './auth.js';
@@ -49,7 +49,17 @@ export interface ResolvedAnchor {
   context?: { before: string; after: string };
 }
 
-export interface Anchor { start: Uint8Array; end: Uint8Array; quote: string }
+/**
+ * A place in the document. `quote` is the anchored text ('' for an insertion
+ * point); a point also records the word just before it, so an insertion goes
+ * outdated when the text it follows changes.
+ */
+export interface Anchor { start: Uint8Array; end: Uint8Array; quote: string; context?: string }
+
+/** The word (and spacing) just before an insertion point. */
+export function pointContext(before: string): string {
+  return /\S*\s*$/.exec(before.slice(-24))?.[0] ?? '';
+}
 
 export interface Thread {
   root: Comment;
@@ -57,8 +67,12 @@ export interface Thread {
   anchor: ResolvedAnchor | null;
   /** base64 relative positions, for browsers to resolve against their replica. */
   rel: { start: string; end: string } | null;
-  /** For suggestions: whether the anchored text still matches the original (only open ones can be outdated). */
-  suggestion: (Suggestion & { outdated: boolean }) | null;
+  /**
+   * For suggestions: whether the anchored text still matches the original
+   * (only open ones can be outdated), and a version that changes whenever the
+   * author revises it (accepting can require the version the decider saw).
+   */
+  suggestion: (Suggestion & { outdated: boolean; version: string }) | null;
 }
 
 export type CommentEventKind = 'created' | 'replied' | 'edited' | 'deleted' | 'resolved' | 'reopened' | 'assigned' | 'accepted' | 'rejected';
@@ -104,6 +118,9 @@ const RATE = { member: { perMinute: 30, perHour: 400 }, guest: { perMinute: 5, p
 /** Revisions of open suggestions (a browser in suggesting mode saves them as you type). */
 const REVISE_RATE = { member: { perMinute: 120, perHour: 3000 }, guest: { perMinute: 30, perHour: 400 } };
 
+/** Total characters (originals plus replacements) one request may propose. */
+const MAX_BATCH_CHARS = 1_000_000;
+
 const newId = () => `c${randomBytes(6).toString('base64url').replace(/[-_]/g, 'x')}`;
 
 export class Comments extends EventEmitter {
@@ -124,6 +141,11 @@ export class Comments extends EventEmitter {
     log.set(actor.sub, recent);
     if (log.size > 5000) for (const [k, v] of log) if (!v.some((t) => now - t < 3600_000)) log.delete(k);
   }
+
+  /** Charge one write to an actor (a request that creates or decides several things at once pays once). */
+  chargeWrite(actor: Actor) { this.throttle(actor, 'write'); }
+  /** Charge one revision (a suggesting browser saving as you type). */
+  chargeRevision(actor: Actor) { this.throttle(actor, 'revise'); }
 
   get(id: string): Comment | null {
     const r = this.db.prepare('SELECT * FROM comments WHERE id = ?').get(id) as Row | undefined;
@@ -181,7 +203,7 @@ export class Comments extends EventEmitter {
     const ytext = this.docs.ydoc(docId).getText('body');
     if (!(Number.isInteger(index) && index >= 0 && index <= ytext.length)) throw new Fault(400, `Position ${index} is outside the document (length ${ytext.length}).`);
     const rel = Y.encodeRelativePosition(index > 0 ? Y.createRelativePositionFromTypeIndex(ytext, index, -1) : Y.createRelativePositionFromTypeIndex(ytext, 0, 0));
-    return { start: rel, end: rel, quote: '' };
+    return { start: rel, end: rel, quote: '', context: pointContext(ytext.toString().slice(Math.max(0, index - 24), index)) };
   }
 
   /** A range anchor, or an insertion point when the range is empty. */
@@ -189,14 +211,14 @@ export class Comments extends EventEmitter {
     return end > start ? this.anchorFromRange(docId, start, end) : this.anchorPoint(docId, start);
   }
 
-  resolveAnchor(docId: string, r: Pick<Row, 'anchor_start' | 'anchor_end' | 'quote'>): ResolvedAnchor | null {
+  resolveAnchor(docId: string, r: Pick<Row, 'anchor_start' | 'anchor_end' | 'quote'>, pre?: { text: string; starts: number[] }): ResolvedAnchor | null {
     if (!r.anchor_start || !r.anchor_end) return null;
     const doc = this.docs.ydoc(docId);
     const point = Buffer.from(r.anchor_start).equals(Buffer.from(r.anchor_end));
     const s = Y.createAbsolutePositionFromRelativePosition(Y.decodeRelativePosition(r.anchor_start), doc);
     const e = point ? s : Y.createAbsolutePositionFromRelativePosition(Y.decodeRelativePosition(r.anchor_end), doc);
-    const text = doc.getText('body').toString();
-    const starts = lineStarts(text);
+    const text = pre?.text ?? doc.getText('body').toString();
+    const starts = pre?.starts ?? lineStarts(text);
     if (!s || !e) return { start: 0, end: 0, line: 1, endLine: 1, text: '', orphaned: !point, point };
     // end is anchored to the last character (assoc −1); its absolute index is just past it.
     const start = s.index, end = point ? start : Math.max(e.index, start);
@@ -212,7 +234,8 @@ export class Comments extends EventEmitter {
     const sg = c.suggestion;
     if (!sg || sg.status !== 'open') return false;
     if (!anchor) return true;
-    if (anchor.point) return sg.original !== '';
+    // An insertion follows the word it was made after; if that changed (or its sentence went), it no longer fits.
+    if (anchor.point) return sg.original !== '' || !(anchor.context?.before ?? '').endsWith(c.quote ?? '');
     return anchor.orphaned || anchor.text !== sg.original;
   }
 
@@ -237,33 +260,35 @@ export class Comments extends EventEmitter {
     this.db.prepare(`INSERT INTO comments (id, doc_id, thread_id, author_sub, body, mentions, assignee_sub, anchor_start, anchor_end, quote, created_at, sugg_text, sugg_orig, sugg_status)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(id, docId, id, actor.sub, body, JSON.stringify(mentions.map((m) => m.sub)), assignee?.sub ?? null,
-        p.anchor ? Buffer.from(p.anchor.start) : null, p.anchor ? Buffer.from(p.anchor.end) : null, p.anchor?.quote.slice(0, 2000) ?? null, now,
+        p.anchor ? Buffer.from(p.anchor.start) : null, p.anchor ? Buffer.from(p.anchor.end) : null, p.anchor ? (p.anchor.context ?? p.anchor.quote).slice(0, 2000) : null, now,
         sugg?.text ?? null, sugg?.original ?? null, sugg ? 'open' : null);
     const addressed = [
+      // A suggestion asks the owner for a decision (first: an @mention of the owner in the note doesn't replace it).
+      ...(sugg && doc.ownerSub !== actor.sub ? [{ sub: doc.ownerSub, reason: 'suggestion' as const }] : []),
       ...mentions.filter((m) => m.sub !== actor.sub).map((m) => ({ sub: m.sub, reason: 'mention' as const })),
       ...(assignee && assignee.sub !== actor.sub ? [{ sub: assignee.sub, reason: 'assigned' as const }] : []),
-      // A suggestion asks the owner for a decision.
-      ...(sugg && doc.ownerSub !== actor.sub ? [{ sub: doc.ownerSub, reason: 'suggestion' as const }] : []),
     ];
     this.record(docId, id, id, 'created', actor.sub, dedupe(addressed));
     return { comment: this.get(id)!, warnings };
   }
 
   /** Propose replacing the anchored text (an insertion when the anchor is a point). */
-  suggest(docId: string, actor: Actor, p: { anchor: Anchor; text: string; note?: string }): { comment: Comment; warnings: string[] } {
-    return this.create(docId, actor, { body: p.note ?? '', anchor: p.anchor, suggestion: { text: p.text } });
+  suggest(docId: string, actor: Actor, p: { anchor: Anchor; text: string; note?: string }, opts: { charged?: boolean } = {}): { comment: Comment; warnings: string[] } {
+    return this.create(docId, actor, { body: p.note ?? '', anchor: p.anchor, suggestion: { text: p.text } }, { throttled: opts.charged });
   }
 
   /**
    * Several suggestions from one request (an agent's suggest_edit): counted as
    * one write, and all-or-nothing on validation. The note goes on the first.
    */
-  suggestMany(docId: string, actor: Actor, items: { anchor: Anchor; text: string }[], note?: string): { comments: Comment[]; warnings: string[] } {
+  suggestMany(docId: string, actor: Actor, items: { anchor: Anchor; text: string }[], note?: string, opts: { charged?: boolean } = {}): { comments: Comment[]; warnings: string[] } {
     this.docs.require(docId, actor, 'commenter');
     for (const it of items) this.checkSuggestion(docId, actor, it.anchor, it.text);
+    const chars = items.reduce((n, it) => n + it.text.length + it.anchor.quote.length, 0);
+    if (chars > MAX_BATCH_CHARS) throw new Fault(413, `Those suggestions cover ${chars.toLocaleString('en')} characters; propose at most ${MAX_BATCH_CHARS.toLocaleString('en')} at a time.`);
     const open = (this.db.prepare(`SELECT count(*) AS n FROM comments WHERE doc_id = ? AND author_sub = ? AND sugg_status = 'open' AND deleted_at IS NULL`).get(docId, actor.sub) as { n: number }).n;
     if (open + items.length > MAX_OPEN_SUGGESTIONS) throw new Fault(429, `That would make ${open + items.length} open suggestions from you on this document (limit ${MAX_OPEN_SUGGESTIONS}). Wait for some to be reviewed.`);
-    this.throttle(actor);
+    if (!opts.charged) this.throttle(actor);
     const comments: Comment[] = [];
     const warnings: string[] = [];
     this.db.transaction(() => {
@@ -280,7 +305,7 @@ export class Comments extends EventEmitter {
    * The author revises an open suggestion: new replacement text, and
    * optionally a new anchor (its original is the anchored text as it is now).
    */
-  revise(threadId: string, actor: Actor, p: { text: string; anchor?: Anchor | null }): Comment {
+  revise(threadId: string, actor: Actor, p: { text: string; anchor?: Anchor | null }, opts: { charged?: boolean } = {}): Comment {
     const root = this.openSuggestion(threadId, actor);
     if (root.author !== actor.sub) throw new Fault(403, 'Only the author can change a suggestion.');
     const original = p.anchor ? p.anchor.quote : root.suggestion!.original;
@@ -290,12 +315,14 @@ export class Comments extends EventEmitter {
       if (t?.suggestion?.outdated) throw new Fault(409, 'The text this suggestion was made on has changed. Make a new suggestion instead.');
     }
     this.checkSuggestionText(original, p.text, !!p.anchor && Buffer.from(p.anchor.start).equals(Buffer.from(p.anchor.end)));
-    this.throttle(actor, 'revise');
+    if (!opts.charged) this.throttle(actor, 'revise');
+    // Versions are edit times; two revisions in one millisecond must still differ.
+    const at = Math.max(Date.now(), (root.editedAt ?? root.createdAt) + 1);
     if (p.anchor) {
       this.db.prepare('UPDATE comments SET anchor_start = ?, anchor_end = ?, quote = ?, sugg_orig = ?, sugg_text = ?, edited_at = ? WHERE id = ?')
-        .run(Buffer.from(p.anchor.start), Buffer.from(p.anchor.end), original.slice(0, 2000), original, p.text, Date.now(), root.id);
+        .run(Buffer.from(p.anchor.start), Buffer.from(p.anchor.end), (p.anchor.context ?? original).slice(0, 2000), original, p.text, at, root.id);
     } else {
-      this.db.prepare('UPDATE comments SET sugg_text = ?, edited_at = ? WHERE id = ?').run(p.text, Date.now(), root.id);
+      this.db.prepare('UPDATE comments SET sugg_text = ?, edited_at = ? WHERE id = ?').run(p.text, at, root.id);
     }
     this.record(root.docId, root.id, root.id, 'edited', actor.sub, []);
     return this.get(root.id)!;
@@ -306,11 +333,15 @@ export class Comments extends EventEmitter {
    * replacement as the decider's edit; it fails if the suggestion is outdated.
    * An optional note is kept as a reply and carried by the decision event.
    */
-  decide(threadId: string, actor: Actor & { via?: ChangeOrigin['via'] }, decision: 'accept' | 'reject', opts: { note?: string } = {}):
+  decide(threadId: string, actor: Actor & { via?: ChangeOrigin['via'] }, decision: 'accept' | 'reject',
+    opts: { note?: string; expectVersion?: string; charged?: boolean } = {}):
     { comment: Comment; applied: { client: number; deleteSet: DeleteSet } | null } {
     const root = this.openSuggestion(threadId, actor);
     this.docs.require(root.docId, actor, 'editor');
     const sg = root.suggestion!;
+    if (decision === 'accept' && opts.expectVersion !== undefined && opts.expectVersion !== this.version(root.id)) {
+      throw new Fault(409, `Suggestion ${root.id} was changed by its author since you saw it; it now reads: ${suggestionSummary(sg, 300)}. Look again before accepting.`);
+    }
     let range: { start: number; end: number; current: string } | null = null;
     if (decision === 'accept') {
       const anchor = this.resolveAnchor(root.docId, this.row(root.id)!);
@@ -322,7 +353,7 @@ export class Comments extends EventEmitter {
       range = { start: anchor.start, end: anchor.end, current: text };
     }
     const note = opts.note?.trim() ? this.cleanBody(opts.note) : null;
-    this.throttle(actor);
+    if (!opts.charged) this.throttle(actor);
     const now = Date.now();
     let eventComment = root.id;
     const mentioned: { sub: string; reason: AddressReason }[] = [];
@@ -344,11 +375,30 @@ export class Comments extends EventEmitter {
         applied = this.docs.edit(root.docId, { sub: actor.sub, via: actor.via ?? 'mcpl' }, (t) => Documents.replaceMinimal(t, range!.start, range!.end, sg.text, range!.current));
       } catch (e) {
         this.db.prepare("UPDATE comments SET sugg_status = 'open', resolved_at = NULL, resolved_by = NULL WHERE id = ?").run(root.id);
+        if (eventComment !== root.id) this.db.prepare('UPDATE comments SET deleted_at = ? WHERE id = ?').run(Date.now(), eventComment);
         this.record(root.docId, root.id, root.id, 'reopened', actor.sub, []);
         throw e;
       }
     }
     return { comment: this.get(root.id)!, applied };
+  }
+
+  /** Remember which version of these suggestions `sub` was shown. */
+  markSeen(sub: string, threads: Thread[]) {
+    const put = this.db.prepare('INSERT INTO sugg_seen (sub, comment_id, version, at) VALUES (?, ?, ?, ?) ON CONFLICT(sub, comment_id) DO UPDATE SET version = excluded.version, at = excluded.at');
+    const now = Date.now();
+    for (const t of threads) if (t.suggestion?.status === 'open') put.run(sub, t.root.id, t.suggestion.version, now);
+  }
+
+  /** The version of a suggestion `sub` was last shown, if any. */
+  seenVersion(sub: string, threadId: string): string | null {
+    return (this.db.prepare('SELECT version FROM sugg_seen WHERE sub = ? AND comment_id = ?').get(sub, threadId) as { version: string } | undefined)?.version ?? null;
+  }
+
+  /** A suggestion's current version (see versionOf). */
+  version(threadId: string): string | null {
+    const r = this.row(threadId);
+    return r?.sugg_status ? versionOf(r) : null;
   }
 
   private openSuggestion(threadId: string, actor: Actor): Comment {
@@ -366,6 +416,7 @@ export class Comments extends EventEmitter {
     if (!anchor) throw new Fault(400, 'A suggestion needs a place in the document: quote the text to change, or a point to insert at.');
     if (typeof text !== 'string') throw new Fault(400, 'Suggested text must be a string.');
     const point = Buffer.from(anchor.start).equals(Buffer.from(anchor.end));
+    if (!point && !anchor.quote) throw new Fault(400, 'A suggestion that replaces text needs some text to replace.');
     this.checkSuggestionText(anchor.quote, text, point);
     const open = (this.db.prepare(`SELECT count(*) AS n FROM comments WHERE doc_id = ? AND author_sub = ? AND sugg_status = 'open' AND deleted_at IS NULL`).get(docId, actor.sub) as { n: number }).n;
     if (open >= MAX_OPEN_SUGGESTIONS) throw new Fault(429, `You have ${open} open suggestions on this document. Wait for some to be reviewed.`);
@@ -416,12 +467,15 @@ export class Comments extends EventEmitter {
     return { comment: this.get(c.id)!, warnings };
   }
 
-  remove(commentId: string, actor: Actor): void {
+  remove(commentId: string, actor: Actor, opts: { charged?: boolean } = {}): void {
     const c = this.get(commentId);
     if (!c || c.deletedAt) throw new Fault(404, `No comment ${commentId}.`);
     const { role } = this.requireFor(c, actor);
     if (c.author !== actor.sub && !atLeast(role, 'owner')) throw new Fault(403, 'Only the author or a document owner can delete a comment.');
+    if (!opts.charged) this.throttle(actor, 'revise');
     const now = Date.now();
+    // A withdrawn suggestion keeps its place in the history, not its (possibly large) text.
+    if (c.suggestion) this.db.prepare("UPDATE comments SET sugg_text = '', sugg_orig = '' WHERE id = ?").run(c.id);
     // Deleting a root deletes its thread.
     if (c.id === c.threadId) this.db.prepare('UPDATE comments SET deleted_at = ? WHERE thread_id = ? AND deleted_at IS NULL').run(now, c.id);
     else this.db.prepare('UPDATE comments SET deleted_at = ? WHERE id = ?').run(now, c.id);
@@ -468,18 +522,21 @@ export class Comments extends EventEmitter {
       byThread.set(r.thread_id, t);
     }
     const out: Thread[] = [];
+    // One read of the text for every anchor (it can be megabytes).
+    let pre: { text: string; starts: number[] } | undefined;
+    const text = () => (pre ??= (() => { const tx = this.docs.text(docId); return { text: tx, starts: lineStarts(tx) }; })());
     for (const t of byThread.values()) {
       if (!t.root) continue;
       if (t.root.resolved_at && !opts.includeResolved) continue;
       const root = fromRow(t.root);
-      const anchor = this.resolveAnchor(docId, t.root);
+      const anchor = t.root.anchor_start ? this.resolveAnchor(docId, t.root, text()) : null;
       out.push({
         root,
         replies: t.replies.map(fromRow),
         anchor,
         rel: t.root.anchor_start && t.root.anchor_end
           ? { start: Buffer.from(t.root.anchor_start).toString('base64'), end: Buffer.from(t.root.anchor_end).toString('base64') } : null,
-        suggestion: root.suggestion ? { ...root.suggestion, outdated: this.outdated(root, anchor) } : null,
+        suggestion: root.suggestion ? { ...root.suggestion, outdated: this.outdated(root, anchor), version: versionOf(t.root) } : null,
       });
     }
     out.sort((a, b) => (a.anchor?.start ?? Infinity) - (b.anchor?.start ?? Infinity) || a.root.createdAt - b.root.createdAt);
@@ -565,6 +622,14 @@ export class Comments extends EventEmitter {
     const ev: CommentEvent = { seq: Number(r.lastInsertRowid), docId, commentId, threadId, kind, actor, at, newlyAddressed };
     this.emit('event', ev);
   }
+}
+
+/** A suggestion's version: a hash of what it changes and where (a note edit doesn't change it). */
+function versionOf(r: Pick<Row, 'sugg_orig' | 'sugg_text' | 'anchor_start' | 'anchor_end'>): string {
+  const h = createHash('sha256');
+  for (const part of [r.sugg_orig ?? '', r.sugg_text ?? '']) h.update(part).update('\0');
+  for (const b of [r.anchor_start, r.anchor_end]) h.update(b ? Buffer.from(b) : Buffer.alloc(0)).update('\0');
+  return h.digest('base64url').slice(0, 12);
 }
 
 /** Quote text for a one-line summary: newlines shown as ⏎, clipped in the middle. */

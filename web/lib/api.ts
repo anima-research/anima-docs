@@ -58,6 +58,8 @@ export interface ThreadSuggestion {
   outdated: boolean;
   /** An insertion at a point (no original text). */
   point: boolean;
+  /** Changes when the author revises it; accepting names the version you saw. */
+  version: string;
 }
 
 export type LinkWho = 'anyone' | 'members';

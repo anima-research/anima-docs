@@ -14,6 +14,7 @@ import * as awarenessProtocol from 'y-protocols/awareness';
 import { createHmac, randomBytes } from 'node:crypto';
 import type { App } from './app.js';
 import { Fault } from './auth.js';
+import { MAX_SUGGESTION, pointContext } from './comments.js';
 import { isGuest, type Actor } from './principals.js';
 import { atLeast, type Role, type DocChange } from './documents.js';
 import type { CommentEvent } from './comments.js';
@@ -248,14 +249,23 @@ export class Realtime {
         case 'suggestion.revise': C.revise(String(m.id ?? ''), actor, { text: m.text }); reply(true); return;
         case 'suggestion.decide': {
           if (m.decision !== 'accept' && m.decision !== 'reject') throw new Fault(400, 'decision must be accept or reject.');
-          C.decide(String(m.id ?? ''), { ...actor, via: 'web' }, m.decision, { note: typeof m.note === 'string' ? m.note : undefined });
+          // Accepting names the version the person saw: an author's revision since then is refused.
+          C.decide(String(m.id ?? ''), { ...actor, via: 'web' }, m.decision, {
+            note: typeof m.note === 'string' ? m.note : undefined,
+            expectVersion: m.decision === 'accept' ? String(m.version ?? '') : undefined,
+          });
           reply(true); return;
         }
         case 'suggestion.decideMany': {
           if (m.decision !== 'accept' && m.decision !== 'reject') throw new Fault(400, 'decision must be accept or reject.');
-          if (!Array.isArray(m.ids) || m.ids.length > 500) throw new Fault(400, 'ids must be a list (at most 500).');
-          const results = (m.ids as unknown[]).map((id) => {
-            try { C.decide(String(id), { ...actor, via: 'web' }, m.decision); return { id, ok: true }; } catch (e) { return { id, ok: false, error: e instanceof Fault ? e.message : 'Failed.' }; }
+          if (!Array.isArray(m.items) || m.items.length > 500) throw new Fault(400, 'items must be a list of {id, version} (at most 500).');
+          C.chargeWrite(actor);
+          const results = (m.items as { id?: unknown; version?: unknown }[]).map((it) => {
+            const id = String(it?.id ?? '');
+            try {
+              C.decide(id, { ...actor, via: 'web' }, m.decision, { charged: true, expectVersion: m.decision === 'accept' ? String(it?.version ?? '') : undefined });
+              return { id, ok: true };
+            } catch (e) { return { id, ok: false, error: e instanceof Fault ? e.message : 'Failed.' }; }
           });
           reply(true, { results }); return;
         }
@@ -277,48 +287,85 @@ export class Realtime {
   private syncSuggestions(room: Room, actor: Actor, ops: unknown): { key?: string; id?: string; ok: boolean; error?: string; status?: number }[] {
     if (!Array.isArray(ops) || ops.length > 200) throw new Fault(400, 'ops must be a list (at most 200).');
     const C = this.app.comments;
-    return ops.map((raw) => {
-      const op = (raw ?? {}) as Record<string, any>;
+    this.app.docs.require(room.docId, actor, 'commenter');
+    // Cheap checks first, then one charge per message (plus one write if it creates anything).
+    const clean = ops.map((raw) => {
+      const op = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+      const kind = op.op === 'create' || op.op === 'update' || op.op === 'withdraw' ? op.op : null;
       const key = typeof op.key === 'string' ? op.key.slice(0, 64) : undefined;
+      const id = typeof op.id === 'string' ? op.id.slice(0, 64) : undefined;
+      const text = typeof op.text === 'string' ? op.text : null;
+      const original = typeof op.original === 'string' ? op.original : null;
+      const bad = !kind ? 'op must be create, update or withdraw.'
+        : kind !== 'create' && !id ? 'id is required.'
+        : kind !== 'withdraw' && (text === null || original === null) ? 'text and original are required.'
+        : kind !== 'withdraw' && (text!.length > MAX_SUGGESTION || original!.length > MAX_SUGGESTION) ? `A suggestion can cover at most ${MAX_SUGGESTION.toLocaleString('en')} characters; split it up.`
+        : null;
+      return { kind, key, id, text, original, anchor: op.anchor, bad };
+    });
+    C.chargeRevision(actor);
+    if (clean.some((o) => o.kind === 'create' && !o.bad)) C.chargeWrite(actor);
+    return clean.map((op) => {
       try {
-        if (op.op === 'withdraw') {
-          const c = C.get(String(op.id ?? ''));
+        if (op.bad) throw new Fault(400, op.bad);
+        if (op.kind === 'withdraw') {
+          const c = C.get(op.id!);
           if (!c || c.deletedAt || c.docId !== room.docId || !c.suggestion) return { id: op.id, ok: true }; // already gone
           if (c.author !== actor.sub) throw new Fault(403, 'Only the author can withdraw a suggestion.');
-          if (c.suggestion.status === 'open') C.remove(c.id, actor);
+          if (c.suggestion.status === 'open') C.remove(c.id, actor, { charged: true });
           return { id: c.id, ok: true };
         }
         const anchor = this.suggestionAnchor(room, op.anchor, op.original);
-        if (op.op === 'create') {
-          const r = C.suggest(room.docId, actor, { anchor, text: op.text, note: typeof op.note === 'string' ? op.note : undefined });
-          return { key, id: r.comment.id, ok: true };
+        let target = op.kind === 'update' ? op.id! : null;
+        if (op.kind === 'create' && op.key) {
+          // The same create sent again (its acknowledgement was lost): revise what it made instead of duplicating it.
+          const earlier = this.opKeys.get(`${actor.sub}\0${room.docId}\0${op.key}`);
+          const c = earlier ? C.get(earlier) : null;
+          if (c && !c.deletedAt && c.author === actor.sub && c.suggestion?.status === 'open') target = c.id;
         }
-        if (op.op === 'update') {
-          const c = C.get(String(op.id ?? ''));
-          if (!c || c.docId !== room.docId) throw new Fault(404, `No suggestion ${op.id}.`);
-          C.revise(c.id, actor, { text: op.text, anchor });
-          return { id: c.id, ok: true };
+        if (target) {
+          const c = C.get(target);
+          if (!c || c.docId !== room.docId) throw new Fault(404, `No suggestion ${target}.`);
+          C.revise(c.id, actor, { text: op.text!, anchor }, { charged: true });
+          return { key: op.key, id: c.id, ok: true };
         }
-        throw new Fault(400, 'op must be create, update or withdraw.');
+        const r = C.suggest(room.docId, actor, { anchor, text: op.text! }, { charged: true });
+        if (op.key) this.rememberOpKey(`${actor.sub}\0${room.docId}\0${op.key}`, r.comment.id);
+        return { key: op.key, id: r.comment.id, ok: true };
       } catch (e) {
         if (!(e instanceof Fault)) console.error('[realtime] suggestion op', e);
-        return { key, id: typeof op.id === 'string' ? op.id : undefined, ok: false, status: e instanceof Fault ? e.status : 500, error: e instanceof Fault ? e.message : 'Failed.' };
+        return { key: op.key, id: op.id, ok: false, status: e instanceof Fault ? e.status : 500, error: e instanceof Fault ? e.message : 'Failed.' };
       }
     });
   }
 
+  /** Creates seen recently, by the client's key: a resend after a lost acknowledgement finds what it made. */
+  private opKeys = new Map<string, string>();
+  private rememberOpKey(k: string, id: string) {
+    this.opKeys.delete(k);
+    this.opKeys.set(k, id);
+    if (this.opKeys.size > 20_000) for (const old of [...this.opKeys.keys()].slice(0, 5_000)) this.opKeys.delete(old);
+  }
+
   /** A suggestion's anchor from a browser: a range or a point, whose current text must be the stated original. */
-  private suggestionAnchor(room: Room, a: unknown, original: unknown) {
+  private suggestionAnchor(room: Room, a: unknown, original: string | null) {
     const r = (a ?? {}) as { start?: unknown; end?: unknown };
-    if (typeof r.start !== 'string' || typeof r.end !== 'string' || typeof original !== 'string') throw new Fault(400, 'A suggestion needs anchor {start, end} and its original text.');
+    if (typeof r.start !== 'string' || typeof r.end !== 'string' || r.start.length > 512 || r.end.length > 512 || original === null) {
+      throw new Fault(400, 'A suggestion needs anchor {start, end} and its original text.');
+    }
     const start = Buffer.from(r.start, 'base64'), end = Buffer.from(r.end, 'base64');
     const point = start.equals(end);
-    const s = Y.createAbsolutePositionFromRelativePosition(Y.decodeRelativePosition(start), room.doc);
-    const e = point ? s : Y.createAbsolutePositionFromRelativePosition(Y.decodeRelativePosition(end), room.doc);
-    if (!s || !e || s.type !== room.doc.getText('body') || e.index < s.index) throw new Fault(409, 'That place in the document has changed. Try again.');
-    const quote = point ? '' : room.doc.getText('body').toString().slice(s.index, e.index);
+    const ytext = room.doc.getText('body');
+    let s: Y.AbsolutePosition | null, e: Y.AbsolutePosition | null;
+    try {
+      s = Y.createAbsolutePositionFromRelativePosition(Y.decodeRelativePosition(start), room.doc);
+      e = point ? s : Y.createAbsolutePositionFromRelativePosition(Y.decodeRelativePosition(end), room.doc);
+    } catch { throw new Fault(400, 'Malformed anchor.'); }
+    if (!s || !e || s.type !== ytext || e.type !== ytext || (point ? false : e.index <= s.index)) throw new Fault(409, 'That place in the document has changed. Try again.');
+    const text = ytext.toString();
+    const quote = point ? '' : text.slice(s.index, e.index);
     if (point ? original !== '' : quote !== original) throw new Fault(409, 'The text changed while you were suggesting. Try again.');
-    return { start: new Uint8Array(start), end: new Uint8Array(end), quote };
+    return { start: new Uint8Array(start), end: new Uint8Array(end), quote, ...(point ? { context: pointContext(text.slice(Math.max(0, s.index - 24), s.index)) } : {}) };
   }
 
   /** Clients send base64 relative positions computed on their replica; verify they resolve here. */
@@ -349,7 +396,12 @@ export class Realtime {
       assignee: person(t.root.assignee),
       comments: [t.root, ...t.replies].map((c) => ({ id: c.id, author: person(c.author), body: c.body, createdAt: c.createdAt, editedAt: c.editedAt, mentions: c.mentions })),
       suggestion: t.suggestion
-        ? { original: t.suggestion.original, text: t.suggestion.text, status: t.suggestion.status, outdated: t.suggestion.outdated, point: !!t.anchor?.point }
+        ? {
+          // Decided suggestions are history: their full text isn't needed live.
+          original: t.suggestion.status === 'open' ? t.suggestion.original : clipText(t.suggestion.original),
+          text: t.suggestion.status === 'open' ? t.suggestion.text : clipText(t.suggestion.text),
+          status: t.suggestion.status, outdated: t.suggestion.outdated, point: !!t.anchor?.point, version: t.suggestion.version,
+        }
         : null,
     }));
   }
@@ -423,6 +475,8 @@ export class Realtime {
   private broadcastUpdate(docId: string, update: Uint8Array, exceptConn?: string) {
     const room = this.rooms.get(docId);
     if (!room) return;
+    // A decision announced in this turn goes out before the text it applies.
+    this.flushThreads(docId);
     const enc = encoding.createEncoder();
     encoding.writeVarUint(enc, MSG_SYNC);
     syncProtocol.writeUpdate(enc, update);
@@ -430,12 +484,27 @@ export class Realtime {
     for (const c of room.conns.values()) if (c.id !== exceptConn) send(c.ws, bytes);
   }
 
+  /** Events waiting to go out per document: several in one turn (a batch of suggestions) make one thread list. */
+  private pendingThreads = new Map<string, CommentEvent[]>();
   private broadcastThreads(docId: string, e: CommentEvent) {
+    if (!this.rooms.has(docId)) return;
+    const queued = this.pendingThreads.get(docId);
+    if (queued) { queued.push(e); return; }
+    this.pendingThreads.set(docId, [e]);
+    // At the end of this turn, or earlier if a Yjs update for this document goes out first.
+    queueMicrotask(() => this.flushThreads(docId));
+  }
+
+  private flushThreads(docId: string) {
+    const events = this.pendingThreads.get(docId);
+    if (!events) return;
+    this.pendingThreads.delete(docId);
     const room = this.rooms.get(docId);
     if (!room) return;
     const threads = this.threads(docId);
-    for (const c of room.conns.values()) this.sendTo(c, { type: 'threads', threads, event: { kind: e.kind, threadId: e.threadId, commentId: e.commentId, actor: e.actor } });
-    if (e.actor !== undefined) this.showAgentIfAgent(docId, e.actor);
+    const evs = events.map((x) => ({ kind: x.kind, threadId: x.threadId, commentId: x.commentId, actor: x.actor }));
+    for (const c of room.conns.values()) this.sendTo(c, { type: 'threads', threads, event: evs[evs.length - 1], events: evs });
+    for (const a of new Set(events.map((x) => x.actor))) if (a !== undefined) this.showAgentIfAgent(docId, a);
   }
 
   private broadcastMeta(docId: string, kind: string) {
@@ -570,4 +639,9 @@ function maskStates(states: Map<number, any>, clients?: number[]): Map<number, a
     if (st !== undefined) out.set(client, st?.user?.sub ? { ...st, user: { ...st.user, sub: maskSub(st.user.sub) } } : st);
   }
   return out;
+}
+
+/** Clip long text in thread payloads (decided suggestions). */
+function clipText(t: string, max = 2000): string {
+  return t.length > max ? `${t.slice(0, max)}…` : t;
 }

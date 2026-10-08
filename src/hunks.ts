@@ -14,6 +14,8 @@ const SPLIT_GAP = 80;
 /** Replacements smaller than this stay one hunk. */
 const SMALL = 120;
 const MAX_HUNKS = 60;
+/** Past this size a replacement isn't diffed (it stays one hunk): diffing is synchronous CPU. */
+const DIFF_MAX = 60_000;
 
 const isWord = (c: string | undefined) => !!c && /[\p{L}\p{N}_'’-]/u.test(c);
 
@@ -34,13 +36,18 @@ export function trimToChange(doc: string, from: number, to: number, next: string
   return { from: from + p, to: to - q, text: next.slice(p, next.length - q) };
 }
 
-/** Split one replacement into hunks (each a contiguous change in document coordinates). */
-export function splitHunks(doc: string, from: number, to: number, next: string): Hunk[] {
+/**
+ * Split one replacement into hunks (each a contiguous change in document
+ * coordinates). `deadline` (ms epoch) bounds the time spent diffing across a
+ * whole request: past it, replacements stay whole.
+ */
+export function splitHunks(doc: string, from: number, to: number, next: string, deadline = Date.now() + 200): Hunk[] {
   const t = trimToChange(doc, from, to, next);
   if (!t) return [];
   const prev = doc.slice(t.from, t.to);
-  if (prev.length + t.text.length < SMALL) return [t];
-  const parts = diffWordsWithSpace(prev, t.text, { timeout: 200 }) as { value: string; added?: boolean; removed?: boolean }[] | undefined;
+  const budget = deadline - Date.now();
+  if (prev.length + t.text.length < SMALL || prev.length + t.text.length > DIFF_MAX || budget < 5) return [t];
+  const parts = diffWordsWithSpace(prev, t.text, { timeout: Math.min(200, budget) }) as { value: string; added?: boolean; removed?: boolean }[] | undefined;
   if (!parts) return [t];
   const out: Hunk[] = [];
   let pos = 0; // offset in prev

@@ -181,10 +181,24 @@ function decideTool(app: App, actor: Actor, a: Record<string, any>, decision: 'a
     ids = [...new Set(a.suggestions as string[])];
   } else throw new Fault(400, 'suggestions must be a list of ids, or "all" with document.');
   const note = typeof (decision === 'accept' ? a.note : a.reason) === 'string' ? String(decision === 'accept' ? a.note : a.reason) : undefined;
+  app.comments.chargeWrite(actor);
   const done: string[] = [], failed: string[] = [];
   for (const sid of ids) {
     try {
-      const { comment, applied } = app.comments.decide(sid, { ...actor, via: 'mcpl' }, decision, { note });
+      // Accept only what you were shown: a suggestion revised (or never shown to you) is refused, with its current text.
+      let expectVersion: string | undefined;
+      if (decision === 'accept') {
+        const t = app.comments.thread(sid);
+        const current = t?.suggestion ? t.suggestion.version : null;
+        const seen = app.comments.seenVersion(actor.sub, t?.root.id ?? sid);
+        if (t?.suggestion && current && seen !== current && t.suggestion.status === 'open') {
+          app.comments.markSeen(actor.sub, [t]);
+          failed.push(`  [${t.root.id}] ${seen ? 'changed since you last saw it' : 'not yet shown to you'}; it now reads: ${suggestionSummary(t.suggestion, 300, t.anchor)}. Accept again if that is right.`);
+          continue;
+        }
+        expectVersion = current ?? undefined;
+      }
+      const { comment, applied } = app.comments.decide(sid, { ...actor, via: 'mcpl' }, decision, { note, expectVersion, charged: true });
       if (applied) app.attention.noteOwnEdit(actor.sub, comment.docId, applied.client, applied.deleteSet);
       done.push(`  [${comment.id}] ${suggestionSummary(comment.suggestion!, 160)}`);
     } catch (e) {
@@ -281,7 +295,10 @@ export const TOOLS: ToolDef[] = [
       const wantComments = a.comments !== false;
       const all = wantComments || mode === 'inline' ? app.comments.threads(id) : [];
       let inlined = new Set<string>();
-      if (mode === 'inline') ({ body, shown: inlined } = inlineSuggestions(full, sliceFrom, sliceTo, all));
+      if (mode === 'inline') {
+        ({ body, shown: inlined } = inlineSuggestions(full, sliceFrom, sliceTo, all));
+        app.comments.markSeen(actor.sub, all.filter((t) => inlined.has(t.root.id)));
+      }
       const pending = all.filter((t) => t.suggestion?.status === 'open').length;
       const header = `# “${doc.title}” (${doc.id}) — rev ${doc.rev}, ${starts.length} lines${partial ? `, showing lines ${first}–${last}` : ''}; you are ${role}; owner ${app.principals.label(doc.ownerSub)}; updated ${ago(doc.updatedAt)}`
         + (pending ? `; ${pending} open suggestion${pending === 1 ? '' : 's'}${mode === 'inline' ? ' shown inline as CriticMarkup (not part of the text)' : ''}` : '');
@@ -295,6 +312,7 @@ export const TOOLS: ToolDef[] = [
         if (comments.length) out.push(`\nOpen comments (${comments.length}):\n${comments.map((t) => threadText(app, t)).join('\n\n')}`);
         if (suggestions.length) {
           out.push(`\nOpen suggestions (${suggestions.length}) — editors accept_suggestion / reject_suggestion:\n${suggestions.map((t) => threadText(app, t, { brief: inlined.has(t.root.id) })).join('\n\n')}`);
+          app.comments.markSeen(actor.sub, suggestions);
         }
       }
       if (!partial) app.attention.markRead(actor.sub, id, { comments: wantComments });
@@ -347,6 +365,7 @@ export const TOOLS: ToolDef[] = [
       if (a.only === 'comments') threads = threads.filter((t) => !t.suggestion);
       else if (a.only === 'suggestions') threads = threads.filter((t) => t.suggestion);
       app.attention.markCommentsRead(actor.sub, id);
+      app.comments.markSeen(actor.sub, threads);
       return text(threads.length ? threads.map((t) => threadText(app, t)).join('\n\n') : a.only === 'suggestions' ? 'No suggestions.' : 'No comment threads.');
     },
   },
@@ -643,12 +662,16 @@ export const TOOLS: ToolDef[] = [
     run(app, actor, a) {
       const id = need(a, 'document');
       const { doc } = app.docs.require(id, actor, 'commenter');
+      // Pay before the (CPU-bound) planning, so a failing call still counts.
+      app.comments.chargeWrite(actor);
       const current = app.docs.text(id);
-      const hunks = planIndependent(current, a.edits as AgentEdit[]).flatMap((p) => splitHunks(current, p.from, p.to, p.text));
+      const deadline = Date.now() + 300;
+      const hunks = planIndependent(current, a.edits as AgentEdit[]).flatMap((p) => splitHunks(current, p.from, p.to, p.text, deadline));
       if (!hunks.length) throw new Fault(400, 'None of the edits would change anything.');
       if (hunks.length > 100) throw new Fault(413, `That would be ${hunks.length} separate suggestions; suggest at most 100 at a time (split the work, or edit directly if you can).`);
-      const { comments, warnings } = app.comments.suggestMany(id, actor, hunks.map((h) => ({ anchor: app.comments.anchorFor(id, h.from, h.to), text: h.text })), typeof a.note === 'string' ? a.note : undefined);
+      const { comments, warnings } = app.comments.suggestMany(id, actor, hunks.map((h) => ({ anchor: app.comments.anchorFor(id, h.from, h.to), text: h.text })), typeof a.note === 'string' ? a.note : undefined, { charged: true });
       const made = comments.map((c) => app.comments.thread(c.id)!);
+      app.comments.markSeen(actor.sub, made);
       const owner = doc.ownerSub === actor.sub ? 'You own this document; accept them with accept_suggestion.' : `${app.principals.label(doc.ownerSub)} (the owner) will be notified.`;
       return text([
         `Suggested ${made.length === 1 ? 'a change' : `${made.length} changes`} to “${doc.title}” (${doc.id}). ${owner}`,
@@ -659,7 +682,7 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: 'accept_suggestion', featureSet: 'docs.write', toolClass: 'notes',
-    description: 'Accept suggestions: each change is applied to the document as your edit, and its author is told. Needs edit access. An outdated suggestion (its text changed since it was made) can\'t be accepted; reject it instead. Pass ids, or "all" with document.',
+    description: 'Accept suggestions: each change is applied to the document as your edit, and its author is told. Needs edit access. You can accept only what you have been shown: a suggestion revised since you last saw it (in a notice, list_comments or read_document) is refused with its current text, and accepting again confirms it. An outdated suggestion (its text changed since it was made) can\'t be accepted; reject it instead. Pass ids, or "all" with document.',
     inputSchema: { type: 'object', required: ['suggestions'], properties: {
       suggestions: { anyOf: [{ type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 200 }, { type: 'string', enum: ['all'] }], description: 'Suggestion ids, or "all" (needs document).' },
       document: S('With "all": the document whose open suggestions to accept.'),

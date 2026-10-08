@@ -258,6 +258,44 @@ try {
     assert(del && del.suggestion.text === '', `the revised one is a plain deletion again: ${JSON.stringify(open.map((x) => x.suggestion))}`);
   });
 
+  await step('touching changes stay separate suggestions; deciding one keeps the other', async () => {
+    await caretAfter(bob, 'The beta opens');
+    await bob.keyboard.type('!');
+    await caretAfter(bob, 'The beta opens!');
+    await bob.keyboard.press('ArrowRight'); // past the space
+    await bob.keyboard.type('soon ');
+    await bob.locator('.cm-sugg-ins.mine:not(.pending)', { hasText: 'soon' }).waitFor({ timeout: 6000 });
+    await sleep(400);
+    const mine = (await threads(bob)).filter((x) => x.suggestion?.status === 'open' && (x.suggestion.text.includes('!') || x.suggestion.text.includes('soon')));
+    assert(mine.length === 2, `two suggestions: ${JSON.stringify(mine.map((x) => x.suggestion))}`);
+    const bang = mine.find((x) => x.suggestion.text.includes('!'));
+    await alice.locator(`.thread-card.suggestion[data-id="${bang.id}"] .reject-btn`).click();
+    await bob.waitForFunction(() => !document.querySelector('.editor-page .cm-content').cmTile.root.view.state.doc.toString().includes('opens!'));
+    assert((await viewText(bob)).includes('opens soon'), 'the other change stays in Bob’s view');
+    const left = (await threads(bob)).filter((x) => x.suggestion?.status === 'open' && x.suggestion.text.includes('soon'));
+    assert(left.length === 1, 'and stays a suggestion');
+    // Clean up for the next steps.
+    await alice.locator(`.thread-card.suggestion[data-id="${left[0].id}"] .reject-btn`).click();
+    await bob.waitForFunction(() => !document.querySelector('.editor-page .cm-content').cmTile.root.view.state.doc.toString().includes('opens soon'));
+  });
+
+  await step('when someone deletes the text Bob is suggesting on, his change is dropped, not moved', async () => {
+    await selectInEditor(bob, 'every workspace');
+    await bob.keyboard.type('each team');
+    await bob.locator('.cm-sugg-ins.mine:not(.pending)', { hasText: 'each team' }).waitFor({ timeout: 6000 });
+    await alice.evaluate(() => {
+      const view = document.querySelector('.editor-page .cm-content').cmTile.root.view;
+      const i = view.state.doc.toString().indexOf('every workspace ');
+      view.dispatch({ changes: { from: i, to: i + 'every workspace '.length } });
+    });
+    await bob.locator('.toast', { hasText: 'no longer applies' }).waitFor({ timeout: 6000 });
+    const bv = await viewText(bob);
+    assert(!bv.includes('each team'), `Bob’s change is gone from his view: ${JSON.stringify(bv)}`);
+    const t = (await threads(bob)).find((x) => x.suggestion?.status === 'open' && x.suggestion.text.includes('each team'));
+    assert(t && t.suggestion.outdated, 'the saved suggestion shows as outdated');
+    await alice.locator(`.thread-card.suggestion[data-id="${t.id}"] .reject-btn`).click();
+  });
+
   await step('Alice switches to Suggesting, suggests, and switches back: her suggestion stays a suggestion', async () => {
     await alice.locator('.write-mode').click();
     await alice.getByRole('menuitemradio', { name: /Suggesting/ }).click();

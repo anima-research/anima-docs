@@ -91,7 +91,7 @@ export class CommentsRail {
     this.render();
   }
 
-  setThreads(threads: Thread[], event?: ThreadEvent) {
+  setThreads(threads: Thread[], events: ThreadEvent[] = []) {
     this.threads = threads;
     for (const t of threads) for (const c of t.comments) remember([{ ...c.author, issuer: '', role: 'member', lastSeen: 0 } as Person].filter((p) => !personBySub(p.sub)));
     if (this.active && !threads.some((t) => t.id === this.active)) this.active = null;
@@ -100,7 +100,7 @@ export class CommentsRail {
     this.render();
     this.onCountChange(this.openCount);
     this.onSuggestionsChange(this.openSuggestions().length);
-    if (event) this.notify(event);
+    for (const ev of events) this.notify(ev);
   }
 
   /** Jump to the next open suggestion after the active one (in document order). */
@@ -443,9 +443,10 @@ export class CommentsRail {
     });
     if (!ok) return;
     try {
-      const r = await this.deps.provider.request<{ results: { id: string; ok: boolean; error?: string }[] }>({ type: 'suggestion.decideMany', ids, decision }, 30_000);
-      const done = r.results.filter((x) => x.ok).length, failed = r.results.length - done;
-      toast(`${decision === 'accept' ? 'Accepted' : 'Rejected'} ${done}${failed ? `; ${failed} couldn’t be (they changed meanwhile)` : ''}.`, { kind: failed ? 'info' : 'success' });
+      const versions = new Map(open.map((t) => [t.id, t.suggestion!.version]));
+      const r = await this.deps.provider.request<{ results: { id: string; ok: boolean; error?: string }[] }>({ type: 'suggestion.decideMany', decision, items: ids.map((id) => ({ id, version: versions.get(id) })) }, 30_000);
+      const done = r.results.filter((x) => x.ok).length, failed = r.results.filter((x) => !x.ok);
+      toast(`${decision === 'accept' ? 'Accepted' : 'Rejected'} ${done}${failed.length ? `; ${failed.length} not: ${failed[0].error}` : ''}`, { kind: failed.length ? 'info' : 'success', timeout: failed.length ? 9000 : 4000 });
     } catch (e) { toast(errorMessage(e), { kind: 'error' }); }
   }
 
@@ -603,7 +604,8 @@ export class CommentsRail {
     else if (sg.outdated) parts.push(h('div.card-banner.warn', null, icon('alert', 14), 'The text changed since this was suggested', this.canDecide ? ' — it can only be rejected' : ''));
     const actions: HTMLElement[] = [];
     if (open && this.canDecide) {
-      actions.push(h('button.icon-btn.sm.accept-btn', { type: 'button', 'aria-label': 'Accept suggestion', 'data-tip': sg.outdated ? 'Outdated: can’t be accepted' : 'Accept', disabled: sg.outdated, onclick: () => void this.op({ type: 'suggestion.decide', id: t.id, decision: 'accept' }) }, icon('check', 18)));
+      // Accepting names the version on screen: if the author changed it meanwhile, the server refuses.
+      actions.push(h('button.icon-btn.sm.accept-btn', { type: 'button', 'aria-label': 'Accept suggestion', 'data-tip': sg.outdated ? 'Outdated: can’t be accepted' : 'Accept', disabled: sg.outdated, onclick: () => void this.op({ type: 'suggestion.decide', id: t.id, decision: 'accept', version: sg.version }) }, icon('check', 18)));
       actions.push(h('button.icon-btn.sm.reject-btn', { type: 'button', 'aria-label': 'Reject suggestion', 'data-tip': 'Reject', onclick: () => void this.op({ type: 'suggestion.decide', id: t.id, decision: 'reject' }) }, icon('x', 18)));
     }
     const menu: MenuItem[] = [];

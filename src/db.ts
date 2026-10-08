@@ -6,7 +6,7 @@ import { dirname } from 'node:path';
 
 export type DB = Database.Database;
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 export function openDatabase(file: string): DB {
   if (file !== ':memory:') mkdirSync(dirname(file), { recursive: true });
@@ -269,6 +269,22 @@ export function openDatabase(file: string): DB {
       if (!have.has('sugg_text')) db.exec('ALTER TABLE comments ADD COLUMN sugg_text TEXT');
       if (!have.has('sugg_orig')) db.exec('ALTER TABLE comments ADD COLUMN sugg_orig TEXT');
       if (!have.has('sugg_status')) db.exec("ALTER TABLE comments ADD COLUMN sugg_status TEXT CHECK (sugg_status IN ('open','accepted','rejected'))");
+      db.pragma('user_version = 3');
+    })();
+  }
+  if ((db.pragma('user_version', { simple: true }) as number) < 4) {
+    // v4: which version of each suggestion an agent has been shown, so accepting
+    // by id can't apply a revision it never saw.
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS sugg_seen (
+          sub         TEXT NOT NULL,
+          comment_id  TEXT NOT NULL,
+          version     TEXT NOT NULL,
+          at          INTEGER NOT NULL,
+          PRIMARY KEY (sub, comment_id)
+        );
+      `);
       db.pragma(`user_version = ${SCHEMA_VERSION}`);
     })();
   }

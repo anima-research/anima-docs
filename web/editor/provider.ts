@@ -23,7 +23,8 @@ type Events = {
   status: (s: ConnStatus) => void;
   synced: () => void;
   hello: (m: { you: Me; role: Role; doc: DocInfo | null }) => void;
-  threads: (threads: Thread[], event?: ThreadEvent) => void;
+  /** The thread list, and the events (in order) that changed it. */
+  threads: (threads: Thread[], events: ThreadEvent[]) => void;
   meta: (doc: DocInfo) => void;
   role: (role: Role) => void;
   /** Your identity changed (a guest renamed themselves). */
@@ -208,7 +209,7 @@ export class DocProvider {
         this.role = m.role;
         this.emit('hello', { you: m.you, role: m.role, doc: m.doc });
         break;
-      case 'threads': this.emit('threads', m.threads ?? [], m.event); break;
+      case 'threads': this.emit('threads', m.threads ?? [], Array.isArray(m.events) ? m.events : m.event ? [m.event] : []); break;
       case 'meta': if (m.doc) this.emit('meta', m.doc); break;
       case 'role': this.role = m.role; this.emit('role', m.role); break;
       case 'you': if (m.you?.sub) this.emit('you', m.you); break;

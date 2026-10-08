@@ -263,7 +263,7 @@ test('schema v2 migration keeps a v1 database intact', async () => {
   db0.pragma('user_version = 1');
   db0.close();
   const db = openDatabase(file);
-  assert.equal(db.pragma('user_version', { simple: true }), 3);
+  assert.equal(db.pragma('user_version', { simple: true }), 4);
   assert.equal((db.prepare('SELECT title FROM documents WHERE id = ?').get('dmig') as any).title, 'T');
   db.prepare(`INSERT INTO principals (sub, name, kind, issuer, color, first_seen, last_seen) VALUES ('guest:q', 'Q (guest)', 'guest', 'guest', '#000', 1, 1)`).run();
   assert.equal((db.pragma('foreign_key_check') as unknown[]).length, 0);
