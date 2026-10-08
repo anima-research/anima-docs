@@ -22,8 +22,9 @@ test('agent diff: shows others\' changes with attribution, hides the agent\'s ow
 
   const c = textChanges(docs, principals, d.id, base, { title: d.title });
   assert.equal(c.changed, true);
-  assert.match(c.text, /\+Ship the beta in early Q4\./);
-  assert.match(c.text, /-Ship the beta in Q4\./);
+  // A small change in a line is shown with the changed words marked.
+  assert.match(c.text, /~Ship the beta in \{\+early \+\}Q4\./);
+  assert.match(c.text, /changed words marked \[-removed-\]\{\+added\+\}/);
   assert.match(c.text, /Goals/);
   assert.match(c.text, /Ada/);
   assert.doesNotMatch(c.text, /Hiring/, 'own edit must not be reported back');
@@ -107,4 +108,19 @@ test('access control: restricted by default, roles, general access', () => {
   assert.equal(docs.role(d.id, c), 'viewer');
   assert.equal(docs.role(d.id, b), 'commenter');
   assert.equal(docs.list(c).length, 1);
+});
+
+test('agent diff: a small change in a long paragraph is word-marked and trimmed; a rewrite stays as whole lines', () => {
+  const { docs, principals, actor } = core();
+  const ann = actor('Ann');
+  const long = 'In practice this is usually described as the subconscious mind of the model, which is useful as a picture but says little about mechanism. '.repeat(4).trim();
+  const d = docs.create(ann, 'T', `# T\n\n${long}\n\nShort line.\n`);
+  const base = docs.snapshot(d.id);
+  docs.edit(d.id, { sub: ann.sub, via: 'web' }, (t) => { const i = t.toString().indexOf('mind of the model'); t.delete(i + 8, 3); t.insert(i + 8, 'a'); });
+  docs.edit(d.id, { sub: ann.sub, via: 'web' }, (t) => { const i = t.toString().indexOf('Short line.'); t.delete(i, 11); t.insert(i, 'Entirely different words now.'); });
+  const c = textChanges(docs, principals, d.id, base, { title: 'T' });
+  assert.match(c.text, /~…?.*subconscious mind of \[-the-\]\{\+a\+\} model.*…/);
+  assert.ok(!c.text.includes(long), 'the long paragraph is not repeated whole');
+  assert.match(c.text, /-Short line\.\n\+Entirely different words now\./);
+  assert.ok(c.text.length < 900, `compact: ${c.text.length} chars`);
 });

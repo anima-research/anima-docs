@@ -99,12 +99,12 @@ The server records a **checkpoint** at the end of every stretch of editing. A ch
 
 ```
 “Q4 plan” (dIaObI6jx) changed since you last looked — 1 change by Ada (human) (+25/−0 chars):
+(~ lines show a changed line with the changed words marked [-removed-]{+added+} and unchanged stretches trimmed; …)
 
 @@ Goals · lines 3–13 · Ada
  ## Goals
 
--Ship the beta in Q4.
-+Ship the beta in early Q4.
+~Ship the beta in {+early +}Q4.
 
  ## Risks
 
@@ -114,6 +114,11 @@ The server records a **checkpoint** at the end of every stretch of editing. A ch
 +
 +Ada.
 ```
+
+How the diff reads:
+- **Small changes are word-marked.** A line that mostly survived shows as one `~` line, with only the changed words marked `[-removed-]{+added+}` and long unchanged stretches trimmed to about 60 characters around each change. A one-word edit in a long paragraph costs a line, not the paragraph twice.
+- **Rewrites stay whole.** Lines that mostly changed, and pure additions or deletions, appear as plain `-`/`+` lines.
+- **Context is clipped.** Context lines are cut to about 140 characters; `read_document` has the exact text for quoting.
 
 How the baseline works:
 - **Per-agent baseline.** Each agent has its own baseline: a Yjs snapshot, stored durably.

@@ -7,7 +7,7 @@
 // per-hunk authors.
 
 import * as Y from 'yjs';
-import { structuredPatch } from 'diff';
+import { diffWordsWithSpace, structuredPatch } from 'diff';
 import type { Documents } from './documents.js';
 import type { Principals } from './principals.js';
 import { lineStarts, lineOf, outline, sectionPath } from './markdown.js';
@@ -22,6 +22,63 @@ export interface ChangeSummary {
 }
 
 interface Run { from: number; to: number; sub: string | null }
+
+/** Unchanged text kept on each side of a change in a word-marked line. */
+const WORD_CONTEXT = 60;
+/** Context lines (unchanged paragraphs around a hunk) are clipped to this. */
+const CONTEXT_LINE_MAX = 140;
+
+interface Part { value: string; added?: boolean; removed?: boolean }
+
+/**
+ * Word diff with spacing-only matches folded into the change, so a reworded
+ * phrase reads as one replacement rather than interleaved fragments.
+ */
+function wordParts(a: string, b: string): Part[] | null {
+  if (a.length + b.length > 40_000) return null;
+  const parts = diffWordsWithSpace(a, b, { timeout: 100 }) as Part[] | undefined;
+  if (!parts) return null;
+  const out: Part[] = [];
+  let del = '', ins = '';
+  const flush = () => { if (del) out.push({ value: del, removed: true }); if (ins) out.push({ value: ins, added: true }); del = ins = ''; };
+  parts.forEach((p, i) => {
+    if (p.added) { ins += p.value; return; }
+    if (p.removed) { del += p.value; return; }
+    if ((del || ins) && i < parts.length - 1 && !p.value.includes('\n') && (!p.value.trim() || p.value.length <= 2)) { del += p.value; ins += p.value; return; }
+    flush();
+    out.push(p);
+  });
+  flush();
+  return out;
+}
+
+/** Trim to whole words: the end of `s` (keeping about n chars), or its start. */
+const tailWords = (s: string, n: number) => { if (s.length <= n) return s; const cut = s.slice(-n); const sp = cut.search(/\s/); return `…${sp >= 0 && sp < n / 2 ? cut.slice(sp + 1) : cut}`; };
+const headWords = (s: string, n: number) => { if (s.length <= n) return s; const cut = s.slice(0, n); const sp = cut.lastIndexOf(' '); return `${sp > n / 2 ? cut.slice(0, sp) : cut}…`; };
+
+/**
+ * A changed block (old lines → new lines) as one line with the changed words
+ * marked [-removed-]{+added+} and long unchanged stretches trimmed. Null when
+ * most of it changed (a rewrite reads better as plain old/new lines).
+ */
+function wordMarked(oldLines: string[], newLines: string[]): string[] | null {
+  const a = oldLines.join('\n'), b = newLines.join('\n');
+  if (!a || !b) return null;
+  const parts = wordParts(a, b);
+  if (!parts) return null;
+  const same = parts.reduce((n, p) => n + (p.added || p.removed ? 0 : p.value.length), 0);
+  if (same < 0.4 * Math.max(a.length, b.length)) return null;
+  let out = '';
+  parts.forEach((p, i) => {
+    if (p.removed) { out += `[-${p.value}-]`; return; }
+    if (p.added) { out += `{+${p.value}+}`; return; }
+    const first = i === 0, last = i === parts.length - 1, v = p.value;
+    if (first) out += tailWords(v, WORD_CONTEXT);
+    else if (last) out += headWords(v, WORD_CONTEXT);
+    else out += v.length > 2 * WORD_CONTEXT + 10 ? `${headWords(v, WORD_CONTEXT)} ${tailWords(v, WORD_CONTEXT)}` : v;
+  });
+  return out.split('\n').map((l) => `~${l}`);
+}
 
 export function textChanges(docs: Documents, principals: Principals, docId: string, base: Y.Snapshot, opts: {
   title: string; maxChars?: number; context?: number;
@@ -60,6 +117,7 @@ export function textChanges(docs: Documents, principals: Principals, docId: stri
   const beforeStarts = lineStarts(before), afterStarts = lineStarts(after);
   const heads = outline(after);
   const allAuthors = new Set<string>();
+  let usedWordMarks = false;
   const sections: string[] = [];
   const blocks: string[] = [];
 
@@ -75,13 +133,28 @@ export function textChanges(docs: Documents, principals: Principals, docId: stri
     let oldLine = h.oldStart, newLine = h.newStart;
     let firstChangedNew = -1;
     const body: string[] = [];
-    for (const line of h.lines) {
+    const lines = h.lines.filter((l) => l[0] !== '\\'); // "\ No newline at end of file"
+    for (let k = 0; k < lines.length; k++) {
+      const line = lines[k];
       const tag = line[0];
-      if (tag === '\\') continue; // "\ No newline at end of file"
-      body.push(line);
-      if (tag === '-') { authorsIn(removedRuns, beforeStarts, oldLine, oldLine, who); oldLine++; if (firstChangedNew < 0) firstChangedNew = newLine; }
-      else if (tag === '+') { authorsIn(addedRuns, afterStarts, newLine, newLine, who); if (firstChangedNew < 0) firstChangedNew = newLine; newLine++; }
-      else { oldLine++; newLine++; }
+      if (tag === ' ') {
+        // Context: enough to place the change (read_document has the exact text).
+        body.push(line.length > CONTEXT_LINE_MAX + 1 ? ` ${headWords(line.slice(1), CONTEXT_LINE_MAX)}` : line);
+        oldLine++; newLine++;
+        continue;
+      }
+      // A block of removed lines and the added lines replacing them.
+      const del: string[] = [], add: string[] = [];
+      while (k < lines.length && lines[k][0] === '-') del.push(lines[k++].slice(1));
+      while (k < lines.length && lines[k][0] === '+') add.push(lines[k++].slice(1));
+      k--;
+      if (firstChangedNew < 0) firstChangedNew = newLine;
+      for (let n = 0; n < del.length; n++) authorsIn(removedRuns, beforeStarts, oldLine + n, oldLine + n, who);
+      for (let n = 0; n < add.length; n++) authorsIn(addedRuns, afterStarts, newLine + n, newLine + n, who);
+      oldLine += del.length; newLine += add.length;
+      const marked = del.length && add.length ? wordMarked(del, add) : null;
+      if (marked) { body.push(...marked); usedWordMarks = true; }
+      else body.push(...del.map((l) => `-${l}`), ...add.map((l) => `+${l}`));
     }
     const anchorLine = Math.max(1, Math.min(firstChangedNew < 0 ? h.newStart : firstChangedNew, afterStarts.length));
     const path = sectionPath(heads, afterStarts[anchorLine - 1] ?? 0);
@@ -101,7 +174,7 @@ export function textChanges(docs: Documents, principals: Principals, docId: stri
     + (authorLabels.length ? ` by ${authorLabels.join(', ')}` : '') + ` (+${added}/−${removed} chars):`;
 
   const max = opts.maxChars ?? 6000;
-  let out = header;
+  let out = header + (usedWordMarks ? '\n(~ lines show a changed line with the changed words marked [-removed-]{+added+} and unchanged stretches trimmed; - and + lines are removed and added whole; read_document has the exact text.)' : '');
   let shown = 0;
   for (const b of blocks) {
     if (out.length + b.length + 2 > max && shown > 0) break;

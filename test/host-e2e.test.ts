@@ -136,7 +136,7 @@ test('quiet edits do not wake; a mention does, and the pending diff is rendered 
   assert.match(req, /can you tighten the Goals sentence/);
   // The deferred edit subject was rendered once, at assembly: one diff with both edits, attributed.
   assert.match(req, /changed since you last looked/);
-  assert.match(req, /early Q4/);
+  assert.match(req, /\{\+early \+\}Q4/); // the changed word, marked
   assert.match(req, /Owners/);
   assert.match(req, /Ada/);
   assert.equal((req.match(/changed since you last looked/g) ?? []).length, 1, 'both edits coalesced into one rendered occurrence');
