@@ -6,7 +6,7 @@ import { dirname } from 'node:path';
 
 export type DB = Database.Database;
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 export function openDatabase(file: string): DB {
   if (file !== ':memory:') mkdirSync(dirname(file), { recursive: true });
@@ -251,7 +251,7 @@ export function openDatabase(file: string): DB {
     `);
       const broken = db.pragma('foreign_key_check') as unknown[];
       if (broken.length) throw new Error(`schema v2 migration would leave ${broken.length} dangling references`);
-      db.pragma(`user_version = ${SCHEMA_VERSION}`);
+      db.pragma('user_version = 2');
       db.exec('COMMIT');
     } catch (e) {
       if (db.inTransaction) db.exec('ROLLBACK');
@@ -259,6 +259,18 @@ export function openDatabase(file: string): DB {
     } finally {
       db.pragma('foreign_keys = ON');
     }
+  }
+  if ((db.pragma('user_version', { simple: true }) as number) < 3) {
+    // v3: suggestions. A suggestion is a comment thread whose root proposes
+    // replacing its anchored text (the original, kept in full) with sugg_text.
+    // An empty original is an insertion at a point anchor.
+    db.transaction(() => {
+      const have = new Set((db.pragma('table_info(comments)') as { name: string }[]).map((c) => c.name));
+      if (!have.has('sugg_text')) db.exec('ALTER TABLE comments ADD COLUMN sugg_text TEXT');
+      if (!have.has('sugg_orig')) db.exec('ALTER TABLE comments ADD COLUMN sugg_orig TEXT');
+      if (!have.has('sugg_status')) db.exec("ALTER TABLE comments ADD COLUMN sugg_status TEXT CHECK (sugg_status IN ('open','accepted','rejected'))");
+      db.pragma(`user_version = ${SCHEMA_VERSION}`);
+    })();
   }
   return db;
 }

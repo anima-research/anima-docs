@@ -4,10 +4,10 @@
 // Starts the server on a fresh data directory (dev issuer), then: two people
 // sign in, create a document, edit concurrently and see each other's text and
 // cursors, insert a table and an image, comment with an @mention, reply and
-// resolve, change sharing to commenter (who can't type but can comment), an
+// resolve, change sharing to commenter (whose typing becomes suggestions), an
 // agent edits and comments over the operations API, and preview renders the
 // table. Share links: the owner makes an "anyone" link in the share dialog, a
-// signed-out visitor continues as a guest (can comment, can't type, can
+// signed-out visitor continues as a guest (can comment, typing suggests, can
 // rename), a "members" link asks for sign-in and resumes after it, and
 // revoking the link ends the guest's access at once. Screenshots (light,
 // dark, narrow) go to SMOKE_SHOTS.
@@ -345,7 +345,7 @@ try {
     await shot(alice, '10-editor-agent-light', { settle: 400 });
   });
 
-  await step('Alice downgrades Bob to commenter; Bob can’t type but can comment', async () => {
+  await step('Alice downgrades Bob to commenter; his typing becomes a suggestion; he can comment', async () => {
     await alice.locator('.share-btn').click();
     const dlg = alice.locator('dialog.share-dialog');
     await dlg.getByLabel('Access for Bob Rivera').selectOption('commenter');
@@ -358,12 +358,14 @@ try {
     await bob.locator('.cm-line', { hasText: 'Dates below are targets' }).click();
     await bob.keyboard.press('ControlOrMeta+End');
     await bob.locator('.cm-line', { hasText: 'The beta cohort grows' }).click();
+    await bob.locator('.write-mode', { hasText: 'Suggesting' }).waitFor();
     await bob.keyboard.type('SHOULD NOT APPEAR');
-    await bob.keyboard.press('Enter');
-    await sleep(500);
-    const after = await docText(bob, docId);
-    assert(after === before && !(await editorText(bob)).includes('SHOULD NOT APPEAR'), 'commenter edit was blocked');
-    assert(await bob.locator('.edit-tools').isHidden(), 'formatting toolbar hidden for commenter');
+    await bob.locator('.cm-sugg-ins.mine', { hasText: 'SHOULD NOT APPEAR' }).waitFor();
+    await alice.locator('.cm-sugg-ins-widget', { hasText: 'SHOULD NOT APPEAR' }).waitFor({ timeout: 6000 });
+    assert((await docText(bob, docId)) === before, 'a commenter’s typing never changes the document');
+    // Take it back: undo withdraws the suggestion.
+    await bob.keyboard.press('ControlOrMeta+z');
+    await alice.locator('.cm-sugg-ins-widget', { hasText: 'SHOULD NOT APPEAR' }).waitFor({ state: 'detached', timeout: 6000 });
     await selectInEditor(bob, 'The beta cohort grows each week');
     await bob.locator('.comment-fab:not([hidden])').click();
     await bob.locator('.thread-card.draft textarea').fill('Should we cap the cohort size the week before launch?');
@@ -541,14 +543,15 @@ try {
     await guest.locator('.doc-header .guest-signin').waitFor();
   });
 
-  await step('the guest can’t type but can comment; the owner sees the guest’s comment', async () => {
+  await step('the guest’s typing becomes a suggestion; the guest comments; the owner sees both', async () => {
     const before = await docText(guest, docId);
     await guest.locator('.cm-line', { hasText: 'Dates below are targets' }).click();
-    await guest.keyboard.type('GUEST SHOULD NOT TYPE');
-    await guest.keyboard.press('Enter');
-    await sleep(500);
-    assert((await docText(guest, docId)) === before && !(await editorText(guest)).includes('GUEST SHOULD NOT TYPE'), 'guest typing was blocked');
-    assert(await guest.locator('.edit-tools').isHidden(), 'formatting toolbar hidden for a commenting guest');
+    await guest.keyboard.type('GUEST SUGGESTS');
+    await guest.locator('.cm-sugg-ins.mine:not(.pending)', { hasText: 'GUEST SUGGESTS' }).waitFor({ timeout: 6000 });
+    await alice.locator('.cm-sugg-ins-widget', { hasText: 'GUEST SUGGESTS' }).waitFor({ timeout: 6000 });
+    assert((await docText(guest, docId)) === before, 'guest typing never changes the document');
+    await guest.keyboard.press('ControlOrMeta+z');
+    await alice.locator('.cm-sugg-ins-widget', { hasText: 'GUEST SUGGESTS' }).waitFor({ state: 'detached', timeout: 6000 });
     await selectInEditor(guest, 'Dates below are targets');
     await guest.locator('.comment-fab:not([hidden])').click();
     const draft = guest.locator('.thread-card.draft textarea');

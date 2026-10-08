@@ -3,7 +3,9 @@
 import type { App } from './app.js';
 import type { Actor } from './principals.js';
 import { Fault } from './auth.js';
-import { applyEdits, type AgentEdit } from './edits.js';
+import { applyEdits, planIndependent, type AgentEdit } from './edits.js';
+import { splitHunks } from './hunks.js';
+import { quoteText, suggestionSummary, type Thread } from './comments.js';
 import { atLeast, type Role } from './documents.js';
 import { Media, fetchImage } from './media.js';
 import { textChanges } from './diff.js';
@@ -44,7 +46,8 @@ function need(args: Record<string, any>, key: string): string {
   return v.trim();
 }
 
-function threadText(app: App, t: ReturnType<App['comments']['threads']>[number]): string {
+function threadText(app: App, t: Thread, opts: { brief?: boolean } = {}): string {
+  if (t.suggestion) return suggestionText(app, t, opts);
   const p = (s: string) => app.principals.label(s);
   const where = t.anchor
     ? (t.anchor.orphaned ? `on “${t.root.quote ?? ''}” (text deleted)` : `on “${clip(t.anchor.text, 120)}” (line ${t.anchor.line})`)
@@ -52,6 +55,57 @@ function threadText(app: App, t: ReturnType<App['comments']['threads']>[number])
   const head = `Thread ${t.root.id} ${where}${t.root.resolvedAt ? ` — RESOLVED by ${p(t.root.resolvedBy!)}` : ''}${t.root.assignee ? ` — assigned to ${p(t.root.assignee)}` : ''}`;
   const msgs = [t.root, ...t.replies].map((c) => `  ${p(c.author)} (${ago(c.createdAt)}${c.editedAt ? ', edited' : ''}) [${c.id}]: ${c.body.replace(/\n/g, '\n    ')}`);
   return [head, ...msgs].join('\n');
+}
+
+const BLOCK_MAX = 6000;
+function block(label: string, body: string): string[] {
+  const cut = body.length > BLOCK_MAX ? `${body.slice(0, BLOCK_MAX)}\n… (${(body.length - BLOCK_MAX).toLocaleString('en')} more characters)` : body;
+  return [`    <<<${label}`, ...cut.split('\n').map((l) => `    ${l}`), `    ${label}>>>`];
+}
+
+/** A suggestion thread: what it changes (in full unless brief), its state, and its discussion. */
+function suggestionText(app: App, t: Thread, opts: { brief?: boolean }): string {
+  const p = (s: string) => app.principals.label(s);
+  const sg = t.suggestion!;
+  const where = t.anchor && !t.anchor.orphaned ? ` (line ${t.anchor.line})` : '';
+  const state = sg.status === 'open'
+    ? (sg.outdated ? ` — OUTDATED: the text it was made on has changed${t.anchor && !t.anchor.point && !t.anchor.orphaned ? ` (now ${quoteText(t.anchor.text, 160)})` : ''}; it can only be rejected` : ' — open')
+    : ` — ${sg.status.toUpperCase()} by ${p(t.root.resolvedBy ?? '')}`;
+  const lines = [`Suggestion ${t.root.id} by ${p(t.root.author)}${where}${state}`];
+  const short = (x: string) => x.length <= 200 && !x.includes('\n');
+  if (opts.brief || (short(sg.original) && short(sg.text))) lines.push(`  ${suggestionSummary(sg, opts.brief ? 160 : 200, t.anchor)}`);
+  else if (!sg.original) lines.push(`  insert${t.anchor?.context?.before.trim() ? ` after ${quoteText(t.anchor.context.before.slice(-30), 40)}` : ''}:`, ...block('INSERT', sg.text));
+  else if (!sg.text) lines.push('  delete:', ...block('DELETE', sg.original));
+  else lines.push('  replace:', ...block('ORIGINAL', sg.original), '  with:', ...block('SUGGESTED', sg.text));
+  for (const c of [t.root, ...t.replies]) {
+    if (!c.body) continue;
+    lines.push(`  ${p(c.author)} (${ago(c.createdAt)}${c.editedAt ? ', edited' : ''}) [${c.id}]: ${c.body.replace(/\n/g, '\n    ')}`);
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Render [from, to) of `text` with open suggestions shown in CriticMarkup:
+ * {~~old~>new~~}, {++added++}, {--deleted--}, each followed by {>>id<<}.
+ * Outdated or overlapping suggestions are left out (they're listed instead).
+ */
+function inlineSuggestions(text: string, from: number, to: number, threads: Thread[]): { body: string; shown: Set<string> } {
+  const open = threads
+    .filter((t) => t.suggestion?.status === 'open' && !t.suggestion.outdated && t.anchor && !t.anchor.orphaned && t.anchor.start >= from && t.anchor.end <= to)
+    .sort((a, b) => a.anchor!.start - b.anchor!.start || a.anchor!.end - b.anchor!.end);
+  let out = '', at = from, lastPoint = -1;
+  const shown = new Set<string>();
+  for (const t of open) {
+    const a = t.anchor!, sg = t.suggestion!;
+    if (a.start < at || (a.point && a.start === lastPoint)) continue; // overlaps one already shown
+    if (a.point) lastPoint = a.start;
+    out += text.slice(at, a.start);
+    out += !sg.original ? `{++${sg.text}++}` : !sg.text ? `{--${sg.original}--}` : `{~~${sg.original}~>${sg.text}~~}`;
+    out += `{>>${t.root.id}<<}`;
+    at = a.end;
+    shown.add(t.root.id);
+  }
+  return { body: out + text.slice(at, to), shown };
 }
 
 function clip(s: string, n: number) {
@@ -116,6 +170,35 @@ function normalizeDocumentArg(app: App, actor: Actor, args: Record<string, any>)
   if (id) args.document = id;
 }
 
+function decideTool(app: App, actor: Actor, a: Record<string, any>, decision: 'accept' | 'reject'): ToolResult {
+  let ids: string[];
+  if (a.suggestions === 'all') {
+    const id = need(a, 'document');
+    app.docs.require(id, actor, 'editor');
+    ids = app.comments.threads(id).filter((t) => t.suggestion?.status === 'open').map((t) => t.root.id);
+    if (!ids.length) return text('No open suggestions.');
+  } else if (Array.isArray(a.suggestions) && a.suggestions.length && a.suggestions.length <= 200 && a.suggestions.every((x: unknown) => typeof x === 'string')) {
+    ids = [...new Set(a.suggestions as string[])];
+  } else throw new Fault(400, 'suggestions must be a list of ids, or "all" with document.');
+  const note = typeof (decision === 'accept' ? a.note : a.reason) === 'string' ? String(decision === 'accept' ? a.note : a.reason) : undefined;
+  const done: string[] = [], failed: string[] = [];
+  for (const sid of ids) {
+    try {
+      const { comment, applied } = app.comments.decide(sid, { ...actor, via: 'mcpl' }, decision, { note });
+      if (applied) app.attention.noteOwnEdit(actor.sub, comment.docId, applied.client, applied.deleteSet);
+      done.push(`  [${comment.id}] ${suggestionSummary(comment.suggestion!, 160)}`);
+    } catch (e) {
+      if (!(e instanceof Fault)) throw e;
+      failed.push(`  [${sid}] ${e.message}`);
+    }
+  }
+  const verb = decision === 'accept' ? 'Accepted' : 'Rejected';
+  const out = [];
+  if (done.length) out.push(`${verb} ${done.length}:`, ...done);
+  if (failed.length) out.push(`Not ${verb.toLowerCase()} (${failed.length}):`, ...failed);
+  return { content: [{ type: 'text', text: out.join('\n') }], ...(done.length ? {} : { isError: true }) };
+}
+
 export const TOOLS: ToolDef[] = [
   // ------------------------------------------------------------------ docs.read
   {
@@ -140,8 +223,9 @@ export const TOOLS: ToolDef[] = [
       const key = linkKey(need(a, 'link'));
       if (!key) throw new Fault(400, 'That is not a share link. Links look like https://…/l/<key>.');
       const r = app.docs.redeemLink(key, actor);
-      const open = app.comments.openCount(r.doc.id);
-      return text(`Opened “${r.doc.title}” (${r.doc.id}); you are ${r.role === 'owner' ? 'its owner' : r.role === 'editor' ? 'an editor' : `a ${r.role}`}. Owner ${app.principals.label(r.doc.ownerSub)}; ${open} open comment${open === 1 ? '' : 's'}. Read it with read_document {"document":"${r.doc.id}"}.`);
+      const sug = app.comments.openSuggestionCount(r.doc.id);
+      const open = app.comments.openCount(r.doc.id) - sug;
+      return text(`Opened “${r.doc.title}” (${r.doc.id}); you are ${r.role === 'owner' ? 'its owner' : r.role === 'editor' ? 'an editor' : `a ${r.role}`}. Owner ${app.principals.label(r.doc.ownerSub)}; ${open} open comment${open === 1 ? '' : 's'}${sug ? `, ${sug} open suggestion${sug === 1 ? '' : 's'}` : ''}. Read it with read_document {"document":"${r.doc.id}"}.${r.role === 'commenter' ? ' You can comment and suggest edits (suggest_edit).' : ''}`);
     },
   },
   {
@@ -156,8 +240,9 @@ export const TOOLS: ToolDef[] = [
       const list = app.docs.list(actor, { query: a.query, filter: a.filter, limit: a.limit ?? 50 });
       if (!list.length) return text('No documents. Create one with create_document.');
       return text(list.map((d) => {
-        const open = app.comments.openCount(d.id);
-        return `${d.id}  “${d.title}” — you: ${d.role}; owner ${app.principals.label(d.ownerSub)}; updated ${ago(d.updatedAt)}; rev ${d.rev}${open ? `; ${open} open comment${open === 1 ? '' : 's'}` : ''}`;
+        const sug = app.comments.openSuggestionCount(d.id);
+        const open = app.comments.openCount(d.id) - sug;
+        return `${d.id}  “${d.title}” — you: ${d.role}; owner ${app.principals.label(d.ownerSub)}; updated ${ago(d.updatedAt)}; rev ${d.rev}${open ? `; ${open} open comment${open === 1 ? '' : 's'}` : ''}${sug ? `; ${sug} open suggestion${sug === 1 ? '' : 's'}` : ''}`;
       }).join('\n'));
     },
   },
@@ -170,30 +255,47 @@ export const TOOLS: ToolDef[] = [
       from_line: { type: 'integer', minimum: 1 }, to_line: { type: 'integer', minimum: 1 },
       line_numbers: { type: 'boolean', description: 'Prefix lines with numbers (default false; quote text without them when editing).' },
       comments: { type: 'boolean', description: 'Append open comment threads (default true).' },
+      suggestions: S('Open suggestions: "list" (default: listed after the document, in full), "inline" (shown in place as CriticMarkup {~~old~>new~~} {++added++} {--deleted--} {>>id<<}; for reading only, quote the plain text when editing), or "none".', { enum: ['list', 'inline', 'none'] }),
     } },
     run(app, actor, a) {
       const id = need(a, 'document');
       const { doc, role } = app.docs.require(id, actor, 'viewer');
       const full = app.docs.text(id);
       const starts = lineStarts(full);
-      let body = full, first = 1, partial = false;
+      let sliceFrom = 0, sliceTo = full.length, first = 1, partial = false;
       if (a.section) {
         const secs = findSections(full, String(a.section));
         if (!secs.length) throw new Fault(404, `No section "${a.section}". Headings: ${outline(full).map((h) => h.text).slice(0, 40).join(' | ')}`);
         const s = secs[0];
-        body = full.slice(s.start, s.end); first = s.heading.line; partial = true;
+        sliceFrom = s.start; sliceTo = s.end; first = s.heading.line; partial = true;
       } else if (a.from_line || a.to_line) {
         const from = Math.max(1, a.from_line ?? 1), to = Math.min(starts.length, a.to_line ?? starts.length);
-        body = full.split('\n').slice(from - 1, to).join('\n'); first = from; partial = true;
+        sliceFrom = starts[from - 1] ?? full.length;
+        sliceTo = to < starts.length ? starts[to] - 1 : full.length;
+        if (sliceTo < sliceFrom) sliceTo = sliceFrom;
+        first = from; partial = true;
       }
+      let body = full.slice(sliceFrom, sliceTo);
       const last = first + body.split('\n').length - 1;
-      const header = `# “${doc.title}” (${doc.id}) — rev ${doc.rev}, ${starts.length} lines${partial ? `, showing lines ${first}–${last}` : ''}; you are ${role}; owner ${app.principals.label(doc.ownerSub)}; updated ${ago(doc.updatedAt)}`;
+      const mode = a.suggestions === 'inline' || a.suggestions === 'none' ? a.suggestions : 'list';
+      const wantComments = a.comments !== false;
+      const all = wantComments || mode === 'inline' ? app.comments.threads(id) : [];
+      let inlined = new Set<string>();
+      if (mode === 'inline') ({ body, shown: inlined } = inlineSuggestions(full, sliceFrom, sliceTo, all));
+      const pending = all.filter((t) => t.suggestion?.status === 'open').length;
+      const header = `# “${doc.title}” (${doc.id}) — rev ${doc.rev}, ${starts.length} lines${partial ? `, showing lines ${first}–${last}` : ''}; you are ${role}; owner ${app.principals.label(doc.ownerSub)}; updated ${ago(doc.updatedAt)}`
+        + (pending ? `; ${pending} open suggestion${pending === 1 ? '' : 's'}${mode === 'inline' ? ' shown inline as CriticMarkup (not part of the text)' : ''}` : '');
       const content = a.line_numbers ? withLineNumbers(body, first) : body;
       const out = [header, '<<<DOCUMENT', content, 'DOCUMENT>>>'];
-      const wantComments = a.comments !== false;
-      if (wantComments) {
-        const threads = app.comments.threads(id).filter((t) => !partial || (t.anchor && t.anchor.line <= last && t.anchor.endLine >= first));
-        if (threads.length) out.push(`\nOpen comments (${threads.length}):\n${threads.map((t) => threadText(app, t)).join('\n\n')}`);
+      if (wantComments || mode === 'list') {
+        const inRange = (t: Thread) => !partial || (t.anchor && t.anchor.line <= last && t.anchor.endLine >= first);
+        const threads = all.filter((t) => inRange(t) && (t.suggestion ? mode !== 'none' && (wantComments || mode === 'list') : wantComments));
+        const comments = threads.filter((t) => !t.suggestion);
+        const suggestions = threads.filter((t) => t.suggestion);
+        if (comments.length) out.push(`\nOpen comments (${comments.length}):\n${comments.map((t) => threadText(app, t)).join('\n\n')}`);
+        if (suggestions.length) {
+          out.push(`\nOpen suggestions (${suggestions.length}) — editors accept_suggestion / reject_suggestion:\n${suggestions.map((t) => threadText(app, t, { brief: inlined.has(t.root.id) })).join('\n\n')}`);
+        }
       }
       if (!partial) app.attention.markRead(actor.sub, id, { comments: wantComments });
       return text(out.join('\n'));
@@ -229,9 +331,10 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: 'list_comments', featureSet: 'docs.read', toolClass: 'notes',
-    description: 'Comment threads on a document (open ones by default), with where each is anchored.',
+    description: 'Comment threads and suggestions on a document (open ones by default), with where each is anchored. Suggestions show the full change.',
     inputSchema: { type: 'object', required: ['document'], properties: {
-      ...docArg, thread: S('Only this thread (any comment id in it).'), include_resolved: { type: 'boolean' },
+      ...docArg, thread: S('Only this thread (any comment id in it).'), include_resolved: { type: 'boolean', description: 'Also resolved threads and decided suggestions.' },
+      only: S('"comments" or "suggestions" (default: both).', { enum: ['comments', 'suggestions'] }),
     } },
     run(app, actor, a) {
       const id = need(a, 'document');
@@ -241,8 +344,10 @@ export const TOOLS: ToolDef[] = [
         const c = app.comments.get(a.thread);
         threads = threads.filter((t) => t.root.id === (c?.threadId ?? a.thread));
       }
+      if (a.only === 'comments') threads = threads.filter((t) => !t.suggestion);
+      else if (a.only === 'suggestions') threads = threads.filter((t) => t.suggestion);
       app.attention.markCommentsRead(actor.sub, id);
-      return text(threads.length ? threads.map((t) => threadText(app, t)).join('\n\n') : 'No comment threads.');
+      return text(threads.length ? threads.map((t) => threadText(app, t)).join('\n\n') : a.only === 'suggestions' ? 'No suggestions.' : 'No comment threads.');
     },
   },
   {
@@ -357,6 +462,7 @@ export const TOOLS: ToolDef[] = [
       '  {"append_to_section": "Heading", "text": "..."}',
       '  {"replace_all_content": "..."}  rewrite everything (applied as a minimal diff so comments on unchanged text survive)',
       'Text is markdown: tables, images (![alt](url)), lists, code. Others see your edits live, attributed to you.',
+      'If the document isn\'t yours to change (or its owner should review the change), use suggest_edit instead.',
     ].join('\n'),
     inputSchema: { type: 'object', required: ['document', 'edits'], properties: {
       ...docArg,
@@ -515,6 +621,61 @@ export const TOOLS: ToolDef[] = [
       const { comment } = app.comments.assign(need(a, 'comment'), actor, a.to ?? null);
       return text(comment.assignee ? `Assigned thread ${comment.id} to ${app.principals.label(comment.assignee)}.` : `Unassigned thread ${comment.id}.`);
     },
+  },
+  {
+    name: 'suggest_edit', featureSet: 'docs.comment', toolClass: 'comms',
+    description: [
+      'Suggest changes instead of making them, like Suggesting mode in Google Docs: each change shows in the document as a tracked change that editors accept or reject, and the owner is notified. Needs only commenter access.',
+      'Edits take the same shapes as edit_document (old_text/new_text, insert_after, insert_before, append, prepend, replace_section, append_to_section, replace_all_content), planned against the current text; they must not overlap. A large replacement is split into one suggestion per changed passage.',
+      'Withdraw one with delete_comment; change it by withdrawing and suggesting again.',
+    ].join('\n'),
+    inputSchema: { type: 'object', required: ['document', 'edits'], properties: {
+      ...docArg,
+      edits: { type: 'array', minItems: 1, items: { type: 'object', properties: {
+        old_text: { type: 'string' }, new_text: { type: 'string' }, occurrence: { type: 'integer', minimum: 1 }, replace_all: { type: 'boolean' },
+        insert_after: { type: 'string' }, insert_before: { type: 'string' }, text: { type: 'string' },
+        append: { type: 'string' }, prepend: { type: 'string' },
+        replace_section: { type: 'string' }, content: { type: 'string' }, keep_heading: { type: 'boolean' },
+        append_to_section: { type: 'string' }, replace_all_content: { type: 'string' },
+      } } },
+      note: S('Why (markdown, optional): shown with the first suggestion. @Name notifies.'),
+    } },
+    run(app, actor, a) {
+      const id = need(a, 'document');
+      const { doc } = app.docs.require(id, actor, 'commenter');
+      const current = app.docs.text(id);
+      const hunks = planIndependent(current, a.edits as AgentEdit[]).flatMap((p) => splitHunks(current, p.from, p.to, p.text));
+      if (!hunks.length) throw new Fault(400, 'None of the edits would change anything.');
+      if (hunks.length > 100) throw new Fault(413, `That would be ${hunks.length} separate suggestions; suggest at most 100 at a time (split the work, or edit directly if you can).`);
+      const { comments, warnings } = app.comments.suggestMany(id, actor, hunks.map((h) => ({ anchor: app.comments.anchorFor(id, h.from, h.to), text: h.text })), typeof a.note === 'string' ? a.note : undefined);
+      const made = comments.map((c) => app.comments.thread(c.id)!);
+      const owner = doc.ownerSub === actor.sub ? 'You own this document; accept them with accept_suggestion.' : `${app.principals.label(doc.ownerSub)} (the owner) will be notified.`;
+      return text([
+        `Suggested ${made.length === 1 ? 'a change' : `${made.length} changes`} to “${doc.title}” (${doc.id}). ${owner}`,
+        ...made.map((t) => `  [${t.root.id}]${t.anchor ? ` line ${t.anchor.line}:` : ''} ${suggestionSummary(t.suggestion!, 200, t.anchor)}`),
+        ...(warnings.length ? [`Note: ${[...new Set(warnings)].join(' ')}`] : []),
+      ].join('\n'));
+    },
+  },
+  {
+    name: 'accept_suggestion', featureSet: 'docs.write', toolClass: 'notes',
+    description: 'Accept suggestions: each change is applied to the document as your edit, and its author is told. Needs edit access. An outdated suggestion (its text changed since it was made) can\'t be accepted; reject it instead. Pass ids, or "all" with document.',
+    inputSchema: { type: 'object', required: ['suggestions'], properties: {
+      suggestions: { anyOf: [{ type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 200 }, { type: 'string', enum: ['all'] }], description: 'Suggestion ids, or "all" (needs document).' },
+      document: S('With "all": the document whose open suggestions to accept.'),
+      note: S('Optional reply to the author(s).'),
+    } },
+    run(app, actor, a) { return decideTool(app, actor, a, 'accept'); },
+  },
+  {
+    name: 'reject_suggestion', featureSet: 'docs.write', toolClass: 'notes',
+    description: 'Reject suggestions (the text stays as it is) and tell their authors, optionally why. Needs edit access. Pass ids, or "all" with document.',
+    inputSchema: { type: 'object', required: ['suggestions'], properties: {
+      suggestions: { anyOf: [{ type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 200 }, { type: 'string', enum: ['all'] }], description: 'Suggestion ids, or "all" (needs document).' },
+      document: S('With "all": the document whose open suggestions to reject.'),
+      reason: S('Optional: why, as a reply to the author(s).'),
+    } },
+    run(app, actor, a) { return decideTool(app, actor, a, 'reject'); },
   },
 
   // ------------------------------------------------------------------ docs.share

@@ -21,7 +21,7 @@ export async function startServer(env: Record<string, string> = {}) {
   const iss = testIssuer('test.local');
   const logs: string[] = [];
   const config = loadConfig({ DOCS_DATA_DIR: dir, PORT: '0', DOCS_ORIGIN: 'http://127.0.0.1:1', DOCS_ISSUERS: `test.local=${iss.publicKey}`, ...env } as any);
-  const app = createApp(config, new Map([['test.local', publicKeyFromString(iss.publicKey)]]), { commentSettleMs: 30, attentionLog: (m) => logs.push(m) });
+  const app = createApp(config, new Map([['test.local', publicKeyFromString(iss.publicKey)]]), { commentSettleMs: 30, suggestSettleMs: 80, attentionLog: (m) => logs.push(m) });
   const http = createHttp(app);
   await new Promise<void>((r) => http.server.listen(0, '127.0.0.1', () => r()));
   const port = (http.server.address() as AddressInfo).port;

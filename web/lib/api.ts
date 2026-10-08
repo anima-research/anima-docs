@@ -47,6 +47,17 @@ export interface Thread {
   resolvedBy: ThreadPerson | null;
   assignee: ThreadPerson | null;
   comments: ThreadComment[];
+  /** Set when the thread is a suggestion: replace the anchored original with text. */
+  suggestion: ThreadSuggestion | null;
+}
+export interface ThreadSuggestion {
+  original: string;
+  text: string;
+  status: 'open' | 'accepted' | 'rejected';
+  /** The anchored text no longer matches the original: it can only be rejected. */
+  outdated: boolean;
+  /** An insertion at a point (no original text). */
+  point: boolean;
 }
 
 export type LinkWho = 'anyone' | 'members';

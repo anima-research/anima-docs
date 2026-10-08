@@ -3,7 +3,7 @@
 import * as Y from 'yjs';
 import { Compartment, EditorState, Prec } from '@codemirror/state';
 import { EditorView, drawSelection, dropCursor, highlightSpecialChars, keymap, placeholder, type ViewUpdate } from '@codemirror/view';
-import { defaultKeymap, indentWithTab } from '@codemirror/commands';
+import { defaultKeymap, history, historyKeymap, indentWithTab, redo as cmRedo, undo as cmUndo } from '@codemirror/commands';
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown';
 import { HighlightStyle, syntaxHighlighting, syntaxTree } from '@codemirror/language';
 import { search, searchKeymap } from '@codemirror/search';
@@ -29,6 +29,7 @@ import { CommentsRail } from './comments';
 import { openShareDialog } from './share';
 import { SidePanel } from './panels';
 import { formatKeymap, insertBlock, insertLink, insertRule, insertTable, lineKindAt, selectedText, setLineKind, toggleCodeBlock, toggleInline, type LineKind } from './commands';
+import { SuggestSession, sharedCoords, suggestionOverlays, type Coords } from './suggest';
 
 type Mode = 'edit' | 'split' | 'preview';
 const MAX_IMAGE = 15 * 1024 * 1024;
@@ -56,6 +57,10 @@ const docHighlight = HighlightStyle.define([
   { tag: [t.meta, t.escape], class: 'tok-meta' },
   { tag: t.invalid, class: 'tok-invalid' },
 ]);
+
+const suggestPrefKey = (docId: string) => `docs.suggest.${docId}`;
+function loadSuggestPref(docId: string): boolean { try { return localStorage.getItem(suggestPrefKey(docId)) === '1'; } catch { return false; } }
+function saveSuggestPref(docId: string, on: boolean) { try { if (on) localStorage.setItem(suggestPrefKey(docId), '1'); else localStorage.removeItem(suggestPrefKey(docId)); } catch { /* ignore */ } }
 
 function loadMode(): Mode {
   try { const m = localStorage.getItem('docs.mode'); if (m === 'edit' || m === 'split' || m === 'preview') return m; } catch { /* storage may be blocked */ }
@@ -129,6 +134,13 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   provider.awareness.setLocalStateField('user', { name: me.name, color: me.color, sub: me.sub, kind: me.kind });
   const undoManager = new Y.UndoManager(provider.ytext);
   const canEdit = () => atLeast(role, 'editor');
+  /** Suggesting mode: your edits become suggestions (see suggest.ts). */
+  let session: SuggestSession | null = null;
+  let switching = false;
+  const suggesting = () => !!session;
+  /** Can type into the editor: an editor, or anyone suggesting. */
+  const canWrite = () => canEdit() || (suggesting() && atLeast(role, 'commenter'));
+  const coords = (): Coords => session?.coords ?? sharedCoords;
 
   // ------------------------------------------------------------------ header
 
@@ -192,15 +204,17 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
       .map(([k, label, n]) => ({ label, checked: lineKindAt(view.state) === k, hint: `${modKey}${altKey}${n}`, onSelect: () => setLineKind(view, k) })), { className: 'style-menu' }),
   }, styleLabel, icon('chevronDown', 14));
   const pressable = new Map<string, HTMLButtonElement>();
+  let imageTool!: HTMLButtonElement;
   const tb = (ic: string, label: string, shortcut: string | null, run: () => void, key?: string) => {
     const b = h('button.tb-btn', { type: 'button', 'aria-label': label, 'data-tip': shortcut ? `${label} (${shortcut})` : label, onmousedown: (e: MouseEvent) => e.preventDefault(), onclick: run }, icon(ic, 18));
     if (key) { b.setAttribute('aria-pressed', 'false'); pressable.set(key, b); }
     return b;
   };
   const sep = () => h('span.tb-sep', { role: 'separator' });
+  imageTool = tb('image', guest ? 'Insert image (sign in to add images)' : 'Insert image', null, () => (guest ? needSignInForImages() : fileInput.click()));
   const editTools = h('div.tb-group.edit-tools', null,
-    tb('undo', 'Undo', `${modKey}Z`, () => { undoManager.undo(); view.focus(); }),
-    tb('redo', 'Redo', isMac ? '⌘⇧Z' : 'Ctrl+Y', () => { undoManager.redo(); view.focus(); }),
+    tb('undo', 'Undo', `${modKey}Z`, () => { if (suggesting()) cmUndo(view); else undoManager.undo(); view.focus(); }),
+    tb('redo', 'Redo', isMac ? '⌘⇧Z' : 'Ctrl+Y', () => { if (suggesting()) cmRedo(view); else undoManager.redo(); view.focus(); }),
     sep(), styleBtn, sep(),
     tb('bold', 'Bold', `${modKey}B`, () => toggleInline(view, '**'), 'StrongEmphasis'),
     tb('italic', 'Italic', `${modKey}I`, () => toggleInline(view, '*'), 'Emphasis'),
@@ -216,11 +230,31 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     tb('codeBlock', 'Code block', null, () => toggleCodeBlock(view)),
     tb('table', 'Insert table', null, () => insertTable(view)),
     tb('hr', 'Horizontal line', null, () => insertRule(view)),
-    tb('image', guest ? 'Insert image (sign in to add images)' : 'Insert image', null, () => (guest ? needSignInForImages() : fileInput.click())),
+    imageTool,
     fileInput);
   const commentTool = h('button.tb-btn.tb-comment', { type: 'button', 'aria-label': 'Add comment', 'data-tip': `Add comment (${modKey}${altKey}M)`, onmousedown: (e: MouseEvent) => e.preventDefault(), onclick: () => rail.startDraft() }, icon('commentAdd', 18), h('span.tb-text', null, 'Comment'));
   const readNotice = h('div.tb-notice');
-  toolbar.append(editTools, readNotice, h('span.tb-spacer'), commentTool);
+  // Editing / Suggesting switch, the state of your suggestions, and reviewing others'.
+  const writeModeLabel = h('span.tb-text');
+  const writeModeBtn: HTMLButtonElement = h('button.tb-btn.write-mode', {
+    type: 'button', 'aria-haspopup': 'menu', onmousedown: (e: MouseEvent) => e.preventDefault(),
+    onclick: () => openMenu(writeModeBtn, [
+      { label: 'Editing', icon: 'pencil', checked: !suggesting(), hint: 'Edit directly', onSelect: () => void setSuggesting(false) },
+      { label: 'Suggesting', icon: 'suggest', checked: suggesting(), hint: 'Edits become suggestions', onSelect: () => void setSuggesting(true) },
+    ], { align: 'end', className: 'write-mode-menu' }),
+  }, h('span.wm-icon'), writeModeLabel, h('span.wm-chev', null, icon('chevronDown', 14)));
+  const suggestStatus = h('span.sugg-status', { role: 'status', 'aria-live': 'polite' });
+  const reviewLabel = h('span.tb-text');
+  const reviewBtn: HTMLButtonElement = h('button.tb-btn.review-btn', {
+    type: 'button', 'aria-haspopup': 'menu', hidden: true, onmousedown: (e: MouseEvent) => e.preventDefault(),
+    onclick: () => openMenu(reviewBtn, [
+      { label: 'Next suggestion', icon: 'arrowLeft', onSelect: () => { if (listOpen === false && rail.layout === 'drawer') toggleList(true); rail.nextSuggestion(); } },
+      ...(canEdit() ? ['separator' as const,
+        { label: 'Accept all', icon: 'check', onSelect: () => void rail.decideAll('accept') },
+        { label: 'Reject all', icon: 'x', danger: true, onSelect: () => void rail.decideAll('reject') }] : []),
+    ], { align: 'end' }),
+  }, icon('suggest', 16), reviewLabel);
+  toolbar.append(editTools, readNotice, h('span.tb-spacer'), suggestStatus, reviewBtn, writeModeBtn, commentTool);
 
   // ------------------------------------------------------------------ body
 
@@ -243,9 +277,18 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
 
   const readOnlyC = new Compartment();
   const placeholderC = new Compartment();
+  /** How edits reach the shared text: directly (editing) or as suggestions. */
+  const syncC = new Compartment();
+  const liveSync = () => [yCollab(provider.ytext, null, { undoManager }), keymap.of(yUndoManagerKeymap)];
+  const suggestSync = (s: SuggestSession) => [s.extension(), history(), keymap.of(historyKeymap)];
   let view!: EditorView;
 
-  const rail = new CommentsRail({ provider, view: () => view ?? null, me, role: () => role, docId });
+  const rail = new CommentsRail({ provider, view: () => view ?? null, me, role: () => role, docId, coords, session: () => session });
+  rail.onSuggestionsChange = (n) => {
+    reviewBtn.hidden = n === 0;
+    reviewLabel.textContent = `${n} suggestion${n === 1 ? '' : 's'}`;
+    reviewBtn.setAttribute('aria-label', `${n} open suggestion${n === 1 ? '' : 's'}: review`);
+  };
   pageWrap.append(rail.fab);
   canvas.append(rail.el);
   rail.onCountChange = (n) => { commentsCount.hidden = n === 0; commentsCount.textContent = String(n); commentsBtn.setAttribute('aria-label', `Show all comments (${n} open)`); };
@@ -271,10 +314,11 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     state: EditorState.create({
       doc: provider.ytext.toString(),
       extensions: [
-        readOnlyC.of(EditorState.readOnly.of(!canEdit())),
+        readOnlyC.of(EditorState.readOnly.of(!canWrite())),
         placeholderC.of(canEdit() ? placeholder('Start writing…  Markdown works: # heading, **bold**, - list, | table |') : []),
-        yCollab(provider.ytext, null, { undoManager }),
-        remoteCursors(provider.ytext, provider.awareness),
+        syncC.of(liveSync()),
+        remoteCursors(provider.ytext, provider.awareness, coords),
+        suggestionOverlays,
         markdown({ base: markdownLanguage, codeLanguages, addKeymap: true }),
         syntaxHighlighting(docHighlight),
         livePreview,
@@ -286,17 +330,18 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
         search({ top: true }),
         Prec.high(keymap.of([
           { key: 'Mod-Alt-m', run: () => { rail.startDraft(); return true; } },
-          { key: 'Mod-k', run: () => { if (canEdit()) linkDialog(); return true; } },
+          { key: 'Mod-k', run: () => { if (canWrite()) linkDialog(); return true; } },
           { key: 'Escape', run: () => { if (rail.active) { rail.setActive(null); return true; } return false; } },
           ...formatKeymap,
         ])),
-        keymap.of([...yUndoManagerKeymap, ...defaultKeymap, ...searchKeymap, indentWithTab]),
+        keymap.of([...defaultKeymap, ...searchKeymap, indentWithTab]),
         EditorView.contentAttributes.of({ 'aria-label': 'Document text', spellcheck: 'true', autocapitalize: 'sentences', 'aria-multiline': 'true' }),
         EditorView.domEventHandlers({
           paste: (e) => {
             const files = [...(e.clipboardData?.files ?? [])].filter((f) => f.type.startsWith('image/'));
-            if (!files.length || !canEdit()) return false;
+            if (!files.length || !canWrite()) return false;
             e.preventDefault();
+            if (suggesting()) { toast(canEdit() ? 'Switch to Editing to add images.' : 'Images can’t be suggested yet; describe the image in a comment.', { kind: 'info' }); return true; }
             if (guest) { needSignInForImages(); return true; }
             void uploadImages(files, view.state.selection.main.head);
             return true;
@@ -306,6 +351,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
             if (!files.length) return false;
             e.preventDefault();
             if (!canEdit()) { toast('You need edit access to add images.', { kind: 'error' }); return true; }
+            if (suggesting()) { toast('Switch to Editing to add images.', { kind: 'info' }); return true; }
             if (guest) { needSignInForImages(); return true; }
             const pos = v.posAtCoords({ x: e.clientX, y: e.clientY }) ?? v.state.selection.main.head;
             void uploadImages(files, pos);
@@ -326,7 +372,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   // ------------------------------------------------------------------ toolbar state
 
   const updateToolbarState = rafThrottle(() => {
-    if (!canEdit()) return;
+    if (!canWrite()) return;
     const kind = lineKindAt(view.state);
     styleLabel.textContent = kind.startsWith('h') ? `Heading ${kind[1]}` : 'Normal text';
     const active = new Set<string>([kind]);
@@ -341,24 +387,114 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     const prev = role;
     role = next;
     provider.role = next;
-    view.dispatch({ effects: [readOnlyC.reconfigure(EditorState.readOnly.of(!canEdit())), placeholderC.reconfigure(canEdit() ? placeholder('Start writing…') : [])] });
+    // Commenters suggest; viewers only read. Editors keep whichever mode they chose.
+    if (!atLeast(role, 'commenter') && session) void setSuggesting(false);
+    else if (role === 'commenter' && !session && provider.synced) void setSuggesting(true);
+    refreshWriteUi();
     titleInput.readOnly = !canEdit();
     titleInput.title = canEdit() ? 'Rename' : '';
     rolePill.textContent = canEdit() ? (role === 'owner' ? 'Owner' : 'Editing') : role === 'commenter' ? 'Commenting' : 'Viewing';
     rolePill.className = `role-pill role-${role}`;
-    rolePill.setAttribute('data-tip', canEdit() ? `You can edit (${ROLE_LABEL[role]})` : role === 'commenter' ? 'You can read and comment' : 'You can read this document');
+    rolePill.setAttribute('data-tip', canEdit() ? `You can edit (${ROLE_LABEL[role]})` : role === 'commenter' ? 'You can suggest edits and comment' : 'You can read this document');
     app.classList.toggle('can-edit', canEdit());
     app.classList.toggle('can-comment', atLeast(role, 'commenter'));
-    editTools.hidden = !canEdit();
     commentTool.hidden = !atLeast(role, 'commenter');
-    readNotice.hidden = canEdit();
-    readNotice.replaceChildren(icon(role === 'commenter' ? 'comment' : 'eye', 16), role === 'commenter' ? 'You can comment on this document. Select text, then add a comment.' : 'View only. Ask the owner for access to comment or edit.');
-    toolbar.classList.toggle('reader', !canEdit());
     rail.refreshPermissions();
     if (announce && prev !== next) {
       toast(h('span', null, 'Your access changed to ', h('strong', null, ROLE_LABEL[next].toLowerCase()), '.'), { kind: atLeast(next, prev) ? 'success' : 'info' });
     }
   }
+
+  /** Toolbar and editor state for the current role and writing mode. */
+  function refreshWriteUi() {
+    const sug = suggesting();
+    view.dispatch({ effects: [
+      readOnlyC.reconfigure(EditorState.readOnly.of(!canWrite() || switching)),
+      placeholderC.reconfigure(canEdit() && !sug ? placeholder('Start writing…') : []),
+    ] });
+    app.classList.toggle('suggesting', sug);
+    editTools.hidden = !canWrite();
+    imageTool.hidden = sug;
+    readNotice.hidden = canWrite() || role === 'commenter';
+    readNotice.replaceChildren(icon('eye', 16), role === 'commenter' ? 'Connecting…' : 'View only. Ask the owner for access to comment or edit.');
+    toolbar.classList.toggle('reader', !canWrite());
+    writeModeBtn.hidden = !atLeast(role, 'commenter');
+    writeModeBtn.disabled = !canEdit();
+    writeModeBtn.classList.toggle('on', sug);
+    writeModeBtn.querySelector('.wm-icon')!.replaceChildren(icon(sug ? 'suggest' : 'pencil', 16));
+    writeModeLabel.textContent = sug ? 'Suggesting' : 'Editing';
+    writeModeBtn.setAttribute('data-tip', canEdit()
+      ? (sug ? 'Suggesting: your edits become suggestions the owner can accept or reject' : 'Editing: your changes go straight into the document')
+      : 'You can suggest edits: type in the document and the owner reviews them');
+    writeModeBtn.setAttribute('aria-label', `Writing mode: ${sug ? 'Suggesting' : 'Editing'}`);
+    renderSuggestStatus();
+  }
+
+  const renderSuggestStatus = () => {
+    const s = session;
+    if (!s) { suggestStatus.replaceChildren(); suggestStatus.hidden = true; return; }
+    suggestStatus.hidden = false;
+    const stuck = s.stuck;
+    if (stuck) {
+      suggestStatus.className = 'sugg-status error';
+      suggestStatus.replaceChildren(icon('alert', 14), `${stuck} change${stuck === 1 ? '' : 's'} not saved`,
+        h('button.link-btn', { type: 'button', onclick: () => s.discardStuck() }, 'Discard'));
+    } else if (s.unsaved) {
+      suggestStatus.className = 'sugg-status saving';
+      suggestStatus.replaceChildren(h('span.dot-pulse'), h('span.sugg-status-text', null, 'Saving…'));
+      suggestStatus.setAttribute('data-tip', 'Saving your changes as suggestions');
+    } else {
+      suggestStatus.className = 'sugg-status';
+      suggestStatus.replaceChildren(...(s.count ? [icon('cloudCheck', 15), h('span.sugg-status-text', null, 'Suggestions saved')] : []));
+      suggestStatus.setAttribute('data-tip', 'Your changes are saved as suggestions. The owner accepts or rejects them.');
+    }
+  };
+  const sessionChanged = rafThrottle(() => { renderSuggestStatus(); rail.render(); rail.onDocChanged(); });
+
+  /** Enter or leave suggesting mode. */
+  async function setSuggesting(on: boolean, opts: { remember?: boolean } = {}) {
+    if (switching || on === suggesting()) return;
+    if (on && !atLeast(role, 'commenter')) return;
+    if (!on && role === 'commenter') return; // commenters can only suggest
+    if (opts.remember !== false && canEdit()) saveSuggestPref(docId, on);
+    if (on) {
+      if (!provider.synced) { wantSuggest = true; return; }
+      const s = new SuggestSession({ provider, meSub: me.sub });
+      s.onChange = sessionChanged;
+      s.onError = (m) => toast(`A suggestion couldn’t be saved: ${m}`, { kind: 'error' });
+      session = s;
+      view.dispatch({ effects: syncC.reconfigure(suggestSync(s)) });
+      s.onThreads(rail.threads);
+      refreshWriteUi();
+      rail.refreshPermissions();
+      rail.onDocChanged();
+      return;
+    }
+    const s = session!;
+    // Save first; anything still unsaved (offline, or refused) would be lost on leaving.
+    await s.sync().catch(() => false);
+    if (session !== s) return;
+    const unsaved = s.unsaved;
+    if (unsaved && !(await confirmDialog({
+      title: 'Leave suggesting?',
+      message: `${unsaved} of your changes ${provider.status === 'online' ? 'couldn’t be saved' : 'aren’t saved yet (you’re offline)'} and will be lost if you switch to editing now.`,
+      confirmLabel: 'Leave anyway', danger: true,
+    }))) return;
+    if (session !== s) return;
+    switching = true;
+    refreshWriteUi();
+    try {
+      await s.finish();
+    } finally {
+      session = null;
+      switching = false;
+      view.dispatch({ effects: syncC.reconfigure(liveSync()) });
+      refreshWriteUi();
+      rail.refreshPermissions();
+      rail.onDocChanged();
+    }
+  }
+  let wantSuggest = false;
 
   function applyDetail(d: { title?: string; owner?: { sub: string; label: string }; generalAccess?: string; publicLink?: boolean; updatedAt?: number }) {
     if (d.title && d.title !== title) {
@@ -413,16 +549,19 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   cleanups.push(() => clearTimeout(statusTimer));
 
   provider.on('status', renderStatus);
+  // Back online: save suggestions typed while away.
+  provider.on('status', (st) => { if (st === 'online' && session?.unsaved) void session.sync(); });
   provider.on('hello', ({ role: r, doc }) => { if (r !== role) applyRole(r, true); if (doc) applyDetail(doc); });
   provider.on('synced', () => {
     renderStatus();
     syncVeil.remove();
     rail.setSynced();
+    if (!session && (wantSuggest || role === 'commenter' || (canEdit() && loadSuggestPref(docId)))) { wantSuggest = false; void setSuggesting(true, { remember: false }); }
     schedulePreview();
     if (ctx.restoreScroll) requestAnimationFrame(() => { editPane.scrollTop = ctx.restoreScroll!; });
     if (canEdit() && provider.ytext.length === 0) view.focus();
   });
-  provider.on('threads', (threads, ev) => rail.setThreads(threads, ev));
+  provider.on('threads', (threads, ev) => { session?.onThreads(threads); rail.setThreads(threads, ev); });
   provider.on('meta', (d) => applyDetail(d));
   provider.on('role', (r) => applyRole(r, true));
   // A guest renamed (here or in another tab): show it, and re-announce so others see the new name.
@@ -484,7 +623,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     if (!cursor?.head) return;
     try {
       const abs = Y.createAbsolutePositionFromRelativePosition(Y.createRelativePositionFromJSON(cursor.head), provider.doc);
-      if (abs) { if (mode === 'preview') setMode('edit'); view.dispatch({ effects: EditorView.scrollIntoView(Math.min(abs.index, view.state.doc.length), { y: 'center' }) }); }
+      if (abs) { if (mode === 'preview') setMode('edit'); view.dispatch({ effects: EditorView.scrollIntoView(Math.min(coords().toView(abs.index), view.state.doc.length), { y: 'center' }) }); }
     } catch { /* stale cursor */ }
   };
   provider.awareness.on('change', renderPresence);
@@ -587,7 +726,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   }
 
   function linkDialog() {
-    if (!canEdit()) return;
+    if (!canWrite()) return;
     const range = { ...view.state.selection.main };
     const sel = selectedText(view);
     const looksUrl = /^https?:\/\/\S+$/.test(sel);
@@ -617,7 +756,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   }
 
   async function uploadImages(files: File[], at: number) {
-    if (!canEdit() || guest) return;
+    if (!canEdit() || guest || suggesting()) return;
     // Track the insertion point through concurrent edits while uploading.
     let rel = Y.createRelativePositionFromTypeIndex(provider.ytext, Math.min(at, provider.ytext.length), -1);
     for (const f of files) {
@@ -649,11 +788,19 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   const hashThread = /^#comment-(\w+)$/.exec(location.hash)?.[1];
   if (hashThread) provider.on('synced', () => setTimeout(() => rail.focusThread(hashThread), 50));
 
+  // Leaving with suggestions still being saved: let the browser warn.
+  const beforeUnload = (e: BeforeUnloadEvent) => { if (session?.unsaved) { void session.sync(); e.preventDefault(); e.returnValue = ''; } };
+  window.addEventListener('beforeunload', beforeUnload);
+  cleanups.push(() => window.removeEventListener('beforeunload', beforeUnload));
+
   return () => {
+    const s = session;
     for (const c of cleanups) c();
     rail.cancelDraft();
     panel.close();
-    provider.destroy();
+    // Navigating away inside the app: finish saving suggestions before closing the connection.
+    if (s?.unsaved) void s.sync().catch(() => false).finally(() => provider.destroy());
+    else provider.destroy();
     document.title = 'Anima Docs';
   };
 }

@@ -21,9 +21,10 @@ Agent host (MCPL 0.5)  ─────/mcpl────┘        │
 | Documents | Markdown with images (upload, paste, drag-drop, or an agent's base64/https import) and tables. One Yjs `Y.Text` per document; garbage collection is off, so any earlier state can be rendered. |
 | Live collaboration | Yjs CRDT over y-protocols; remote cursors and presence (agents appear with a cursor where they last edited). Every Yjs client id is bound to one principal; an update that would put content under someone else's id is refused, so attribution can't be forged. |
 | Comments | Threads anchored to text ranges with Yjs relative positions, so they follow concurrent edits. Replies, resolve and reopen, edit and delete, assignment, `@mentions` of humans or agents. A thread whose text is deleted keeps its quote. |
+| Suggestions | Suggesting mode, as in Google Docs: type into the document and your changes become suggestions (struck-through deletions, underlined additions) instead of edits. Editors accept or reject each one, or all at once; accepting applies it as the editor's edit. Commenters always suggest; editors switch between Editing and Suggesting. Agents suggest with `suggest_edit`. See [Suggestions](#suggestions). |
 | Identity | Archipelago `aid1` (ed25519, offline verification, multi-issuer). Humans sign in by redirect and get an opaque session cookie. Agents present the token per connection. There is a principal directory (humans and agents, issuer badge), workspace roles (member / admin / blocked; blocking takes effect immediately, including on open sockets), and per-document roles (viewer / commenter / editor / owner) plus general access for everyone signed in. See [Access](#access). |
 | Share links | Secret links that grant viewer, commenter or editor on one document, to anyone (no sign-in; visitors become guests) or to Archipelago members only. Optional label and expiry; revoking a link ends the access of everyone who came in through it, live. |
-| Agents | Network MCPL at `/mcpl`, 32 tools in 5 feature sets, RFC-006 event coalescing, RFC-008 tool classes, per-agent wake gates, offline outbox. The same tools are also available over HTTP at `/api/operations/<tool>`. |
+| Agents | Network MCPL at `/mcpl`, 35 tools in 5 feature sets, RFC-006 event coalescing, RFC-008 tool classes, per-agent wake gates, offline outbox. The same tools are also available over HTTP at `/api/operations/<tool>`. |
 | History | Named versions, diff against a version, restore (as a new attributed edit), and a per-person activity summary. |
 
 ## Access
@@ -46,8 +47,26 @@ Archipelago decides who may use the service; the service decides who may open ea
 - **Guests** are visitors who opened an "anyone" link without signing in.
   - Their name always ends in "(guest)". They can't be @mentioned, named or shared with.
   - General access ("anyone signed in") does not apply to them.
-  - They can read, comment or edit per the link, and rename themselves. Everything else needs a sign-in: creating documents, sharing, uploading images, the people directory, assigning comments.
+  - They can read, comment (and suggest) or edit per the link, and rename themselves. Everything else needs a sign-in: creating documents, sharing, uploading images, the people directory, assigning comments.
   - New guest identities are rate-limited per address.
+
+## Suggestions
+
+**In the browser.** The toolbar's mode switch says *Editing* or *Suggesting*. Commenters are always suggesting; editors choose (remembered per document).
+- While suggesting, what you type stays in your own view as pending changes and never enters the shared text. Changes from others keep arriving and are rebased around yours.
+- Each changed passage, widened to whole words, becomes one suggestion. It saves as you pause (under a second) and updates as you keep typing. Your open suggestions come back when you return, so you can keep editing them in place.
+- Undo works on your own typing; undoing a suggestion away withdraws it.
+- Everyone else sees each suggestion in the text, struck through in red and added in green, with a card in the margin showing the author, the change word by word, an optional note and replies.
+- Editors accept or reject from the card, or all at once from the toolbar's *N suggestions* menu. Accepting applies the change as the accepter's edit, as a minimal diff, so comments on surrounding text stay put.
+- A suggestion whose text someone has since changed is marked outdated and can only be rejected.
+- The author can revise or withdraw an open suggestion; the document's owner can delete any.
+
+**For agents.**
+- `suggest_edit` takes the same edit shapes as `edit_document` and needs only commenter access. A large replacement is split into one suggestion per changed passage.
+- `accept_suggestion` and `reject_suggestion` take ids or `"all"` and need edit access.
+- `read_document` lists open suggestions after the text, or shows them in place as CriticMarkup with `suggestions: "inline"`: `{~~old~>new~~}`, `{++added++}`, `{--deleted--}`, each followed by `{>>id<<}`. `list_comments {only: "suggestions"}` shows them in full.
+- The owner of a document gets one `docs:suggestion` event per burst of suggestions, after the suggester pauses (about 20 s, at most 2 min), listing each change. It wakes them by their `mentions` setting.
+- A suggester gets one event when theirs are accepted or rejected (with any note), by their `replies` setting.
 
 ## How agents experience it
 
@@ -144,8 +163,8 @@ Requirements and fallbacks:
 | feature set | tools |
 |---|---|
 | `docs.read` | `whoami`, `open_link`, `list_documents`, `read_document`, `outline`, `search`, `list_comments`, `changes`, `view_image`, `people`, `versions` |
-| `docs.write` | `create_document`, `edit_document`, `rename_document`, `insert_image`, `save_version`, `restore_version`, `delete_document` |
-| `docs.comment` | `add_comment`, `reply_comment`, `resolve_comment`, `edit_comment`, `delete_comment`, `assign_comment` |
+| `docs.write` | `create_document`, `edit_document`, `rename_document`, `insert_image`, `save_version`, `restore_version`, `delete_document`, `accept_suggestion`, `reject_suggestion` |
+| `docs.comment` | `add_comment`, `reply_comment`, `resolve_comment`, `edit_comment`, `delete_comment`, `assign_comment`, `suggest_edit` |
 | `docs.share` | `list_access` (with links), `share_document`, `set_general_access`, `create_link`, `revoke_link` |
 | `docs.watch` (uses `pushEvents`) | `watch`, `unwatch`, `list_watches` |
 
@@ -160,6 +179,8 @@ Wherever a tool takes `document`, it also accepts the document's URL or a share 
 - `{replace_all_content}`
 
 Every replacement is applied as a minimal character diff, so comments on unchanged text survive a rewrite.
+
+`suggest_edit` takes the same edits but proposes them instead (see [Suggestions](#suggestions)). Its edits are planned against the current text and must not overlap.
 
 ## Run
 
@@ -247,5 +268,5 @@ Run one replica only: state is a single SQLite file.
 
 - **Prose replies have nowhere to go.** Docs wakes carry no reply channel, so an agent's plain prose after a docs wake has nowhere to go (agent-framework records a send-failed marker). Agents answer with `reply_comment`. Registering each comment thread as an MCPL channel would let plain speech post into the thread.
 - **One process, one SQLite file.** Back up with SQLite's online backup API, never by copying a live WAL database.
-- **Guests see member ids.** Guests can see the Archipelago ids (for example `human:discord:<id>`) of the people in a document they opened, in presence and comment authorship.
+- **Suggestions are text only.** Images can't be suggested. A suggestion typed while offline lives only in that tab until the connection returns; closing the tab first loses it (the browser warns). Two people's suggestions on the same words are shown side by side, not merged.
 - **Plain-text search.** Search is a substring scan over live documents; that's fine at team scale.

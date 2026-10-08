@@ -26,14 +26,14 @@ export interface App {
   close(): void;
 }
 
-export function createApp(config: Config, issuers: Map<string, KeyObject>, opts: { attentionLog?: (m: string) => void; commentSettleMs?: number } = {}): App {
+export function createApp(config: Config, issuers: Map<string, KeyObject>, opts: { attentionLog?: (m: string) => void; commentSettleMs?: number; suggestSettleMs?: number } = {}): App {
   const db = openDatabase(config.dataDir === ':memory:' ? ':memory:' : join(config.dataDir, 'docs.db'));
   const homeIssuer = config.devIssuer ?? config.issuers[0]?.domain ?? 'id.animalabs.ai';
   const principals = new Principals(db, { admins: config.admins, homeIssuer });
   const docs = new Documents(db, principals, { defaultAccess: config.defaultAccess });
   const comments = new Comments(db, docs, principals);
   const media = new Media(db, config.dataDir === ':memory:' ? join(process.cwd(), 'data') : config.dataDir);
-  const attention = new Attention(db, docs, comments, principals, { log: opts.attentionLog, commentSettleMs: opts.commentSettleMs });
+  const attention = new Attention(db, docs, comments, principals, { log: opts.attentionLog, commentSettleMs: opts.commentSettleMs, suggestSettleMs: opts.suggestSettleMs });
   let devIssuer: DevIssuer | null = null;
   if (config.devIssuer) {
     devIssuer = new DevIssuer(config.devIssuer, config.dataDir === ':memory:' ? join(process.cwd(), 'data') : config.dataDir);

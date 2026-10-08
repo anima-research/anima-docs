@@ -244,6 +244,21 @@ export class Realtime {
         case 'comment.delete': C.remove(m.comment, actor); reply(true); return;
         case 'comment.resolve': C.resolve(m.comment, actor, m.resolved !== false); reply(true); return;
         case 'comment.assign': { const r = C.assign(m.comment, actor, m.assignee ?? null); reply(true, { warnings: warn(r.warnings) }); return; }
+        case 'suggestion.sync': reply(true, { results: this.syncSuggestions(room, actor, m.ops) }); return;
+        case 'suggestion.revise': C.revise(String(m.id ?? ''), actor, { text: m.text }); reply(true); return;
+        case 'suggestion.decide': {
+          if (m.decision !== 'accept' && m.decision !== 'reject') throw new Fault(400, 'decision must be accept or reject.');
+          C.decide(String(m.id ?? ''), { ...actor, via: 'web' }, m.decision, { note: typeof m.note === 'string' ? m.note : undefined });
+          reply(true); return;
+        }
+        case 'suggestion.decideMany': {
+          if (m.decision !== 'accept' && m.decision !== 'reject') throw new Fault(400, 'decision must be accept or reject.');
+          if (!Array.isArray(m.ids) || m.ids.length > 500) throw new Fault(400, 'ids must be a list (at most 500).');
+          const results = (m.ids as unknown[]).map((id) => {
+            try { C.decide(String(id), { ...actor, via: 'web' }, m.decision); return { id, ok: true }; } catch (e) { return { id, ok: false, error: e instanceof Fault ? e.message : 'Failed.' }; }
+          });
+          reply(true, { results }); return;
+        }
         case 'threads': reply(true, this.threads(room.docId, !!m.includeResolved)); return;
         default: reply(false, undefined, `Unknown message ${m.type}`);
       }
@@ -251,6 +266,59 @@ export class Realtime {
       reply(false, undefined, e instanceof Fault ? e.message : 'Failed.');
       if (!(e instanceof Fault)) console.error('[realtime]', e);
     }
+  }
+
+  /**
+   * A suggesting-mode browser saves its pending changes as you type: each op
+   * creates, revises or withdraws one of the sender's suggestions. Ops are
+   * independent; each reports its own result (a stale anchor fails alone and
+   * the browser retries with fresh positions).
+   */
+  private syncSuggestions(room: Room, actor: Actor, ops: unknown): { key?: string; id?: string; ok: boolean; error?: string; status?: number }[] {
+    if (!Array.isArray(ops) || ops.length > 200) throw new Fault(400, 'ops must be a list (at most 200).');
+    const C = this.app.comments;
+    return ops.map((raw) => {
+      const op = (raw ?? {}) as Record<string, any>;
+      const key = typeof op.key === 'string' ? op.key.slice(0, 64) : undefined;
+      try {
+        if (op.op === 'withdraw') {
+          const c = C.get(String(op.id ?? ''));
+          if (!c || c.deletedAt || c.docId !== room.docId || !c.suggestion) return { id: op.id, ok: true }; // already gone
+          if (c.author !== actor.sub) throw new Fault(403, 'Only the author can withdraw a suggestion.');
+          if (c.suggestion.status === 'open') C.remove(c.id, actor);
+          return { id: c.id, ok: true };
+        }
+        const anchor = this.suggestionAnchor(room, op.anchor, op.original);
+        if (op.op === 'create') {
+          const r = C.suggest(room.docId, actor, { anchor, text: op.text, note: typeof op.note === 'string' ? op.note : undefined });
+          return { key, id: r.comment.id, ok: true };
+        }
+        if (op.op === 'update') {
+          const c = C.get(String(op.id ?? ''));
+          if (!c || c.docId !== room.docId) throw new Fault(404, `No suggestion ${op.id}.`);
+          C.revise(c.id, actor, { text: op.text, anchor });
+          return { id: c.id, ok: true };
+        }
+        throw new Fault(400, 'op must be create, update or withdraw.');
+      } catch (e) {
+        if (!(e instanceof Fault)) console.error('[realtime] suggestion op', e);
+        return { key, id: typeof op.id === 'string' ? op.id : undefined, ok: false, status: e instanceof Fault ? e.status : 500, error: e instanceof Fault ? e.message : 'Failed.' };
+      }
+    });
+  }
+
+  /** A suggestion's anchor from a browser: a range or a point, whose current text must be the stated original. */
+  private suggestionAnchor(room: Room, a: unknown, original: unknown) {
+    const r = (a ?? {}) as { start?: unknown; end?: unknown };
+    if (typeof r.start !== 'string' || typeof r.end !== 'string' || typeof original !== 'string') throw new Fault(400, 'A suggestion needs anchor {start, end} and its original text.');
+    const start = Buffer.from(r.start, 'base64'), end = Buffer.from(r.end, 'base64');
+    const point = start.equals(end);
+    const s = Y.createAbsolutePositionFromRelativePosition(Y.decodeRelativePosition(start), room.doc);
+    const e = point ? s : Y.createAbsolutePositionFromRelativePosition(Y.decodeRelativePosition(end), room.doc);
+    if (!s || !e || s.type !== room.doc.getText('body') || e.index < s.index) throw new Fault(409, 'That place in the document has changed. Try again.');
+    const quote = point ? '' : room.doc.getText('body').toString().slice(s.index, e.index);
+    if (point ? original !== '' : quote !== original) throw new Fault(409, 'The text changed while you were suggesting. Try again.');
+    return { start: new Uint8Array(start), end: new Uint8Array(end), quote };
   }
 
   /** Clients send base64 relative positions computed on their replica; verify they resolve here. */
@@ -280,6 +348,9 @@ export class Realtime {
       resolvedBy: person(t.root.resolvedBy),
       assignee: person(t.root.assignee),
       comments: [t.root, ...t.replies].map((c) => ({ id: c.id, author: person(c.author), body: c.body, createdAt: c.createdAt, editedAt: c.editedAt, mentions: c.mentions })),
+      suggestion: t.suggestion
+        ? { original: t.suggestion.original, text: t.suggestion.text, status: t.suggestion.status, outdated: t.suggestion.outdated, point: !!t.anchor?.point }
+        : null,
     }));
   }
 

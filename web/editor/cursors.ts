@@ -5,6 +5,7 @@ import * as Y from 'yjs';
 import { Annotation, RangeSet, type Range } from '@codemirror/state';
 import { Decoration, EditorView, ViewPlugin, WidgetType, type DecorationSet, type ViewUpdate } from '@codemirror/view';
 import type { Awareness } from 'y-protocols/awareness';
+import { sharedCoords, type Coords } from './suggest';
 
 const remoteChange = Annotation.define<null>();
 
@@ -36,7 +37,7 @@ class CaretWidget extends WidgetType {
   ignoreEvent() { return true; }
 }
 
-export function remoteCursors(ytext: Y.Text, awareness: Awareness) {
+export function remoteCursors(ytext: Y.Text, awareness: Awareness, coords: () => Coords = () => sharedCoords) {
   return ViewPlugin.fromClass(class {
     decorations: DecorationSet = RangeSet.empty;
     /** client → time its cursor last moved, to show the flag briefly after movement. */
@@ -68,8 +69,10 @@ export function remoteCursors(ytext: Y.Text, awareness: Awareness) {
         const focused = update.view.hasFocus && update.view.dom.ownerDocument.hasFocus();
         const sel = focused ? update.state.selection.main : null;
         if (sel) {
-          const anchor = Y.createRelativePositionFromTypeIndex(ytext, sel.anchor);
-          const head = Y.createRelativePositionFromTypeIndex(ytext, sel.head);
+          // Others see your cursor in the shared text (while suggesting, the editor shows more).
+          const c = coords();
+          const anchor = Y.createRelativePositionFromTypeIndex(ytext, Math.min(c.toShared(sel.anchor), ytext.length));
+          const head = Y.createRelativePositionFromTypeIndex(ytext, Math.min(c.toShared(sel.head), ytext.length));
           const cur = local.cursor;
           if (!cur || !Y.compareRelativePositions(Y.createRelativePositionFromJSON(cur.anchor), anchor) || !Y.compareRelativePositions(Y.createRelativePositionFromJSON(cur.head), head)) {
             awareness.setLocalStateField('cursor', { anchor: Y.relativePositionToJSON(anchor), head: Y.relativePositionToJSON(head) });
@@ -90,7 +93,8 @@ export function remoteCursors(ytext: Y.Text, awareness: Awareness) {
         } catch { return; }
         if (!a || !hd || a.type !== ytext || hd.type !== ytext) return;
         const user: RemoteUser = { name: state.user?.name ?? 'Someone', color: state.user?.color ?? '#1a73e8', sub: state.user?.sub, kind: state.user?.kind, via: state.user?.via };
-        const anchor = Math.min(a.index, docLen), head = Math.min(hd.index, docLen);
+        const c = coords();
+        const anchor = Math.min(c.toView(a.index), docLen), head = Math.min(c.toView(hd.index), docLen);
         const key = `${anchor}:${head}`;
         const prev = this.moved.get(client);
         if (!prev || prev.key !== key) this.moved.set(client, { at: now, key });

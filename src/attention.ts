@@ -16,7 +16,7 @@ import type { DB } from './db.js';
 import { Fault } from './auth.js';
 import { isGuest, type Principals } from './principals.js';
 import { Documents, type DeleteSet, type DocChange, type Role } from './documents.js';
-import type { CommentEvent, Comments } from './comments.js';
+import { suggestionSummary, type CommentEvent, type Comments, type Thread } from './comments.js';
 import { textChanges, firstLook } from './diff.js';
 import { outline, sectionPath } from './markdown.js';
 
@@ -97,6 +97,13 @@ interface EditAccum {
   timer: NodeJS.Timeout | null;
 }
 interface CommentAccum { actors: Set<string>; qualifying: boolean; timer: NodeJS.Timeout | null }
+/** Suggestions for an owner, and decisions for a suggester, gathered until the burst settles. */
+interface SuggestAccum { created: Set<string>; decided: Map<string, { kind: 'accepted' | 'rejected'; by: string; note: string | null }>; first: number; timer: NodeJS.Timeout | null }
+
+/** Wait this long after the last suggestion (or revision) in a burst before telling the owner. */
+const SUGGEST_SETTLE_MS = 20_000;
+/** ...but never longer than this after the first. */
+const SUGGEST_MAX_WAIT_MS = 120_000;
 
 const SUBJECT_EDITS = (docId: string) => `doc:${docId}:edits`;
 const SUBJECT_COMMENTS = (docId: string) => `doc:${docId}:comments`;
@@ -109,6 +116,7 @@ export class Attention {
   private sessions = new Map<string, Set<AgentSession>>();
   private edits = new Map<string, EditAccum>();
   private commentAccums = new Map<string, CommentAccum>();
+  private suggestAccums = new Map<string, SuggestAccum>();
   private lastWake = new Map<string, number>();
   /** Subs whose outbox is being flushed: new deliveries queue behind it, in order. */
   private flushing = new Set<string>();
@@ -121,7 +129,7 @@ export class Attention {
     private docs: Documents,
     private comments: Comments,
     private principals: Principals,
-    private opts: { commentSettleMs?: number; log?: (msg: string) => void } = {},
+    private opts: { commentSettleMs?: number; suggestSettleMs?: number; log?: (msg: string) => void } = {},
   ) {
     docs.on('change', (c: DocChange) => this.onChange(c));
     docs.on('share', (e: { docId: string; sub: string | null; role: string; by: string }) => this.onShare(e));
@@ -134,6 +142,7 @@ export class Attention {
     this.closed = true;
     for (const a of this.edits.values()) if (a.timer) clearTimeout(a.timer);
     for (const a of this.commentAccums.values()) if (a.timer) clearTimeout(a.timer);
+    for (const a of this.suggestAccums.values()) if (a.timer) clearTimeout(a.timer);
   }
 
   // ------------------------------------------------------------------ settings
@@ -435,8 +444,11 @@ export class Attention {
     for (const t of e.newlyAddressed) {
       if (t.sub === e.actor || !this.access(t.sub, e.docId) || ignores(t.sub)) continue;
       handled.add(t.sub);
-      this.bg(this.deliverAddressed(t.sub, e, t.reason));
+      if (t.reason === 'suggestion' || t.reason === 'decision') this.queueSuggestionNotice(t.sub, e);
+      else this.bg(this.deliverAddressed(t.sub, e, t.reason));
     }
+    // A suggester still revising: hold the owner's notice until they pause.
+    if (e.kind === 'edited' && e.commentId === e.threadId && comment.suggestion) this.extendSuggestionNotices(e.docId, e.threadId);
 
     // 2. Replies in threads the recipient started or took part in.
     if (e.kind === 'replied') {
@@ -461,7 +473,7 @@ export class Attention {
       const ids = e.kind === 'deleted' && e.commentId === e.threadId
         ? (this.db.prepare('SELECT id FROM comments WHERE thread_id = ?').all(e.threadId) as { id: string }[]).map((r) => r.id)
         : [e.commentId];
-      const rows = this.db.prepare(`SELECT sub, comment_id, reason, level FROM addressed WHERE comment_id IN (${ids.map(() => '?').join(',')})`).all(...ids) as
+      const rows = this.db.prepare(`SELECT sub, comment_id, reason, level FROM addressed WHERE comment_id IN (${ids.map(() => '?').join(',')}) AND reason IN ('mention', 'assigned', 'reply')`).all(...ids) as
         { sub: string; comment_id: string; reason: 'mention' | 'assigned' | 'reply'; level: string }[];
       for (const r of rows) {
         if (e.kind === 'edited') {
@@ -541,7 +553,7 @@ export class Attention {
       for (const e of evs) {
         if (e.actor === sub) continue;
         if (st.guests === 'off' && isGuest(e.actor)) continue;
-        if (addressed.has(e.commentId) && (e.kind === 'created' || e.kind === 'replied' || e.kind === 'edited')) continue;
+        if (addressed.has(e.commentId) && (e.kind === 'created' || e.kind === 'replied' || e.kind === 'edited' || e.kind === 'accepted' || e.kind === 'rejected')) continue;
         const line = this.describeCommentEvent(e);
         if (line) lines.push(line);
       }
@@ -557,7 +569,20 @@ export class Attention {
     const c = this.comments.get(e.commentId);
     const root = this.comments.get(e.threadId);
     const on = root?.quote ? ` on “${clip(root.quote, 80)}”` : '';
+    const sg = root?.suggestion;
+    if (sg) {
+      const what = suggestionSummary(sg, 240);
+      const note = c && c.id !== root.id && !c.deletedAt ? ` — “${clip(c.body, 300)}”` : '';
+      switch (e.kind) {
+        case 'created': return root && !root.deletedAt ? `• ${who} suggested [${e.threadId}]: ${what}${root.body ? ` — “${clip(root.body, 300)}”` : ''}` : null;
+        case 'edited': return root && !root.deletedAt && e.commentId === root.id ? `• ${who} revised suggestion ${e.threadId}: ${what}` : null;
+        case 'accepted': return `• ${who} accepted ${this.principals.label(root.author)}'s suggestion ${e.threadId}: ${what}${note}`;
+        case 'rejected': return `• ${who} rejected ${this.principals.label(root.author)}'s suggestion ${e.threadId}: ${what}${note}`;
+        case 'deleted': if (e.commentId === e.threadId) return `• ${who} withdrew suggestion ${e.threadId}: ${what}`; break;
+      }
+    }
     switch (e.kind) {
+      case 'accepted': case 'rejected': return null;
       case 'created': return c && !c.deletedAt ? `• ${who} commented${on} [thread ${e.threadId}]: ${clip(c.body, 600)}` : null;
       case 'replied': return c && !c.deletedAt ? `• ${who} replied in thread ${e.threadId}${on}: ${clip(c.body, 600)}` : null;
       case 'edited': return c && !c.deletedAt ? `• ${who} edited comment ${e.commentId} in thread ${e.threadId}: ${clip(c.body, 400)}` : null;
@@ -566,6 +591,104 @@ export class Attention {
       case 'reopened': return `• ${who} reopened thread ${e.threadId}${on}`;
       case 'assigned': return root?.assignee ? `• ${who} assigned thread ${e.threadId}${on} to ${this.principals.label(root.assignee)}` : `• ${who} unassigned thread ${e.threadId}`;
     }
+  }
+
+  // ------------------------------------------------------------------ suggestions
+
+  /** Gather a new suggestion (for the owner) or a decision (for the suggester) into one settled notice. */
+  private queueSuggestionNotice(sub: string, e: CommentEvent) {
+    const p = this.principals.get(sub);
+    if (!p || p.kind === 'human' || p.kind === 'guest') return; // people see suggestions in the web UI
+    const k = `${sub}\0${e.docId}`;
+    let a = this.suggestAccums.get(k);
+    if (!a) this.suggestAccums.set(k, a = { created: new Set(), decided: new Map(), first: Date.now(), timer: null });
+    if (e.kind === 'created') a.created.add(e.threadId);
+    else if (e.kind === 'accepted' || e.kind === 'rejected') {
+      const note = e.commentId !== e.threadId ? this.comments.get(e.commentId)?.body ?? null : null;
+      a.decided.set(e.threadId, { kind: e.kind, by: e.actor, note });
+    }
+    this.armSuggestionNotice(k, sub, e.docId, a);
+  }
+
+  private armSuggestionNotice(k: string, sub: string, docId: string, a: SuggestAccum) {
+    if (a.timer) clearTimeout(a.timer);
+    const settle = this.opts.suggestSettleMs ?? SUGGEST_SETTLE_MS;
+    const wait = Math.max(0, Math.min(settle, a.first + Math.max(settle, SUGGEST_MAX_WAIT_MS) - Date.now()));
+    a.timer = setTimeout(() => this.bg(this.flushSuggestions(sub, docId)), wait);
+    a.timer.unref?.();
+  }
+
+  private extendSuggestionNotices(docId: string, threadId: string) {
+    for (const [k, a] of this.suggestAccums) {
+      if (!a.created.has(threadId)) continue;
+      const [sub, d] = k.split('\0');
+      if (d === docId) this.armSuggestionNotice(k, sub, docId, a);
+    }
+  }
+
+  private async flushSuggestions(sub: string, docId: string) {
+    const k = `${sub}\0${docId}`;
+    const a = this.suggestAccums.get(k);
+    if (!a) return;
+    if (a.timer) clearTimeout(a.timer);
+    this.suggestAccums.delete(k);
+    const doc = this.docs.get(docId);
+    if (!doc || !this.access(sub, docId)) return;
+    const st = this.settings(sub, docId);
+    const live = (id: string) => { const t = this.comments.thread(id); return t && !t.root.deletedAt && t.suggestion ? t : null; };
+    let created = [...a.created].map(live).filter((t): t is Thread => !!t && t.suggestion!.status === 'open');
+    if (st.guests === 'off') created = created.filter((t) => !isGuest(t.root.author));
+    const decided = st.replies === 'off' ? [] : [...a.decided].map(([id, d]) => ({ t: live(id), ...d }))
+      .filter((x): x is { t: Thread; kind: 'accepted' | 'rejected'; by: string; note: string | null } => !!x.t && x.t.suggestion!.status === x.kind);
+    if (!created.length && !decided.length) return;
+    const authors = new Set([...created.map((t) => t.root.author), ...decided.map((d) => d.by)]);
+    const allGuests = [...authors].every((s) => isGuest(s));
+    if (allGuests && !this.allowGuestDelivery(sub, docId)) return;
+    const kinds = new Set([...authors].map((s) => this.principals.get(s)?.kind));
+    const wake = !this.quietNow(st) && (created.length
+      ? st.mentions === 'wake' && (!allGuests || st.guests === 'wake')
+      : st.replies === 'wake');
+    const tags = ['docs:suggestion', 'chat:addressed',
+      ...(kinds.has('human') || kinds.has('guest') ? ['chat:from-human'] : []), ...(kinds.has('agent') || kinds.has('service') ? ['chat:from-agent'] : []),
+      ...(allGuests ? ['docs:from-guest'] : []),
+      wake ? 'docs:wake' : 'docs:quiet'];
+    const text = this.suggestionNoticeText(doc, created, decided);
+    const now = Date.now();
+    const mark = this.db.prepare(`INSERT INTO addressed (sub, comment_id, doc_id, reason, level, at) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(sub, comment_id) DO UPDATE SET at = excluded.at`);
+    for (const t of created) mark.run(sub, t.root.id, docId, 'suggestion', wake ? 'wake' : 'quiet', now);
+    for (const d of decided) {
+      // The decision event's comment is its note, if it had one, else the suggestion itself.
+      const ev = this.db.prepare(`SELECT comment_id FROM comment_events WHERE thread_id = ? AND kind = ? ORDER BY seq DESC LIMIT 1`).get(d.t.root.id, d.kind) as { comment_id: string } | undefined;
+      mark.run(sub, ev?.comment_id ?? d.t.root.id, docId, 'decision', wake ? 'wake' : 'quiet', now);
+    }
+    await this.sendOrQueue(sub, {
+      featureSet: FEATURE_SET, eventId: eventId('sug'), timestamp: iso(), tags,
+      origin: { documentId: docId, title: doc.title, suggestions: created.map((t) => t.root.id), decided: decided.map((d) => d.t.root.id) },
+      coalesce: { key: `suggestions:${docId}:${randomBytes(4).toString('hex')}`, initial: true },
+      payload: { content: [{ type: 'text', text }] },
+    }, docId);
+  }
+
+  private suggestionNoticeText(doc: { id: string; title: string }, created: Thread[], decided: { t: Thread; kind: 'accepted' | 'rejected'; by: string; note: string | null }[]): string {
+    const L = (s: string) => this.principals.label(s);
+    const out: string[] = [];
+    const line = (t: Thread) => (t.anchor && !t.anchor.orphaned ? ` (line ${t.anchor.line})` : '');
+    if (created.length) {
+      const by = [...new Set(created.map((t) => t.root.author))].map(L).join(', ');
+      out.push(`${by} suggested ${created.length === 1 ? 'a change' : `${created.length} changes`} to “${doc.title}” (${doc.id}), which you own. You decide:`);
+      for (const t of created.slice(0, 25)) {
+        out.push(`  [${t.root.id}]${line(t)} ${suggestionSummary(t.suggestion!, 400, t.anchor)}${t.suggestion!.outdated ? ' — OUTDATED (the text has since changed)' : ''}`);
+        if (t.root.body) out.push(`      note: ${clip(t.root.body, 500)}`);
+      }
+      if (created.length > 25) out.push(`  … and ${created.length - 25} more.`);
+      const ids = created.slice(0, 3).map((t) => JSON.stringify(t.root.id)).join(',');
+      out.push(`Accept with accept_suggestion {"suggestions":[${ids}]}, reject with reject_suggestion {"suggestions":[…],"reason":"…"}, or discuss with reply_comment. list_comments {"document":"${doc.id}","only":"suggestions"} shows them in full; read_document {"document":"${doc.id}","suggestions":"inline"} shows them in place.`);
+    }
+    for (const d of decided) {
+      out.push(`${L(d.by)} ${d.kind} your suggestion ${d.t.root.id} on “${doc.title}” (${doc.id}): ${suggestionSummary(d.t.suggestion!, 300)}${d.note ? ` — “${clip(d.note, 500)}”` : ''}`);
+    }
+    return out.join('\n');
   }
 
   // ------------------------------------------------------------------ addressed

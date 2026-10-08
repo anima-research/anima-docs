@@ -18,11 +18,11 @@ const PUSH_TIMEOUT_MS = 30_000;
 
 export const FEATURE_SETS: Record<FeatureSet, { description: string; uses: string[]; tagOntology?: unknown }> = {
   'docs.read': { description: 'Read documents, comments, images, people and history.', uses: ['tools'] },
-  'docs.write': { description: 'Create and edit documents (attributed, live for everyone).', uses: ['tools'] },
-  'docs.comment': { description: 'Comment threads: comment, reply, resolve, assign, @mention.', uses: ['tools'] },
+  'docs.write': { description: 'Create and edit documents (attributed, live for everyone); accept or reject suggestions.', uses: ['tools'] },
+  'docs.comment': { description: 'Comment threads: comment, reply, resolve, assign, @mention; suggest edits for review (suggest_edit).', uses: ['tools'] },
   'docs.share': { description: 'Manage who can access documents, and share links.', uses: ['tools'] },
   'docs.watch': {
-    description: 'Push events: @mentions, assignments and replies to you (one per comment; edits replace, deletions withdraw); for watched documents, one attributed diff per document of what others changed (RFC-006 deferred: rendered when the agent is about to read it) and a comment digest; shares. Each event is tagged docs:wake or docs:quiet by the gates the agent sets with watch. Hosts should advertise eventCoalescing; gate rules: source <id> + docs:wake → always, source <id> → defer.',
+    description: 'Push events: @mentions, assignments and replies to you (one per comment; edits replace, deletions withdraw); suggestions on documents you own and decisions on yours (one per settled burst); for watched documents, one attributed diff per document of what others changed (RFC-006 deferred: rendered when the agent is about to read it) and a comment digest; shares. Each event is tagged docs:wake or docs:quiet by the gates the agent sets with watch. Hosts should advertise eventCoalescing; gate rules: source <id> + docs:wake → always, source <id> → defer.',
     uses: ['tools', 'pushEvents'],
     tagOntology: {
       coreTags: ['chat:mention', 'chat:reply', 'chat:addressed', 'chat:edited', 'chat:deleted', 'chat:from-human', 'chat:from-agent'],
@@ -32,6 +32,7 @@ export const FEATURE_SETS: Record<FeatureSet, { description: string; uses: strin
         'docs:edit': { desc: 'Document text changed; rendered as an attributed diff since the recipient last looked.' },
         'docs:comment': { desc: 'Comment activity.' },
         'docs:assigned': { desc: 'A comment thread was assigned to the recipient.', implies: ['chat:addressed'] },
+        'docs:suggestion': { desc: 'Suggested edits on a document the recipient owns, awaiting their decision; or a decision (accepted / rejected) on the recipient\'s own suggestions.', implies: ['chat:addressed'] },
         'docs:share': { desc: 'A document was shared with (or unshared from) the recipient.' },
         'docs:from-guest': { desc: 'Activity by a guest: someone who opened an "anyone with the link" share link without signing in. Never wakes unless the recipient set guests: wake.' },
       },
@@ -292,6 +293,7 @@ export class McplSession implements AgentSession {
     return [
       'What reaches you (feature set docs.watch):',
       '- Addressed to you: an @mention, a thread assigned to you, or a reply in a thread you started or joined. One event per comment: an edit replaces it, a deletion withdraws it. These come without watching anything; offline, they wait for you.',
+      '- Suggestions (docs:suggestion): when someone suggests edits on a document you own, one event per burst (after they pause) lists the changes; you accept_suggestion or reject_suggestion. When your own suggestions are decided, you hear that too. To change a document that isn\'t yours, use suggest_edit: the owner reviews it.',
       '- Documents you watch: edits arrive as one diff per document of what others changed since you last looked (never your own edits), with authors and section names. Comment activity arrives as a digest. A full read_document counts as looking.',
       '- Documents shared with you: a short notice.',
       'Every event carries docs:wake or docs:quiet according to the gates you set with watch (per document, or document "*" for defaults): edits / comments / replies / shares: wake | quiet | off; mentions: wake | quiet; from: anyone | humans | agents | names; guests; min_chars; sections; keywords; settle_seconds; cooldown_seconds; quiet_until. A first watch without options means edits quiet, comments wake, from humans.',

@@ -113,6 +113,25 @@ function plan(text: string, e: AgentEdit, i: number): Planned[] {
   throw new Fault(400, `Edit ${i + 1}: unrecognized edit. Use one of old_text/new_text, insert_after, insert_before, append, prepend, replace_section, append_to_section, replace_all_content.`);
 }
 
+/**
+ * Plan edits independently against one text, without applying them (for
+ * suggestions, which are each reviewed on their own). They must not overlap.
+ */
+export function planIndependent(text: string, edits: AgentEdit[]): { from: number; to: number; text: string; edit: number }[] {
+  if (!Array.isArray(edits) || !edits.length) throw new Fault(400, 'edits must be a non-empty list.');
+  if (edits.length > 100) throw new Fault(400, 'At most 100 edits per call.');
+  const out: { from: number; to: number; text: string; edit: number }[] = [];
+  edits.forEach((e, i) => { for (const p of plan(text, e, i)) out.push({ from: p.from, to: p.to, text: p.text, edit: i }); });
+  out.sort((a, b) => a.from - b.from || a.to - b.to);
+  for (let k = 1; k < out.length; k++) {
+    const a = out[k - 1], b = out[k];
+    if (b.from < a.to || (b.from === a.to && a.from === a.to && b.from === b.to)) {
+      throw new Fault(409, a.edit === b.edit ? `Edit ${a.edit + 1} changes overlapping text.` : `Edits ${a.edit + 1} and ${b.edit + 1} touch the same text; combine them into one.`);
+    }
+  }
+  return out;
+}
+
 function pickSection(text: string, ref: string, i: number) {
   const secs = findSections(text, ref);
   if (!secs.length) throw new Fault(404, `Edit ${i + 1}: no heading matching "${ref}". Use outline to see headings; "Parent > Child" disambiguates.`);
