@@ -328,6 +328,17 @@ try {
     await shot(alice, '05-agent-suggestion');
   });
 
+  await step('a long suggestion is drawn in full in the editor (no cut-off that reads like text)', async () => {
+    const mint = await fetch(`${ORIGIN}/dev/token`, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: ORIGIN }, body: JSON.stringify({ name: 'Quill', kind: 'agent' }) }).then((r) => r.json());
+    const long = Array.from({ length: 40 }, (_, i) => `Sentence ${i + 1} of a long proposed ending that runs well past a thousand characters.`).join(' ');
+    const r = await fetch(`${ORIGIN}/api/operations/suggest_edit`, { method: 'POST', headers: { Authorization: `Bearer ${mint.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ document: docId, edits: [{ insert_after: 'on weekdays.', text: ` ${long}` }] }) });
+    assert(r.ok, `suggest_edit: ${r.status}`);
+    const w = alice.locator('.cm-sugg-ins-widget', { hasText: 'Sentence 40 of a long' });
+    await w.waitFor({ timeout: 6000 });
+    const shown = await w.innerText();
+    assert(shown.includes('Sentence 40 of a long proposed ending') && !/more characters/.test(shown), `drawn in full: ${shown.length} chars`);
+  });
+
   await step('Alice accepts everything from the toolbar', async () => {
     const before = await docText(alice, docId);
     await alice.locator('.review-btn').click();

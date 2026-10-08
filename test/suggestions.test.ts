@@ -405,3 +405,20 @@ test('R5: withdrawing a suggestion clears its text; a failed accept leaves no no
   assert.equal(t.suggestion!.status, 'open');
   assert.equal(t.replies.length, 0);
 });
+
+test('a very long suggestion: listings cut it with a marker no one could take for text; asking for the thread shows it all', async () => {
+  const owner = await rawHost(url(S.token('OwnLong')));
+  try {
+    const made = await owner.tool('create_document', { title: 'Long', content: 'Start.\n' });
+    const id = /\((d\w+)\)/.exec(made.text)![1];
+    const long = 'word '.repeat(1600).trim() + ' END';
+    const s = await owner.tool('suggest_edit', { document: id, edits: [{ append: long }] });
+    const sid = /\[(c\w+)\]/.exec(s.text)![1];
+    const listed = await owner.tool('list_comments', { document: id, only: 'suggestions' });
+    assert.match(listed.text, /\[NOT PART OF THE TEXT: [\d,]+ more characters not shown; list_comments \{"thread":"c\w+"\} shows it all\]/);
+    assert.doesNotMatch(listed.text, / END/);
+    const one = await owner.tool('list_comments', { document: id, thread: sid });
+    assert.match(one.text, / END\n/);
+    assert.doesNotMatch(one.text, /NOT PART OF THE TEXT/);
+  } finally { owner.close(); }
+});

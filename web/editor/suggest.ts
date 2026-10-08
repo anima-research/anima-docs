@@ -579,8 +579,20 @@ export const suggestionOverlays = StateField.define<DecorationSet>({
   provide: (f) => EditorView.decorations.from(f),
 });
 
-const SHOW_MAX = 1200;
-const clipShown = (s: string) => (s.length > SHOW_MAX ? `${s.slice(0, SHOW_MAX)} … (${(s.length - SHOW_MAX).toLocaleString()} more characters)` : s);
+/**
+ * Suggested text is drawn in full; only past this is it cut, and the cut is a
+ * chip that can't be mistaken for document text (the card shows it all).
+ */
+const SHOW_MAX = 6000;
+function fillShown(el: HTMLElement, s: string) {
+  if (s.length <= SHOW_MAX) { el.textContent = s; return; }
+  el.textContent = s.slice(0, SHOW_MAX);
+  const more = document.createElement('span');
+  more.className = 'cm-sugg-more';
+  more.textContent = `+${(s.length - SHOW_MAX).toLocaleString()} characters`;
+  more.title = 'This suggestion continues; open its card to read it all';
+  el.append(more);
+}
 
 class InsertWidget extends WidgetType {
   constructor(readonly text: string, readonly id: string, readonly active: boolean) { super(); }
@@ -588,7 +600,7 @@ class InsertWidget extends WidgetType {
     const el = document.createElement('span');
     el.className = `cm-sugg-ins-widget${this.active ? ' active' : ''}`;
     el.dataset.thread = this.id;
-    el.textContent = clipShown(this.text);
+    fillShown(el, this.text);
     return el;
   }
   eq(o: InsertWidget) { return o.text === this.text && o.id === this.id && o.active === this.active; }
@@ -601,7 +613,7 @@ class StruckWidget extends WidgetType {
     const el = document.createElement('span');
     el.className = `cm-sugg-del-widget ${this.kind}`;
     if (this.id) el.dataset.thread = this.id;
-    el.textContent = clipShown(this.text);
+    fillShown(el, this.text);
     el.setAttribute('aria-label', `Suggested deletion: ${this.text.slice(0, 200)}`);
     return el;
   }

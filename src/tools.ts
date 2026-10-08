@@ -47,7 +47,7 @@ function need(args: Record<string, any>, key: string): string {
   return v.trim();
 }
 
-function threadText(app: App, t: Thread, opts: { brief?: boolean } = {}): string {
+function threadText(app: App, t: Thread, opts: { brief?: boolean; full?: boolean } = {}): string {
   if (t.suggestion) return suggestionText(app, t, opts);
   const p = (s: string) => app.principals.label(s);
   const where = t.anchor
@@ -59,13 +59,16 @@ function threadText(app: App, t: Thread, opts: { brief?: boolean } = {}): string
 }
 
 const BLOCK_MAX = 6000;
-function block(label: string, body: string): string[] {
-  const cut = body.length > BLOCK_MAX ? `${body.slice(0, BLOCK_MAX)}\n… (${(body.length - BLOCK_MAX).toLocaleString('en')} more characters)` : body;
-  return [`    <<<${label}`, ...cut.split('\n').map((l) => `    ${l}`), `    ${label}>>>`];
+/** A suggestion's text, verbatim; long ones are cut (unless `full`) with a marker that can't be taken for text. */
+function block(label: string, body: string, opts: { full?: boolean; thread?: string } = {}): string[] {
+  const cut = !opts.full && body.length > BLOCK_MAX
+    ? [...body.slice(0, BLOCK_MAX).split('\n'), `[NOT PART OF THE TEXT: ${(body.length - BLOCK_MAX).toLocaleString('en')} more characters not shown; list_comments {"thread":"${opts.thread ?? '…'}"} shows it all]`]
+    : body.split('\n');
+  return [`    <<<${label}`, ...cut.map((l) => `    ${l}`), `    ${label}>>>`];
 }
 
 /** A suggestion thread: what it changes (in full unless brief), its state, and its discussion. */
-function suggestionText(app: App, t: Thread, opts: { brief?: boolean }): string {
+function suggestionText(app: App, t: Thread, opts: { brief?: boolean; full?: boolean }): string {
   const p = (s: string) => app.principals.label(s);
   const sg = t.suggestion!;
   const where = t.anchor && !t.anchor.orphaned ? ` (line ${t.anchor.line})` : '';
@@ -75,9 +78,9 @@ function suggestionText(app: App, t: Thread, opts: { brief?: boolean }): string 
   const lines = [`Suggestion ${t.root.id} by ${p(t.root.author)}${where}${state}`];
   const short = (x: string) => x.length <= 200 && !x.includes('\n');
   if (opts.brief || (short(sg.original) && short(sg.text))) lines.push(`  ${suggestionSummary(sg, opts.brief ? 160 : 200, t.anchor)}`);
-  else if (!sg.original) lines.push(`  insert${t.anchor?.context?.before.trim() ? ` after ${quoteText(t.anchor.context.before.slice(-30), 40)}` : ''}:`, ...block('INSERT', sg.text));
-  else if (!sg.text) lines.push('  delete:', ...block('DELETE', sg.original));
-  else lines.push('  replace:', ...block('ORIGINAL', sg.original), '  with:', ...block('SUGGESTED', sg.text));
+  else if (!sg.original) lines.push(`  insert${t.anchor?.context?.before.trim() ? ` after ${quoteText(t.anchor.context.before.slice(-30), 40)}` : ''}:`, ...block('INSERT', sg.text, { full: opts.full, thread: t.root.id }));
+  else if (!sg.text) lines.push('  delete:', ...block('DELETE', sg.original, { full: opts.full, thread: t.root.id }));
+  else lines.push('  replace:', ...block('ORIGINAL', sg.original, { full: opts.full, thread: t.root.id }), '  with:', ...block('SUGGESTED', sg.text, { full: opts.full, thread: t.root.id }));
   for (const c of [t.root, ...t.replies]) {
     if (!c.body) continue;
     lines.push(`  ${p(c.author)} (${ago(c.createdAt)}${c.editedAt ? ', edited' : ''}) [${c.id}]: ${c.body.replace(/\n/g, '\n    ')}`);
@@ -367,7 +370,7 @@ export const TOOLS: ToolDef[] = [
       else if (a.only === 'suggestions') threads = threads.filter((t) => t.suggestion);
       app.attention.markCommentsRead(actor.sub, id);
       app.comments.markSeen(actor.sub, threads);
-      return text(threads.length ? threads.map((t) => threadText(app, t)).join('\n\n') : a.only === 'suggestions' ? 'No suggestions.' : 'No comment threads.');
+      return text(threads.length ? threads.map((t) => threadText(app, t, { full: !!a.thread })).join('\n\n') : a.only === 'suggestions' ? 'No suggestions.' : 'No comment threads.');
     },
   },
   {

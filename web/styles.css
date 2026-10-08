@@ -873,6 +873,10 @@ dialog.busy .dialog-body { opacity: 0.75; }
 }
 .cm-sugg-del.active { background: var(--danger-soft); }
 .cm-sugg-ins-widget.active { background: color-mix(in srgb, var(--sugg) 22%, transparent); }
+.cm-sugg-more {
+  display: inline-block; margin-left: 6px; padding: 0 7px; border-radius: 999px; background: var(--surface-3); color: var(--text-2);
+  font: 600 11.5px/1.7 var(--font-sans, inherit); text-decoration: none; vertical-align: 1px; white-space: nowrap; cursor: pointer;
+}
 .cm-sugg-outdated { text-decoration: underline dotted var(--warn); text-decoration-thickness: 2px; text-underline-offset: 3px; cursor: pointer; }
 .cm-sugg-outdated.active { background: var(--warn-soft); }
 .doc-app.suggesting .cm-content { caret-color: var(--sugg); }
