@@ -859,15 +859,38 @@ export class Attention {
     if (!row?.delivered) return;
     const visible = !!this.access(sub, e.docId);
     const doc = this.docs.get(e.docId);
+    const title = doc?.title ?? e.docId;
     const params: PushParams = {
       featureSet: FEATURE_SET, eventId: eventId('del'), timestamp: iso(), tags: ['docs:comment', 'chat:deleted', 'docs:quiet'],
       origin: visible ? { documentId: e.docId, commentId, threadId: e.threadId } : { commentId },
       coalesce: { key: SUBJECT_COMMENT(commentId), retract: true },
-      payload: { content: [{ type: 'text', text: visible
-        ? `${this.principals.label(e.actor)} deleted the comment ${commentId} (thread ${e.threadId}) on “${doc?.title ?? e.docId}” that was addressed to you.`
-        : `The comment ${commentId} that was addressed to you has been deleted.` }] },
+      payload: { content: [{ type: 'text', text: !visible
+        ? `The comment ${commentId} that was addressed to you has been deleted.`
+        : sub === e.actor
+          ? this.ownDeletionText(commentId, e, title)
+          : `${this.principals.label(e.actor)} deleted the comment ${commentId} (thread ${e.threadId}) on “${title}” that was addressed to you.` }] },
     };
     await this.sendOrQueue(sub, params, e.docId);
+  }
+
+  /**
+   * The retraction's text for the one who deleted. The retraction still goes
+   * to them, so the earlier notice leaves their context, but it describes
+   * their own act. "<you> deleted the comment … that was addressed to you"
+   * reads as though someone else had acted. Deleting a thread's first
+   * comment, which withdrawing a suggestion does, takes its replies with it,
+   * so the comment withdrawn here may be another's reply in that thread.
+   */
+  private ownDeletionText(commentId: string, e: CommentEvent, title: string): string {
+    const author = this.comments.get(commentId)?.author;
+    const whose = author ? `${this.principals.label(author)}’s` : 'a';
+    if (commentId === e.commentId) {
+      return `You deleted ${whose} comment ${commentId} (thread ${e.threadId}) on “${title}”, which was addressed to you.`;
+    }
+    const root = this.comments.get(e.threadId);
+    const rootWhose = root?.author === e.actor ? 'your' : root ? `${this.principals.label(root.author)}’s` : 'the';
+    const act = root?.suggestion ? `You withdrew ${rootWhose} suggestion ${e.threadId}` : `You deleted ${rootWhose} thread ${e.threadId}`;
+    return `${act} on “${title}”, and ${whose} reply ${commentId} in it, which was addressed to you, went with it.`;
   }
 
   private onShare(e: { docId: string; sub: string | null; role: string; by: string }) {

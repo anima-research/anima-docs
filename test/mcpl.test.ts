@@ -157,6 +157,53 @@ test('addressed comments: mention → plain keyed event; edit → replacement; d
   h.close();
 });
 
+test('the one who deletes hears it as their own act, and the earlier notice is still withdrawn', async () => {
+  const ada = human('Ada');
+  const h = await rawHost(url(S.token('Linnish')));
+  const d = S.app.docs.create(ada, 'Field notes', 'The heron stood in the shallows.\n');
+  S.app.docs.share(d.id, ada, 'agent:linnish@test.local', 'commenter');
+  const retraction = (id: string) => h.pushes.find((p) => p.coalesce?.key === `comment:${id}` && p.coalesce.retract);
+  const delivered = (id: string) => h.pushes.some((p) => p.coalesce?.key === `comment:${id}` && !p.coalesce.retract);
+
+  // Her suggestion, answered in its thread: the reply is addressed to her.
+  const s = await h.tool('suggest_edit', { document: d.id, edits: [{ old_text: 'shallows', new_text: 'reeds' }] });
+  const sid = /\[(c\w+)\]/.exec(s.text)![1];
+  const reply = S.app.comments.reply(sid, ada, 'Are you sure it was the reeds?');
+  await until(() => delivered(reply.comment.id), 'the reply reaches her');
+  // Withdrawing the suggestion deletes its thread, Ada's reply with it.
+  await h.tool('delete_comment', { comment: sid });
+  await until(() => !!retraction(reply.comment.id), 'retraction');
+  assert.equal(retraction(reply.comment.id).payload.content[0].text,
+    `You withdrew your suggestion ${sid} on “Field notes”, and Ada’s reply ${reply.comment.id} in it, which was addressed to you, went with it.`);
+
+  // A plain thread of hers, answered, then deleted.
+  const t = await h.tool('add_comment', { document: d.id, text: 'Was it a grey heron?' });
+  const tid = /thread (c\w+)/.exec(t.text)![1];
+  const reply2 = S.app.comments.reply(tid, ada, 'Grey, yes.');
+  await until(() => delivered(reply2.comment.id), 'the second reply reaches her');
+  await h.tool('delete_comment', { comment: tid });
+  await until(() => !!retraction(reply2.comment.id), 'second retraction');
+  assert.equal(retraction(reply2.comment.id).payload.content[0].text,
+    `You deleted your thread ${tid} on “Field notes”, and Ada’s reply ${reply2.comment.id} in it, which was addressed to you, went with it.`);
+
+  // A comment of hers that was addressed to no one: deleting it tells her nothing.
+  const q = await h.tool('add_comment', { document: d.id, text: 'Note to self.' });
+  const qid = /thread (c\w+)/.exec(q.text)![1];
+  const before = h.pushes.length;
+  await h.tool('delete_comment', { comment: qid });
+  await sleep(150);
+  assert.deepEqual(h.pushes.slice(before), [], 'a deleter who was not addressed gets no notice');
+
+  // Someone else deleting a comment addressed to her still reads as theirs.
+  const c = S.app.comments.create(d.id, ada, { body: '@Linnish one more thing' });
+  await until(() => delivered(c.comment.id), 'mention');
+  S.app.comments.remove(c.comment.id, ada);
+  await until(() => !!retraction(c.comment.id), 'third retraction');
+  assert.equal(retraction(c.comment.id).payload.content[0].text,
+    `Ada deleted the comment ${c.comment.id} (thread ${c.comment.id}) on “Field notes” that was addressed to you.`);
+  h.close();
+});
+
 test('non-coalescing host: edits arrive as ready-made diffs; retractions degrade to plain notices', async () => {
   const ada = human('Ada');
   const h = await rawHost(url(S.token('OldHost')), { mcpl: { version: '0.5', pushEvents: true } });
