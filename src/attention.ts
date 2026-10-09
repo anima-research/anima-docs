@@ -888,8 +888,12 @@ export class Attention {
       return `You deleted ${whose} comment ${commentId} (thread ${e.threadId}) on “${title}”, which was addressed to you.`;
     }
     const root = this.comments.get(e.threadId);
-    const rootWhose = root?.author === e.actor ? 'your' : root ? `${this.principals.label(root.author)}’s` : 'the';
-    const act = root?.suggestion ? `You withdrew ${rootWhose} suggestion ${e.threadId}` : `You deleted ${rootWhose} thread ${e.threadId}`;
+    const yours = root?.author === e.actor;
+    const rootWhose = yours ? 'your' : root ? `${this.principals.label(root.author)}’s` : 'the';
+    // Only one's own suggestion is withdrawn; an owner removing another's deletes it.
+    const act = root?.suggestion && yours
+      ? `You withdrew your suggestion ${e.threadId}`
+      : `You deleted ${rootWhose} ${root?.suggestion ? 'suggestion' : 'thread'} ${e.threadId}`;
     return `${act} on “${title}”, and ${whose} reply ${commentId} in it, which was addressed to you, went with it.`;
   }
 
