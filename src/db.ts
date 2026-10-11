@@ -170,7 +170,7 @@ export function openDatabase(file: string): DB {
         doc_id      TEXT NOT NULL,
         reason      TEXT NOT NULL,
         level       TEXT NOT NULL DEFAULT 'wake',
-        delivered   INTEGER NOT NULL DEFAULT 0,  -- 1 once any version reached a host
+        delivered   INTEGER NOT NULL DEFAULT 0,  -- 1 while a version that reached a host has not been retracted there
         at          INTEGER NOT NULL,
         PRIMARY KEY (sub, comment_id)
       );

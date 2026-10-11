@@ -16,7 +16,7 @@ import type { DB } from './db.js';
 import { Fault } from './auth.js';
 import { isGuest, type Principals } from './principals.js';
 import { Documents, type DeleteSet, type DocChange, type Role } from './documents.js';
-import { suggestionSummary, type CommentEvent, type Comments, type Thread } from './comments.js';
+import { suggestionSummary, type Comment, type CommentEvent, type Comments, type Thread } from './comments.js';
 import { textChanges, firstLook } from './diff.js';
 import { outline, sectionPath } from './markdown.js';
 
@@ -490,7 +490,8 @@ export class Attention {
         { sub: string; comment_id: string; reason: 'mention' | 'assigned' | 'reply'; level: string }[];
       for (const r of rows) {
         if (e.kind === 'edited') {
-          if (handled.has(r.sub) || !this.access(r.sub, e.docId)) continue;
+          // The editor has her own new text; an owner can assign her own root to her.
+          if (r.sub === e.actor || handled.has(r.sub) || !this.access(r.sub, e.docId)) continue;
           handled.add(r.sub);
           this.bg(this.deliverAddressed(r.sub, e, r.reason, { replacement: true, level: r.level }));
         } else {
@@ -607,7 +608,13 @@ export class Attention {
         case 'edited': return root && !root.deletedAt && e.commentId === root.id ? `• ${who} revised suggestion ${e.threadId}: ${what}` : null;
         case 'accepted': return `• ${who} accepted ${this.principals.label(root.author)}'s suggestion ${e.threadId}: ${what}${note}`;
         case 'rejected': return `• ${who} rejected ${this.principals.label(root.author)}'s suggestion ${e.threadId}: ${what}${note}`;
-        case 'deleted': if (e.commentId === e.threadId) return `• ${who} withdrew suggestion ${e.threadId}`; break;
+        case 'deleted': {
+          if (e.commentId !== e.threadId) break;
+          // Only its author withdraws an open suggestion; anyone else, or a decided one, deletes it.
+          const own = root.author === e.actor;
+          if (own && sg.status === 'open') return `• ${who} withdrew suggestion ${e.threadId}`;
+          return `• ${who} deleted ${own ? 'their' : `${this.principals.label(root.author)}'s`} suggestion ${e.threadId}`;
+        }
       }
     }
     switch (e.kind) {
@@ -882,19 +889,25 @@ export class Attention {
    * so the comment withdrawn here may be another's reply in that thread.
    */
   private ownDeletionText(commentId: string, e: CommentEvent, title: string): string {
-    const author = this.comments.get(commentId)?.author;
-    const whose = author ? `${this.principals.label(author)}’s` : 'a';
+    const whose = (c: Comment | null | undefined, none: string) =>
+      !c ? none : c.author === e.actor ? 'your' : `${this.principals.label(c.author)}’s`;
+    // Only one's own open suggestion is withdrawn: a decided one's decision
+    // stands, and an owner removing another's deletes it.
+    const withdrawn = (root: Comment | null | undefined) =>
+      !!root?.suggestion && root.author === e.actor && root.suggestion.status === 'open';
+    const deleted = this.comments.get(commentId);
     if (commentId === e.commentId) {
-      return `You deleted ${whose} comment ${commentId} (thread ${e.threadId}) on “${title}”, which was addressed to you.`;
+      if (commentId === e.threadId && withdrawn(deleted)) {
+        return `You withdrew your suggestion ${commentId} on “${title}”, which was addressed to you.`;
+      }
+      const noun = commentId === e.threadId && deleted?.suggestion ? 'suggestion' : 'comment';
+      return `You deleted ${whose(deleted, 'a')} ${noun} ${commentId} (thread ${e.threadId}) on “${title}”, which was addressed to you.`;
     }
     const root = this.comments.get(e.threadId);
-    const yours = root?.author === e.actor;
-    const rootWhose = yours ? 'your' : root ? `${this.principals.label(root.author)}’s` : 'the';
-    // Only one's own suggestion is withdrawn; an owner removing another's deletes it.
-    const act = root?.suggestion && yours
+    const act = withdrawn(root)
       ? `You withdrew your suggestion ${e.threadId}`
-      : `You deleted ${rootWhose} ${root?.suggestion ? 'suggestion' : 'thread'} ${e.threadId}`;
-    return `${act} on “${title}”, and ${whose} reply ${commentId} in it, which was addressed to you, went with it.`;
+      : `You deleted ${whose(root, 'the')} ${root?.suggestion ? 'suggestion' : 'thread'} ${e.threadId}`;
+    return `${act} on “${title}”, and ${whose(deleted, 'a')} reply ${commentId} in it, which was addressed to you, went with it.`;
   }
 
   private onShare(e: { docId: string; sub: string | null; role: string; by: string }) {
@@ -961,7 +974,10 @@ export class Attention {
 
   private markDelivered(sub: string, params: PushParams) {
     const m = /^comment:(.+)$/.exec(params.coalesce?.key ?? '');
-    if (m && !params.coalesce?.retract) this.db.prepare('UPDATE addressed SET delivered = 1 WHERE sub = ? AND comment_id = ?').run(sub, m[1]);
+    // A retraction that reaches the host leaves nothing there to retract, so a
+    // thread deleted after its reply doesn't retract the reply again. One still
+    // queued keeps the row delivered: a later retraction replaces it in the outbox.
+    if (m) this.db.prepare('UPDATE addressed SET delivered = ? WHERE sub = ? AND comment_id = ?').run(params.coalesce?.retract ? 0 : 1, sub, m[1]);
   }
 
   private async flushOutbox(sub: string) {
