@@ -12,7 +12,8 @@ import { syntaxTree } from '@codemirror/language';
 import { StateEffect, StateField, type EditorState, type Range, type Transaction } from '@codemirror/state';
 import { Decoration, EditorView, ViewPlugin, WidgetType, type DecorationSet, type ViewUpdate } from '@codemirror/view';
 import type { SyntaxNodeRef } from '@lezer/common';
-import { isSafeImageSrc, renderInlineHtml } from '../lib/markdown';
+import { isSafeImageSrc } from '../lib/markdown';
+import { TableWidget } from './table';
 import { parseAltSize, withAltSize } from '../../src/mdext';
 
 // ------------------------------------------------------------------ focus tracking
@@ -192,85 +193,7 @@ function placeholder(text: string) {
 const truncate = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
 /** Split a GFM table row into cells with their source offsets (relative to the row start). */
-export function splitRow(line: string): { text: string; start: number }[] {
-  const pipes: number[] = [];
-  let ticks = 0;
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i];
-    if (c === '\\') { i++; continue; }
-    if (c === '`') { let n = 1; while (line[i + n] === '`') n++; ticks = ticks === 0 ? n : ticks === n ? 0 : ticks; i += n - 1; continue; }
-    if (c === '|' && ticks === 0) pipes.push(i);
-  }
-  const bounds = [-1, ...pipes, line.length];
-  const cells: { text: string; start: number }[] = [];
-  for (let k = 0; k < bounds.length - 1; k++) {
-    const from = bounds[k] + 1, to = bounds[k + 1];
-    const raw = line.slice(from, to);
-    const lead = raw.length - raw.trimStart().length;
-    cells.push({ text: raw.trim(), start: from + lead });
-  }
-  if (cells.length && !cells[0].text && line.trimStart().startsWith('|')) cells.shift();
-  if (cells.length && !cells[cells.length - 1].text && line.trimEnd().endsWith('|')) cells.pop();
-  return cells;
-}
-
-class TableWidget extends WidgetType {
-  constructor(readonly source: string) { super(); }
-  eq(o: TableWidget) { return o.source === this.source; }
-  get estimatedHeight() { return this.source.split('\n').length * 38; }
-  toDOM(view: EditorView) {
-    const lines = this.source.split('\n');
-    const lineStart: number[] = [];
-    let off = 0;
-    for (const l of lines) { lineStart.push(off); off += l.length + 1; }
-    const aligns = splitRow(lines[1] ?? '').map((c) => {
-      const t = c.text.replace(/\s/g, '');
-      return t.startsWith(':') && t.endsWith(':') ? 'center' : t.endsWith(':') ? 'right' : t.startsWith(':') ? 'left' : '';
-    });
-    const header = splitRow(lines[0] ?? '');
-    const cols = Math.max(header.length, aligns.length, 1);
-    const wrap = document.createElement('div');
-    wrap.className = 'cm-table-widget';
-    const table = document.createElement('table');
-    const mkCell = (tag: 'th' | 'td', cell: { text: string; start: number } | undefined, row: number, col: number) => {
-      const el = document.createElement(tag);
-      if (aligns[col]) el.style.textAlign = aligns[col];
-      if (cell) {
-        el.append(renderInlineHtml(cell.text.replace(/\\\|/g, '|')));
-        el.dataset.off = String(lineStart[row] + cell.start);
-      } else {
-        el.dataset.off = String(lineStart[row] + (lines[row]?.length ?? 0));
-      }
-      return el;
-    };
-    const thead = document.createElement('thead');
-    const htr = document.createElement('tr');
-    for (let c = 0; c < cols; c++) htr.append(mkCell('th', header[c], 0, c));
-    thead.append(htr);
-    table.append(thead);
-    const tbody = document.createElement('tbody');
-    for (let r = 2; r < lines.length; r++) {
-      const cells = splitRow(lines[r]);
-      const tr = document.createElement('tr');
-      for (let c = 0; c < cols; c++) tr.append(mkCell('td', cells[c], r, c));
-      tbody.append(tr);
-    }
-    if (tbody.childElementCount) table.append(tbody);
-    wrap.append(table);
-    wrap.addEventListener('mousedown', (e) => {
-      const target = e.target as HTMLElement;
-      if (target.closest('a')) return;
-      e.preventDefault();
-      const cell = target.closest<HTMLElement>('[data-off]');
-      const start = view.posAtDOM(wrap);
-      const anchor = Math.min(view.state.doc.length, start + (cell ? Number(cell.dataset.off) : 0));
-      view.focus();
-      view.dispatch({ selection: { anchor } });
-    });
-    return wrap;
-  }
-  ignoreEvent() { return true; }
-}
+export { splitRow } from './table';
 
 // ------------------------------------------------------------------ inline layer
 
@@ -453,7 +376,7 @@ function buildBlocks(state: EditorState): DecorationSet {
         case 'Table': {
           const from = doc.lineAt(node.from).from, to = doc.lineAt(node.to).to;
           if (!touchesSelection(state, from, to)) {
-            out.push(Decoration.replace({ widget: new TableWidget(doc.sliceString(from, to)), block: true }).range(from, to));
+            out.push(Decoration.replace({ widget: new TableWidget(doc.sliceString(from, to), !state.readOnly), block: true }).range(from, to));
           }
           return false;
         }

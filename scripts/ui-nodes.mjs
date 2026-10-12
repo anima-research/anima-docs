@@ -429,6 +429,33 @@ try {
     assert(!wiki.includes('In this section'), 'duplicate page list still there');
   });
 
+  await step('tables are edited in place: type in a cell, Tab adds a row, the toolbar adds a column; the markdown follows', async () => {
+    await openDoc(alice, docId, docId);
+    const t = await viewText(alice);
+    await setCursor(alice, t.indexOf('All good.') + 'All good.'.length);
+    await sleep(150);
+    await alice.locator('.tb-btn[aria-label="Insert table"]').click();
+    await alice.waitForFunction(() => window.__anima.view.state.doc.toString().includes('| Column 1 | Column 2 | Column 3 |'));
+    // Leave the table: it renders as a widget.
+    await setCursor(alice, 0);
+    const widget = alice.locator('.cm-table-widget.editable', { hasText: 'Column 1' }); // the aside tables are widgets too
+    const cell = widget.locator('td').first();
+    await cell.waitFor({ timeout: 8000 });
+    await cell.click();
+    await alice.keyboard.press('Meta+a');
+    await alice.keyboard.type('Rewritten');
+    await alice.keyboard.press('Tab');
+    await alice.waitForFunction(() => /\| Rewritten\s+\| Cell/.test(window.__anima.view.state.doc.toString()), null, { timeout: 8000 });
+    // The focus moved on to the next cell in the rebuilt widget; Tab through to the end adds a row.
+    for (let i = 0; i < 5; i++) { await alice.keyboard.press('Tab'); await sleep(120); }
+    await alice.waitForFunction(() => (window.__anima.view.state.doc.toString().match(/^\| .* \|$/gm) ?? []).length >= 5, null, { timeout: 8000 });
+    // Toolbar: a column.
+    await alice.locator('.cm-table-widget.editable', { hasText: 'Column 1' }).hover();
+    await alice.locator('.cm-table-widget.editable', { hasText: 'Column 1' }).locator('.cm-table-bar button', { hasText: '+ col' }).click();
+    await alice.waitForFunction(() => /\| Column 1\s+\|\s+\| Column 2/.test(window.__anima.view.state.doc.toString()), null, { timeout: 8000 });
+    await alice.screenshot({ path: join(SHOTS, 'table.png') });
+  });
+
   await step('home lists the tree', async () => {
     await alice.goto(`${ORIGIN}/`);
     await alice.locator('.home-trees a.tree-card', { hasText: 'Paper' }).waitFor({ timeout: 8000 });

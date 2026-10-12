@@ -1267,3 +1267,12 @@ dialog.lightbox figcaption { color: #e6e8ec; font: 14px var(--font-ui); }
 .pick-row:hover { background: var(--hover); }
 .pick-row .meta { margin-left: auto; color: var(--text-3); font-size: 12px; }
 .insert-btn { gap: 4px; }
+
+/* Tables edited in place */
+.cm-table-widget { position: relative; }
+.cm-table-widget.editable td, .cm-table-widget.editable th { cursor: text; min-width: 48px; }
+.cm-table-input { font: inherit; color: inherit; background: var(--surface); border: 0; outline: 2px solid var(--accent); border-radius: 3px; padding: 2px 4px; margin: -2px -4px; min-width: 80px; }
+.cm-table-bar { display: none; position: absolute; top: -2px; right: 0; gap: 2px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 2px; box-shadow: 0 4px 14px rgba(16, 24, 40, 0.1); z-index: 3; }
+.cm-table-widget.editable:hover .cm-table-bar, .cm-table-widget.editable.focused .cm-table-bar { display: inline-flex; }
+.cm-table-bar button { font: 12px var(--font-ui); color: var(--text-2); background: none; border: 0; border-radius: 6px; padding: 3px 8px; cursor: pointer; }
+.cm-table-bar button:hover { background: var(--hover); color: var(--text-strong); }
