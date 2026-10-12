@@ -1,10 +1,16 @@
 // HTTP: sign-in, the web app's JSON API, media, and the agent operations API.
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { readFileSync, existsSync, statSync } from 'node:fs';
+import { readFileSync, existsSync, statSync, rmSync, writeFileSync } from 'node:fs';
 import { gzipSync } from 'node:zlib';
 import { join, resolve } from 'node:path';
 import type { App } from './app.js';
+import { timingSafeEqual } from 'node:crypto';
+
+function timingSafeEqualStr(a: string, b: string): boolean {
+  const x = Buffer.from(a), y = Buffer.from(b);
+  return x.length === y.length && x.length > 0 && timingSafeEqual(x, y);
+}
 import { Fault, opaque, tokenHash, type Identity } from './auth.js';
 import { isGuest, type Actor } from './principals.js';
 import { attachMcpl } from './mcpl.js';
@@ -194,6 +200,31 @@ export function createHttp(app: App) {
       const method = req.method ?? 'GET';
 
       if (path === '/health') { app.db.prepare('SELECT 1').get(); send(200, { ok: true }); return; }
+      // ---------------------------------------------------------- database copies (keyed; for a staging instance)
+      if (path === '/api/admin/export' && method === 'GET') {
+        const key = app.config.exportKey;
+        if (!key || !timingSafeEqualStr(String(req.headers['x-export-key'] ?? ''), key)) throw new Fault(404, 'Not found.');
+        const file = join(app.config.dataDir === ':memory:' ? process.cwd() : app.config.dataDir, `export-${Date.now()}.db`);
+        await app.db.backup(file);
+        const bytes = readFileSync(file);
+        rmSync(file);
+        send(200, bytes, 'application/octet-stream', { 'Content-Disposition': 'attachment; filename="docs.db"' });
+        return;
+      }
+      if (path === '/api/admin/import' && method === 'POST') {
+        const key = app.config.importKey;
+        if (!key || !timingSafeEqualStr(String(req.headers['x-import-key'] ?? ''), key)) throw new Fault(404, 'Not found.');
+        if (app.config.dataDir === ':memory:') throw new Fault(400, 'No data directory.');
+        const chunks: Buffer[] = [];
+        let size = 0;
+        for await (const c of req) { size += (c as Buffer).length; if (size > 512 * 1024 * 1024) throw new Fault(413, 'Too large.'); chunks.push(c as Buffer); }
+        const body = Buffer.concat(chunks);
+        if (!body.subarray(0, 16).toString('latin1').startsWith('SQLite format 3')) throw new Fault(400, 'Not a SQLite database.');
+        writeFileSync(join(app.config.dataDir, 'docs.db.import'), body);
+        send(200, { ok: true, bytes: body.length, note: 'Installed at the next start; the process exits now so the platform restarts it.' });
+        setTimeout(() => process.exit(1), 300);
+        return;
+      }
       // One public address: page and API reads arriving on another host (the platform's
       // default domain, say) are sent to the origin, so old links keep working.
       if (canonicalHost && (method === 'GET' || method === 'HEAD') && String(req.headers.host ?? '').toLowerCase() !== canonicalHost && !path.startsWith('/debug/')) {

@@ -1,3 +1,5 @@
+import { existsSync, renameSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
 import { loadConfig } from './config.js';
 import { resolveIssuers } from './auth.js';
 import { createApp } from './app.js';
@@ -9,6 +11,15 @@ process.on('unhandledRejection', (e) => console.error('[fatal?] unhandled reject
 process.on('uncaughtException', (e) => console.error('[fatal?] uncaught exception:', e));
 
 const config = loadConfig();
+// A database delivered by POST /api/admin/import (staging refreshed from a copy) replaces the live one before it is opened.
+if (config.dataDir !== ':memory:') {
+  const pending = join(config.dataDir, 'docs.db.import');
+  if (existsSync(pending)) {
+    for (const suffix of ['', '-wal', '-shm']) { const f = join(config.dataDir, `docs.db${suffix}`); if (existsSync(f)) rmSync(f); }
+    renameSync(pending, join(config.dataDir, 'docs.db'));
+    console.log('[import] installed the imported database');
+  }
+}
 const issuers = await resolveIssuers(config.devIssuer ? config.issuers.filter((i) => i.publicKey) : config.issuers);
 const app = createApp(config, issuers);
 const { server, realtime, mcpl } = createHttp(app);

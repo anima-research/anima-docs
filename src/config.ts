@@ -33,6 +33,8 @@ export interface Config {
   trustedProxyHops: number;
   /** A client-address header the proxy sets and overwrites (Railway: x-real-ip); preferred over X-Forwarded-For. */
   clientIpHeader: string | null;
+  importKey: string | null;
+  exportKey: string | null;
   /** How often open sockets' roles are re-derived (link expiry has no event). */
   roleSweepMs: number;
   /**
@@ -86,6 +88,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       maxMs: Math.max(100, Number(env.DOCS_HISTORY_MAX_MS ?? 600_000) || 600_000),
     },
     clientIpHeader: env.DOCS_CLIENT_IP_HEADER?.trim() || null,
+    // Staging only: a shared key that lets a database copy be uploaded (POST /api/admin/import) or downloaded (GET /api/admin/export).
+    importKey: env.DOCS_IMPORT_KEY?.trim() || null,
+    exportKey: env.DOCS_EXPORT_KEY?.trim() || null,
     trustedProxyHops: env.DOCS_TRUSTED_PROXY_HOPS !== undefined ? Math.max(0, Number(env.DOCS_TRUSTED_PROXY_HOPS) || 0) : origin.startsWith('https:') ? 1 : 0,
   };
 }
