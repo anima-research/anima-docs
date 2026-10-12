@@ -404,6 +404,31 @@ try {
     assert(wiki.includes(`alt="a square" width="${w}"`), 'wiki lacks the width');
   });
 
+  await step('Insert menu: a gallery from uploaded images, and a new sidebar panel', async () => {
+    await openDoc(alice, docId, docId);
+    const t = await viewText(alice);
+    await setCursor(alice, t.indexOf('All good.') + 'All good.'.length);
+    await sleep(150);
+    // Gallery: two files through the hidden input.
+    const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+    await alice.locator('.insert-btn').click();
+    const chooser = alice.waitForEvent('filechooser');
+    await alice.getByRole('menuitem', { name: 'Gallery from images…' }).click();
+    await (await chooser).setFiles([{ name: 'one.png', mimeType: 'image/png', buffer: Buffer.from(png, 'base64') }, { name: 'two.png', mimeType: 'image/png', buffer: Buffer.from(png, 'base64') }]);
+    await alice.waitForFunction(() => /```gallery\n!\[one\]\(\/media\/[^)]+\)\n!\[two\]\(\/media\/[^)]+\)\n```/.test(window.__anima.view.state.doc.toString()), null, { timeout: 15000 });
+    // A new sidebar panel by name.
+    await alice.locator('.insert-btn').click();
+    await alice.getByRole('menuitem', { name: 'Sidebar panel: new…' }).click();
+    const inp = alice.locator('dialog.dialog input.input');
+    await inp.waitFor(); await inp.fill('Key facts');
+    await alice.locator('dialog.dialog button.btn.primary').click();
+    await alice.locator('.editor-page .node-band.is-aside .band-name', { hasText: 'Key facts' }).waitFor({ timeout: 8000 });
+    // Rendered: the wiki shows the gallery grid and the new panel.
+    const wiki = await (await fetch(`${ORIGIN}/w/paper-wiki/`)).text();
+    assert(wiki.includes('class="md-gallery"') && wiki.includes('Key facts'), 'wiki lacks gallery or panel');
+    assert(!wiki.includes('In this section'), 'duplicate page list still there');
+  });
+
   await step('home lists the tree', async () => {
     await alice.goto(`${ORIGIN}/`);
     await alice.locator('.home-trees a.tree-card', { hasText: 'Paper' }).waitFor({ timeout: 8000 });

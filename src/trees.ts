@@ -12,6 +12,7 @@
 // derives it from Nodes.parentsOf, which includes placement parents).
 
 import { EventEmitter } from 'node:events';
+import sanitizeHtml from 'sanitize-html';
 import type { DB } from './db.js';
 import { Fault } from './auth.js';
 import { atLeast, Documents, type Role } from './documents.js';
@@ -21,10 +22,29 @@ import type { Actor } from './principals.js';
 export interface Placement { tree: string; parent: string; child: string; ord: number; derived: boolean }
 
 export type Published = 'off' | 'public' | 'members';
-export interface Theme { name?: string; emoji?: string; accent?: string; footer?: string; tagline?: string; /** Extra CSS appended to the wiki's stylesheet. */ css?: string }
+export interface Theme { name?: string; emoji?: string; accent?: string; footer?: string; tagline?: string; /** Extra CSS appended to the wiki's stylesheet. */ css?: string; /** A page layout with {{slot}} placeholders (see wiki.ts DEFAULT_TEMPLATE); sanitized. */ template?: string }
 export interface PublishSettings { published: Published; slug: string | null; domain: string | null; theme: Theme }
 const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 const DOMAIN_RE = /^(?=.{4,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/;
+/**
+ * A layout template is HTML written by the tree's owner and served to everyone
+ * on the wiki (and, for /w/ paths, on the editor's own origin): no scripts, no
+ * event handlers, no frames. Structure and styling stay.
+ */
+export function sanitizeTemplate(html: string): string {
+  const cleaned = sanitizeHtml(html, {
+    allowedTags: ['html', 'head', 'body', 'title', 'meta', 'link', 'style', 'div', 'section', 'header', 'footer', 'nav', 'main', 'aside', 'article', 'span', 'a', 'img', 'ul', 'ol', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'hr', 'br', 'small', 'strong', 'em', 'b', 'i', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'figure', 'figcaption', 'form', 'input', 'button', 'label', 'details', 'summary', 'svg', 'path', 'dialog'],
+    allowedAttributes: { '*': ['class', 'id', 'style', 'aria-*', 'role', 'lang', 'title', 'data-*', 'width', 'height', 'viewBox', 'd', 'fill', 'stroke', 'stroke-width', 'open'], a: ['href', 'target', 'rel'], img: ['src', 'alt', 'loading'], meta: ['name', 'content', 'charset', 'property'], link: ['rel', 'href'], form: ['action', 'method'], input: ['type', 'name', 'placeholder', 'value'], button: ['type'], html: ['lang'] },
+    allowedSchemes: ['http', 'https', 'mailto'],
+    allowedSchemesByTag: { img: ['http', 'https'] },
+    allowVulnerableTags: true, // <style> is allowed on purpose (CSS, not script)
+    disallowedTagsMode: 'discard',
+    nonTextTags: ['script', 'textarea', 'option', 'noscript'],
+    parseStyleAttributes: false,
+  });
+  return cleaned;
+}
+
 export const slugify = (s: string) => s.toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64) || 'page';
 export interface TreeView {
   root: string;
@@ -87,6 +107,12 @@ export class Trees extends EventEmitter {
       for (const k of ['name', 'emoji', 'accent', 'footer', 'tagline'] as const) {
         const v = (t as Record<string, unknown>)[k];
         if (typeof v === 'string' && v.trim()) clean[k] = v.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, k === 'footer' ? 400 : 120);
+      }
+      const template = (t as Record<string, unknown>).template;
+      if (typeof template === 'string' && template.trim()) {
+        if (template.length > 100_000) throw new Fault(413, 'A layout template is limited to 100,000 characters.');
+        clean.template = sanitizeTemplate(template);
+        if (!clean.template.includes('{{content}}')) throw new Fault(400, 'The layout template must contain {{content}} (the article).');
       }
       const css = (t as Record<string, unknown>).css;
       if (typeof css === 'string' && css.trim()) {

@@ -120,6 +120,32 @@ test('image sizes, galleries and custom CSS render in the wiki', async () => {
   assert.equal((await api(ann, 'PATCH', `/api/trees/${g.id}/publish`, { theme: { css: 'x'.repeat(60_000) } })).status, 413);
 });
 
+test('a layout template replaces the page structure; scripts are stripped; {{content}} is required; no duplicate page list', async () => {
+  const ann = await signIn('Ann');
+  const home = (await api(ann, 'POST', '/api/docs', { title: 'Templated', content: '# Templated\n\nBody text.\n\n## Part\n\nMore.\n' })).json;
+  const kid = (await api(ann, 'POST', '/api/docs', { title: 'Kid', content: 'kid' })).json;
+  await api(ann, 'POST', '/api/trees', { root: home.id });
+  await api(ann, 'POST', `/api/trees/${home.id}/place`, { parent: home.id, child: kid.id });
+  const def = (await api(ann, 'GET', '/api/wiki/template')).json;
+  assert.ok(def.template.includes('{{content}}') && def.slots.includes('asides'));
+  const tpl = '<!doctype html><html><head>{{head}}</head><body><div class="tabs"><a href="#">Article</a><a href="{{editurl}}">Edit</a></div><div id="mw"><div class="l">{{nav}}</div><div class="c"><h1>{{title}}</h1>{{content}}</div><div class="r">{{contents}}</div></div><script>alert(1)</script><img src=x onerror="alert(2)"><p onclick="x()">hi</p></body></html>';
+  const r = await api(ann, 'PATCH', `/api/trees/${home.id}/publish`, { published: 'public', slug: 'templated', theme: { template: tpl } });
+  assert.equal(r.status, 200, r.text);
+  const page = await api(null, 'GET', '/w/templated/');
+  assert.ok(page.text.includes('<div class="tabs">') && page.text.includes('<div id="mw">'), 'owner structure used');
+  assert.ok(page.text.includes('Body text.') && page.text.includes('href="#part"'), 'content and contents filled');
+  assert.ok(page.text.includes(`href="${S.base}/d/${home.id}?tree=${home.id}"`), 'editurl slot');
+  assert.ok(!page.text.includes('<script>alert') && !page.text.includes('onerror') && !page.text.includes('onclick'), 'scripts and handlers stripped');
+  assert.ok(page.text.includes('<p>hi</p>'), 'harmless markup kept');
+  assert.ok(!page.text.includes('In this section'), 'no duplicate page list');
+  assert.equal((await api(ann, 'PATCH', `/api/trees/${home.id}/publish`, { theme: { template: '<html><body>no slot</body></html>' } })).status, 400);
+  // Back to the standard layout: nav, panels and all.
+  await api(ann, 'PATCH', `/api/trees/${home.id}/publish`, { theme: {} });
+  const std = await api(null, 'GET', '/w/templated/');
+  assert.ok(std.text.includes('class="layout"') && std.text.includes('href="/w/templated/kid"'));
+  assert.ok(!std.text.includes('In this section'));
+});
+
 test('a custom domain serves the wiki at the root of that host; media of public pages is readable without signing in', async () => {
   const ann = await signIn('Ann');
   const home = (await api(ann, 'POST', '/api/docs', { title: 'Handbook', content: '# Handbook\n\nWelcome.\n' })).json;

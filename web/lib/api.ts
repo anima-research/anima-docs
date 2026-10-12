@@ -44,7 +44,7 @@ export interface TreePath { tree: string; title: string; path: { id: string; tit
 export interface TreeRoot { root: string; title: string; role: Role }
 export interface Placement { tree: string; parent: string; child: string; ord: number; derived: boolean }
 export type Published = 'off' | 'public' | 'members';
-export interface Theme { name?: string; emoji?: string; accent?: string; footer?: string; tagline?: string; css?: string }
+export interface Theme { name?: string; emoji?: string; accent?: string; footer?: string; tagline?: string; css?: string; template?: string }
 export interface PublishSettings { published: Published; slug: string | null; domain: string | null; theme: Theme; url?: string | null }
 export interface TreeView {
   root: string; title: string; role: Role;
@@ -207,6 +207,7 @@ export const api = {
   treeView: (root: string) => call<TreeView>('GET', `/api/trees/${encodeURIComponent(root)}`),
   place: (root: string, parent: string, child: string) => call<TreeView>('POST', `/api/trees/${encodeURIComponent(root)}/place`, { parent, child }),
   unplace: (root: string, parent: string, child: string) => call<TreeView>('POST', `/api/trees/${encodeURIComponent(root)}/unplace`, { parent, child }),
+  wikiTemplate: () => call<{ template: string; slots: string[] }>('GET', '/api/wiki/template'),
   publishTree: (root: string, p: Partial<PublishSettings>) => call<PublishSettings & { url: string | null }>('PATCH', `/api/trees/${encodeURIComponent(root)}/publish`, p),
   movePage: (root: string, parent: string, child: string, dir: 'up' | 'down') => call<TreeView>('POST', `/api/trees/${encodeURIComponent(root)}/move`, { parent, child, dir }),
 

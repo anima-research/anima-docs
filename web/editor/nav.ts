@@ -154,6 +154,9 @@ export class NavPanel {
     const domain = h('input.input', { type: 'text', value: ps.domain ?? '', placeholder: 'wiki.example.org (optional)', maxlength: '253' });
     const css = h('textarea.input.code', { rows: 8, spellcheck: 'false', placeholder: '/* Extra CSS for the wiki. Hooks: .top .brand .side .article .prose .asides .panel .infobox .page-foot .site-foot; variables --accent --ink --paper --panel --serif --sans */' });
     css.value = ps.theme.css ?? '';
+    const template = h('textarea.input.code', { rows: 10, spellcheck: 'false', placeholder: 'Leave empty for the standard layout. HTML with {{slots}}: {{head}} {{brand}} {{tagline}} {{search}} {{edit}} {{nav}} {{crumbs}} {{title}} {{content}} {{infoboxes}} {{contents}} {{related}} {{asides}} {{subpages}} {{pagefoot}} {{footer}} {{lightbox}}. Scripts are removed.' });
+    template.value = ps.theme.template ?? '';
+    const loadDefault = h('button.btn.ghost.sm', { type: 'button', onclick: async () => { try { const r = await api.wikiTemplate(); template.value = r.template; template.focus(); } catch (e) { toast(errorMessage(e), { kind: 'error' }); } } }, 'Start from the standard layout');
     const err = h('div.field-error', { role: 'alert' });
     const urlLine = h('p.meta', null, v.url ? h('span', null, 'Live at ', h('a', { href: v.url, target: '_blank', rel: 'noopener' }, v.url)) : 'Published trees get an address under /w/<address>/; a custom domain serves the wiki at its root.');
     const body = h('div.form-stack', null,
@@ -167,13 +170,15 @@ export class NavPanel {
       h('div.row-gap', null, field('Accent', accent), field('Footer', footer)),
       field('Custom domain', domain, 'Point a CNAME at the service first; then set it here. Public wikis only.'),
       field('Custom CSS', css, 'Appended after the wiki’s own stylesheet.'),
+      field('Layout template', template, 'For changes CSS cannot make: the structure of the page.'),
+      h('div.row-gap', null, loadDefault),
       urlLine, err);
     const save = async () => {
       const published = (body.querySelector('input[name=pub]:checked') as HTMLInputElement).value as PublishSettings['published'];
       try {
         const r = await api.publishTree(v.root, {
           published, slug: slug.value.trim() || null, domain: domain.value.trim() || null,
-          theme: { name: name.value, emoji: emoji.value, tagline: tagline.value, accent: accent.value, footer: footer.value, css: css.value },
+          theme: { name: name.value, emoji: emoji.value, tagline: tagline.value, accent: accent.value, footer: footer.value, css: css.value, template: template.value },
         });
         d.close();
         toast(r.url && published !== 'off' ? h('span', null, 'Published: ', h('a', { href: r.url, target: '_blank', rel: 'noopener' }, r.url)) : 'Saved.', { kind: 'success', timeout: 8000 });

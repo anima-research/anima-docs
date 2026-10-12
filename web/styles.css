@@ -1262,3 +1262,8 @@ dialog.lightbox img { max-width: 94vw; max-height: 86vh; object-fit: contain; bo
 dialog.lightbox figcaption { color: #e6e8ec; font: 14px var(--font-ui); }
 .lightbox-close { position: fixed; top: 14px; right: 18px; font: 28px/1 var(--font-ui); color: #fff; background: none; border: 0; cursor: pointer; }
 .input.code { font: 12.5px/1.5 var(--font-mono); white-space: pre; }
+.pick-list { display: flex; flex-direction: column; gap: 2px; max-height: 320px; overflow: auto; }
+.pick-row { display: flex; align-items: center; gap: 8px; font: inherit; text-align: left; padding: 6px 8px; border: 0; border-radius: 6px; background: none; color: var(--text); cursor: pointer; }
+.pick-row:hover { background: var(--hover); }
+.pick-row .meta { margin-left: auto; color: var(--text-3); font-size: 12px; }
+.insert-btn { gap: 4px; }

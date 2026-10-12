@@ -5,6 +5,7 @@ import { readFileSync, existsSync, statSync, rmSync, writeFileSync } from 'node:
 import { gzipSync } from 'node:zlib';
 import { join, resolve } from 'node:path';
 import type { App } from './app.js';
+import { DEFAULT_TEMPLATE, TEMPLATE_SLOTS } from './wiki.js';
 import { timingSafeEqual } from 'node:crypto';
 
 function timingSafeEqualStr(a: string, b: string): boolean {
@@ -474,6 +475,7 @@ export function createHttp(app: App) {
         }
         // ---------------------------------------------------------- navigation trees
         if (path === '/api/trees' && method === 'GET') { send(200, { trees: app.trees.roots(a) }); return; }
+        if (path === '/api/wiki/template' && method === 'GET') { send(200, { template: DEFAULT_TEMPLATE, slots: TEMPLATE_SLOTS }); return; }
         if (path === '/api/trees' && method === 'POST') { const b = await json(req); send(201, app.trees.create(String(b.root ?? ''), a)); return; }
         const tr = /^\/api\/trees\/([A-Za-z0-9]+)(\/.*)?$/.exec(path);
         if (tr) {

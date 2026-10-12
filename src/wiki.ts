@@ -206,7 +206,6 @@ export class Wiki {
     };
     const crumbs: WikiPage[] = [];
     for (let p: WikiPage | undefined = page; p; p = p.parent ? byId.get(p.parent) : undefined) crumbs.unshift(p);
-    const siblings = pages.filter((p) => p.parent === page.parent && p.id !== page.id && page.parent);
     const children = pages.filter((p) => p.parent === page.id);
     const related = pages.filter((p) => p.id !== page.id && this.linksTo(p.id, page.id));
     const toc = headings.filter((h) => h.level >= 2 && h.level <= 3);
@@ -217,51 +216,30 @@ export class Wiki {
     const lastBy = last && !last.baseline ? last.authors.map((s) => this.app.principals.get(s)?.name ?? 'someone').join(', ') : null;
     const updated = new Date(this.app.docs.get(page.id)?.updatedAt ?? Date.now());
 
-    const html = `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${esc(page.depth === 0 ? name : `${page.title} · ${name}`)}</title>
-<meta property="og:title" content="${esc(page.title)}">
-<meta property="og:site_name" content="${esc(name)}">
-<meta name="description" content="${esc(excerpt(body))}">
-<link rel="canonical" href="${esc(href(page))}">
-<style>${CSS.replace('__ACCENT__', theme.accent || '#2459e0')}</style>
-${theme.css ? `<style class="custom">${theme.css}</style>` : ''}
-</head>
-<body>
-<header class="top">
-  <a class="brand" href="${esc(base)}/">${theme.emoji ? `<span class="emoji">${esc(theme.emoji)}</span>` : ''}<span>${esc(name)}</span></a>
-  ${theme.tagline ? `<span class="tagline">${esc(theme.tagline)}</span>` : ''}
-  <form class="search" action="${esc(base)}/search" method="get"><input type="search" name="q" placeholder="Search ${esc(name)}" aria-label="Search"></form>
-  <a class="edit" href="${esc(editUrl)}">${opts.canEdit ? 'Edit' : 'Open in editor'}</a>
-</header>
-<div class="layout">
-  <nav class="side" aria-label="Pages"><a class="home-link" href="${esc(base)}/">${esc(rootDoc.title || name)}</a>${navTree(root, 1)}</nav>
-  <main class="article">
-    ${crumbs.length > 1 ? `<nav class="crumbs" aria-label="Breadcrumb">${crumbs.slice(0, -1).map((p) => `<a href="${esc(href(p))}">${esc(p.title)}</a>`).join('<span>›</span>')}</nav>` : ''}
-    <h1>${esc(page.title)}</h1>
-    <div class="asides mobile">${asides.map((x) => `<section class="panel infobox"><h3>${esc(x.title || 'About')}</h3><div class="panel-body">${x.html}</div></section>`).join('')}</div>
-    <div class="prose">${article || '<p class="empty">This page is empty.</p>'}</div>
-    ${children.length ? `<section class="subpages"><h2>Subpages</h2>${list(children)}</section>` : ''}
-    <footer class="page-foot">
-      <span>${lastBy ? `Last edited by ${esc(lastBy)} · ` : ''}${updated.toISOString().slice(0, 10)}</span>
-      <a href="${esc(editUrl)}">${opts.canEdit ? 'Edit this page' : 'Open in the editor'}</a>
-    </footer>
-  </main>
-  <aside class="asides desktop" aria-label="Page panels">
-    ${asides.map((x) => `<section class="panel infobox"><h3>${esc(x.title || 'About')}</h3><div class="panel-body">${x.html}</div></section>`).join('')}
-    ${toc.length ? panel('Contents', `<ol class="toc">${toc.map((h) => `<li class="l${h.level}"><a href="#${esc(h.id)}">${esc(h.text)}</a></li>`).join('')}</ol>`, 'toc-panel') : ''}
-    ${siblings.length || children.length ? panel('In this section', list([...children, ...siblings])) : ''}
-    ${related.length ? panel('Related', list(related)) : ''}
-  </aside>
-</div>
-<footer class="site-foot">${theme.footer ? `<span>${esc(theme.footer)}</span>` : ''}<span>Made with Anima Docs</span></footer>
-<dialog class="lightbox" aria-label="Image"><button class="lightbox-close" aria-label="Close">×</button><figure><img alt=""><figcaption></figcaption></figure></dialog>
-<script>${LIGHTBOX_JS}</script>
-</body>
-</html>`;
+    const slots: Record<string, string> = {
+      lang: 'en',
+      name: esc(name),
+      title: esc(page.title),
+      head: `<meta charset="utf-8">\n<meta name="viewport" content="width=device-width, initial-scale=1">\n<title>${esc(page.depth === 0 ? name : `${page.title} · ${name}`)}</title>\n<meta property="og:title" content="${esc(page.title)}">\n<meta property="og:site_name" content="${esc(name)}">\n<meta name="description" content="${esc(excerpt(body))}">\n<link rel="canonical" href="${esc(href(page))}">\n<style>${CSS.replace('__ACCENT__', theme.accent || '#2459e0')}</style>\n${theme.css ? `<style class="custom">${theme.css}</style>` : ''}`,
+      brand: `<a class="brand" href="${esc(base)}/">${theme.emoji ? `<span class="emoji">${esc(theme.emoji)}</span>` : ''}<span>${esc(name)}</span></a>`,
+      tagline: theme.tagline ? `<span class="tagline">${esc(theme.tagline)}</span>` : '',
+      search: `<form class="search" action="${esc(base)}/search" method="get"><input type="search" name="q" placeholder="Search ${esc(name)}" aria-label="Search"></form>`,
+      edit: `<a class="edit" href="${esc(editUrl)}">${opts.canEdit ? 'Edit' : 'Open in editor'}</a>`,
+      nav: `<a class="home-link" href="${esc(base)}/">${esc(rootDoc.title || name)}</a>${navTree(root, 1)}`,
+      crumbs: crumbs.length > 1 ? `<nav class="crumbs" aria-label="Breadcrumb">${crumbs.slice(0, -1).map((p) => `<a href="${esc(href(p))}">${esc(p.title)}</a>`).join('<span>›</span>')}</nav>` : '',
+      content: article || '<p class="empty">This page is empty.</p>',
+      infoboxes: asides.map((x) => `<section class="panel infobox"><h3>${esc(x.title || 'About')}</h3><div class="panel-body">${x.html}</div></section>`).join(''),
+      contents: toc.length ? panel('Contents', `<ol class="toc">${toc.map((h) => `<li class="l${h.level}"><a href="#${esc(h.id)}">${esc(h.text)}</a></li>`).join('')}</ol>`, 'toc-panel') : '',
+      related: related.length ? panel('Related', list(related)) : '',
+      subpages: children.length ? `<section class="subpages"><h2>Subpages</h2>${list(children)}</section>` : '',
+      pagefoot: `<footer class="page-foot"><span>${lastBy ? `Last edited by ${esc(lastBy)} · ` : ''}${updated.toISOString().slice(0, 10)}</span><a href="${esc(editUrl)}">${opts.canEdit ? 'Edit this page' : 'Open in the editor'}</a></footer>`,
+      footer: `<footer class="site-foot">${theme.footer ? `<span>${esc(theme.footer)}</span>` : ''}<span>Made with Anima Docs</span></footer>`,
+      lightbox: `<dialog class="lightbox" aria-label="Image"><button class="lightbox-close" aria-label="Close">×</button><figure><img alt=""><figcaption></figcaption></figure></dialog>\n<script>${LIGHTBOX_JS}</script>`,
+      editurl: esc(editUrl),
+      base: esc(base),
+    };
+    slots.asides = `${slots.infoboxes}${slots.contents}${slots.related}`;
+    const html = fillTemplate(theme.template || DEFAULT_TEMPLATE, slots);
     return { html, etag };
   }
 
@@ -323,6 +301,48 @@ function excerpt(md: string): string {
 }
 
 export class WikiFault extends Fault {}
+
+/**
+ * The page layout: HTML with {{slot}} placeholders. Owners may supply their
+ * own (sanitized on save); this is the default, and what the publish dialog
+ * offers as a starting point.
+ */
+export const DEFAULT_TEMPLATE = `<!doctype html>
+<html lang="{{lang}}">
+<head>
+{{head}}
+</head>
+<body>
+<header class="top">
+  {{brand}}
+  {{tagline}}
+  {{search}}
+  {{edit}}
+</header>
+<div class="layout">
+  <nav class="side" aria-label="Pages">{{nav}}</nav>
+  <main class="article">
+    {{crumbs}}
+    <h1>{{title}}</h1>
+    <div class="asides mobile">{{infoboxes}}</div>
+    <div class="prose">{{content}}</div>
+    {{subpages}}
+    {{pagefoot}}
+  </main>
+  <aside class="asides desktop" aria-label="Page panels">
+    {{asides}}
+  </aside>
+</div>
+{{footer}}
+{{lightbox}}
+</body>
+</html>`;
+
+export const TEMPLATE_SLOTS = ['lang', 'head', 'name', 'title', 'brand', 'tagline', 'search', 'edit', 'nav', 'crumbs', 'content', 'infoboxes', 'contents', 'related', 'asides', 'subpages', 'pagefoot', 'footer', 'lightbox', 'editurl', 'base'];
+
+function fillTemplate(tpl: string, slots: Record<string, string>): string {
+  return tpl.replace(/\{\{\s*([a-z]+)\s*\}\}/g, (m, k: string) => (k in slots ? slots[k] : m));
+}
 
 /** Click a gallery image: show it full-size in a <dialog>; Escape or a click closes it. */
 const LIGHTBOX_JS = `(function(){var d=document.querySelector('dialog.lightbox');if(!d)return;var img=d.querySelector('img'),cap=d.querySelector('figcaption');document.addEventListener('click',function(e){var a=e.target.closest&&e.target.closest('a.md-gallery-item');if(a){e.preventDefault();img.src=a.getAttribute('href');img.alt=a.dataset.caption||'';cap.textContent=a.dataset.caption||'';d.showModal();return;}if(e.target===d||e.target.closest('.lightbox-close')){d.close();}});d.addEventListener('close',function(){img.removeAttribute('src');});})();`;

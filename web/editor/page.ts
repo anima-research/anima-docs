@@ -248,6 +248,27 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
 
   const toolbar = h('div.doc-toolbar', { role: 'toolbar', 'aria-label': 'Formatting' });
   const fileInput = h('input', { type: 'file', accept: 'image/png,image/jpeg,image/gif,image/webp', multiple: true, hidden: true, 'aria-hidden': 'true', class: 'image-file-input' });
+  const galleryInput = h('input', { type: 'file', accept: 'image/png,image/jpeg,image/gif,image/webp', multiple: true, hidden: true, 'aria-hidden': 'true', class: 'gallery-file-input' });
+  galleryInput.addEventListener('change', () => {
+    const files = [...(galleryInput.files ?? [])];
+    galleryInput.value = '';
+    if (files.length) void insertGallery(files);
+  });
+  // Insert: things that are more than text.
+  const insertBtn: HTMLButtonElement = h('button.tb-btn.insert-btn', {
+    type: 'button', 'aria-haspopup': 'menu', 'aria-label': 'Insert', 'data-tip': 'Insert a gallery, a sidebar panel, a section…', onmousedown: (e: MouseEvent) => e.preventDefault(),
+    onclick: () => openMenu(insertBtn, [
+      { label: 'Gallery from images…', icon: 'image', onSelect: () => (guest ? needSignInForImages() : galleryInput.click()) },
+      { label: 'Empty gallery block', icon: 'image', onSelect: () => { insertBlock(view, '```gallery\n\n```', { select: [11, 11] }); view.focus(); } },
+      'separator',
+      { label: 'Sidebar panel: new…', icon: 'columns', onSelect: () => void newPanel('aside') },
+      { label: 'Sidebar panel: existing document…', icon: 'columns', onSelect: () => void mountExisting('aside') },
+      'separator',
+      { label: 'New section here (split)', icon: 'columns', hint: `${modKey}↵`, onSelect: () => void splitHere() },
+      { label: 'New empty section…', icon: 'file', onSelect: () => void newPanel('inline') },
+      { label: 'Mount an existing document…', icon: 'file', onSelect: () => void mountExisting('inline') },
+    ], { align: 'start' }),
+  }, icon('plus', 18), h('span.tb-text', null, 'Insert'), icon('chevronDown', 14));
   fileInput.addEventListener('change', () => {
     const files = [...(fileInput.files ?? [])];
     fileInput.value = '';
@@ -288,8 +309,8 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     tb('hr', 'Horizontal line', null, () => insertRule(view)),
     imageTool,
     sep(),
-    tb('columns', 'Split into a section here', `${modKey}↵`, () => void splitHere()),
-    fileInput);
+    insertBtn,
+    fileInput, galleryInput);
   const commentTool = h('button.tb-btn.tb-comment', { type: 'button', 'aria-label': 'Add comment', 'data-tip': `Add comment (${modKey}${altKey}M)`, onmousedown: (e: MouseEvent) => e.preventDefault(), onclick: () => rail.startDraft() }, icon('commentAdd', 18), h('span.tb-text', null, 'Comment'));
   const readNotice = h('div.tb-notice');
   // Editing / Suggesting switch, the state of your suggestions, and reviewing others'.
@@ -471,6 +492,68 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
       toast(h('span', null, 'Split: the rest is a section now. ', h('button.link-btn', { type: 'button', onclick: () => void nameSection(d.id) }, 'Name it')), { kind: 'success', timeout: 6000 });
     } catch (e) { toast(errorMessage(e), { kind: 'error' }); }
   }
+  /** Upload images and insert them as one gallery block at the cursor. */
+  async function insertGallery(files: File[]) {
+    if (!canWrite() || guest) return;
+    const lines: string[] = [];
+    for (const f of files) {
+      if (!/^image\/(png|jpeg|gif|webp)$/.test(f.type)) { toast(`${f.name}: only PNG, JPEG, GIF and WebP images are supported.`, { kind: 'error' }); continue; }
+      if (f.size > MAX_IMAGE) { toast(`${f.name} is larger than 15 MB.`, { kind: 'error' }); continue; }
+      const close = toast(h('span.uploading', null, spinner(14), `Uploading ${f.name}…`), { timeout: 0 });
+      try {
+        const info = await api.upload(docId, f);
+        const alt = (f.name.replace(/\.[a-z0-9]+$/i, '').replace(/[[\]\\|]/g, ' ').trim() || 'image').slice(0, 80);
+        lines.push(`![${alt}](${info.url})`);
+      } catch (e) { toast(`${f.name}: ${errorMessage(e)}`, { kind: 'error' }); }
+      finally { close(); }
+    }
+    if (!lines.length) return;
+    insertBlock(view, '```gallery\n' + lines.join('\n') + '\n```');
+    view.focus();
+  }
+
+  /** A new node (a section or a sidebar panel), mounted at the cursor. */
+  async function newPanel(role: 'aside' | 'inline') {
+    if (!canEdit()) { toast('You need edit access to add sections.', { kind: 'info' }); return; }
+    const at = cursorNode();
+    if (!at || !binding.opts.canEdit(at.node)) { toast('Put the cursor where it should go.', { kind: 'info' }); return; }
+    const title = await promptDialog({ title: role === 'aside' ? 'New sidebar panel' : 'New section', label: 'Name', placeholder: role === 'aside' ? 'e.g. Facts (shown as a panel in the wiki)' : 'Optional: a name makes it a document too', confirmLabel: 'Create' });
+    if (title === null) return;
+    try {
+      const d = await api.createSection(at.node, { title: title.trim(), content: role === 'aside' ? '| | |\n|---|---|\n| Key | Value |\n' : '', mount: false });
+      insertBlock(view, `{{node:${d.id}${role === 'aside' ? '|aside' : ''}}}`);
+      view.focus();
+    } catch (e) { toast(errorMessage(e), { kind: 'error' }); }
+  }
+
+  /** Pick a document you can open and mount it at the cursor (inline, or as a panel). */
+  async function mountExisting(role: 'aside' | 'inline') {
+    if (!canEdit()) { toast('You need edit access to mount documents.', { kind: 'info' }); return; }
+    const chosen = await pickDocument(role === 'aside' ? 'Add as a sidebar panel' : 'Mount a document');
+    if (!chosen) return;
+    insertBlock(view, `{{node:${chosen.id}${role === 'aside' ? '|aside' : ''}}}`);
+    view.focus();
+  }
+
+  function pickDocument(title: string): Promise<{ id: string; title: string } | null> {
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (v: { id: string; title: string } | null) => { if (!done) { done = true; resolve(v); } d.close(); };
+      const input = h('input.input', { type: 'search', placeholder: 'Search documents', 'aria-label': 'Search documents', autofocus: true });
+      const list = h('div.pick-list', { role: 'listbox' });
+      const load = debounce(async () => {
+        try {
+          const r = await api.docs({ q: input.value.trim() || undefined });
+          list.replaceChildren(...r.docs.filter((x) => x.id !== docId).slice(0, 30).map((x) => h('button.pick-row', { type: 'button', role: 'option', onclick: () => finish({ id: x.id, title: x.title }) }, icon('file', 16), h('span', null, x.title || 'Untitled'), h('span.meta', null, x.role))));
+          if (!list.childElementCount) list.replaceChildren(h('div.meta', null, 'Nothing matches.'));
+        } catch (e) { list.replaceChildren(h('div.meta', null, errorMessage(e))); }
+      }, 150);
+      input.addEventListener('input', () => load());
+      const d = openDialog({ title, size: 'sm', body: h('div.form-stack', null, input, list), footer: [h('button.btn.ghost', { type: 'button', onclick: () => finish(null) }, 'Cancel')], onClose: () => finish(null) });
+      void load();
+    });
+  }
+
   async function mergeSection(m: Mount) {
     if (!binding.opts.canEdit(m.parent)) { toast('You can’t edit the containing document.', { kind: 'info' }); return; }
     const l = labelOf(m.child);
