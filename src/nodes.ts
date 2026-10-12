@@ -283,7 +283,7 @@ export class Nodes extends EventEmitter {
     const sep = head.length === 0 || head.endsWith('\n') ? '' : '\n';
     this.docs.edit(parent, { sub: actor.sub, via: actor.via ?? 'mcpl', label: 'Split a section off' }, (t) => {
       t.delete(offset, text.length - offset);
-      t.insert(offset, `${sep}${marker(child.id)}`);
+      t.insert(offset, `${sep}${marker(child.id)}\n`); // a line of the parent's own after the section, so text can follow it
     });
     this.comments?.applyMove(plan, (node, off, side) => {
       if (node !== parent) return null;

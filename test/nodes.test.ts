@@ -82,7 +82,7 @@ test('split moves the tail into a new section and re-anchors comments; merge bri
   const cut = 'one two three\n'.length;
   const child = nodes.split(d.id, o, cut);
   assert.equal(child.title, '');
-  assert.equal(docs.text(d.id), `one two three\n${marker(child.id)}`);
+  assert.equal(docs.text(d.id), `one two three\n${marker(child.id)}\n`); // a line of its own after the section
   assert.equal(docs.text(child.id), 'four five six\nseven eight');
   assert.equal(comments.get(before.comment.id)!.docId, d.id);
   const moved = comments.get(after.comment.id)!;
@@ -98,7 +98,7 @@ test('split moves the tail into a new section and re-anchors comments; merge bri
   // Merge back: comments return to the parent, the child is an orphan.
   const r = nodes.merge(d.id, child.id, o);
   assert.equal(r.copied, false);
-  assert.equal(docs.text(d.id), 'one two three\nfour five six\nseven eight');
+  assert.equal(docs.text(d.id), 'one two three\nfour five six\nseven eight\n');
   assert.equal(comments.get(after.comment.id)!.docId, d.id);
   assert.equal(comments.thread(after.comment.id)!.anchor!.text, 'five');
   assert.equal(comments.thread(span.comment.id)!.anchor!.text, 'three\nfour');

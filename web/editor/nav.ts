@@ -79,6 +79,16 @@ export class NavPanel {
 
   setLayout(L: Layout) { this.layout = L; this.renderOutline(); }
 
+  /** Another document opened in the same shell: keep the trees and the tree, re-point the panel at it. */
+  rebind(deps: NavDeps) {
+    const treeChanged = deps.tree !== null && deps.tree !== this.tree;
+    this.deps = deps;
+    this.layout = null;
+    if (treeChanged) { this.tree = deps.tree; this.loadCollapsed(); }
+    this.render();
+    void this.refresh();
+  }
+
   /** Subpages of the open document in the current tree that are not mounted inline (for the editor's footer). */
   subpagesNotInline(): { id: string; title: string }[] {
     if (!this.view || !this.layout) return [];
@@ -97,12 +107,14 @@ export class NavPanel {
   }
 
   private render() {
+    const top = this.el.scrollTop;
     const canEdit = atLeast(this.deps.role(), 'editor');
     const chips: HTMLElement[] = this.roots.map((t) => h('button.nav-tree-chip', { type: 'button', class: t.root === this.tree ? 'on' : '', onclick: () => { this.tree = t.root; this.loadCollapsed(); void this.refresh(); this.deps.onOpen(this.deps.docId, t.root); } }, t.title || 'Untitled'));
     if (canEdit && !this.roots.some((t) => t.root === this.deps.docId)) chips.push(h('button.nav-tree-chip.new', { type: 'button', 'data-tip': 'Make this document the root of a navigation tree', onclick: () => void this.makeTree() }, icon('plus', 14), 'Tree'));
     this.treesEl.replaceChildren(...chips);
     this.renderPages();
     this.renderOutline();
+    this.el.scrollTop = top;
   }
 
   private async makeTree() {

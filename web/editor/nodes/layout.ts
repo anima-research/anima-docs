@@ -16,7 +16,11 @@ export const marker = (id: string) => `{{node:${id}}}`;
 export interface NodeText { text: string; title: string; type: string; loaded: boolean; readable: boolean }
 export type TextSource = (id: string) => NodeText | undefined;
 
-export interface TextItem { kind: 'text'; node: string; depth: number; from: number; to: number; tFrom: number; tTo: number }
+export interface TextItem {
+  kind: 'text'; node: string; depth: number; from: number; to: number; tFrom: number; tTo: number;
+  /** An empty line that stands in for parent text before a leading mount ('head') or after a trailing one ('tail'): typing there adds a real line. */
+  phantom?: 'head' | 'tail';
+}
 export interface NlItem { kind: 'nl'; node: string; depth: number; from: number }
 export type Item = TextItem | NlItem;
 
@@ -70,6 +74,8 @@ export function flatten(root: string, src: TextSource, isCollapsed: (key: string
       out += text.slice(seg.tFrom, seg.tTo); pos += len;
       seg = null;
     };
+    // A body that starts or ends with a mount has nowhere of its own to type before/after it: give it an empty line that does.
+    if (lines[0].mount) { items.push({ kind: 'text', node: id, depth, from: pos, to: pos, tFrom: 0, tTo: 0, phantom: 'head' }); nl(id, depth); }
     for (let i = 0; i < lines.length; i++) {
       const L = lines[i];
       if (L.mount) {
@@ -89,6 +95,7 @@ export function flatten(root: string, src: TextSource, isCollapsed: (key: string
       }
     }
     flush(); // an empty body still yields an (empty) text item, so the node can receive input
+    if (lines[lines.length - 1].mount) { nl(id, depth); items.push({ kind: 'text', node: id, depth, from: pos, to: pos, tFrom: text.length, tTo: text.length, phantom: 'tail' }); }
   };
   walk(root, 0, new Set());
   return { root, items, mounts, length: pos, text: out };
@@ -163,8 +170,11 @@ export function decompose(layout: Layout, from: number, to: number, insert: stri
   }
   if (insert) {
     const at = placeAt(layout, from);
-    if (at) ops.push({ node: at.node, from: at.tFrom + (from - at.from), to: at.tFrom + (from - at.from), insert });
-    else dropped = true;
+    if (at) {
+      // Into a phantom line: the text needs its own line in the parent, next to the marker.
+      const text = at.phantom === 'tail' ? `\n${insert}` : at.phantom === 'head' ? `${insert}\n` : insert;
+      ops.push({ node: at.node, from: at.tFrom + (from - at.from), to: at.tFrom + (from - at.from), insert: text });
+    } else dropped = true;
   }
   return { ops, unmounts, dropped };
 }

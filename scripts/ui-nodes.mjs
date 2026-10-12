@@ -105,7 +105,8 @@ try {
     const own = await nodeText(alice, sectionId);
     assert(own.startsWith('## Method'), `section text: ${JSON.stringify(own.slice(0, 20))}`);
     // The view still reads as one document.
-    assert((await viewText(alice)) === '# Paper\n\nIntro paragraph here.\n\n## Method\n\nWe flatten the tree.\n\n## Results\n\nAll good.\n', 'view changed');
+    // The view still reads as one document (plus the paper's own empty line after the section).
+    assert((await viewText(alice)) === '# Paper\n\nIntro paragraph here.\n\n## Method\n\nWe flatten the tree.\n\n## Results\n\nAll good.\n\n', `view changed: ${JSON.stringify(await viewText(alice))}`);
     await alice.screenshot({ path: join(SHOTS, 'split.png') });
   });
 
@@ -188,8 +189,10 @@ try {
     const inp = alice.locator('.dialog input.input');
     await inp.waitFor(); await inp.fill('Plan');
     await alice.locator('.dialog button.btn.primary').click();
+    const navEl = await alice.evaluateHandle(() => document.querySelector('.doc-nav'));
     await alice.waitForURL(/\/d\/d[A-Za-z0-9]+\?tree=/);
     await alice.locator('.editor-page .cm-content').waitFor();
+    assert(await alice.evaluate((el) => el.isConnected && el === document.querySelector('.doc-nav'), navEl), 'the nav panel was rebuilt instead of kept');
     await alice.locator('.doc-crumbs .crumb', { hasText: 'Paper' }).waitFor({ timeout: 8000 });
     await openDoc(alice, docId, docId);
     await alice.locator('.editor-page .subpages a', { hasText: 'Plan' }).waitFor({ timeout: 8000 });

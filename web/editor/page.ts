@@ -83,20 +83,30 @@ interface BuildContext {
   /** The server refused local changes: rebuild from a fresh Y.Doc. */
   onResync: (message: string, scrollTop: number) => void;
   restoreScroll?: number;
+  /** The navigation panel of the page being replaced: kept across documents opened in the same shell. */
+  nav?: NavPanel;
+  keepNav?: (nav: NavPanel) => void;
 }
 
-export function mountDocPage(root: HTMLElement, me: Me, docId: string): () => void {
+/** A mounted document page: its cleanup, plus a way to open another document in the same shell. */
+export type DocPage = (() => void) & { open(id: string): void };
+
+export function mountDocPage(root: HTMLElement, me: Me, firstId: string): DocPage {
   let current: (() => void) | null = null;
   let destroyed = false;
+  let docId = firstId;
+  let nav: NavPanel | null = null;
   const resyncs: number[] = [];
   root.replaceChildren(h('div.doc-loading-page', null, spinner(28), h('p', null, 'Opening document…')));
   document.title = 'Anima Docs';
 
   const start = (restoreScroll?: number) => void api.doc(docId).then((detail) => {
-    if (destroyed) return;
+    if (destroyed || detail.id !== docId) return;
     current?.();
     current = build(root, me, detail, {
       restoreScroll,
+      nav: nav ?? undefined,
+      keepNav: (n) => { nav = n; },
       onResync: (message, scrollTop) => {
         // Discard the local replica (and its refused edits) and load the server's.
         const now = Date.now();
@@ -125,7 +135,10 @@ export function mountDocPage(root: HTMLElement, me: Me, docId: string): () => vo
   });
 
   start();
-  return () => { destroyed = true; current?.(); current = null; };
+  const page = (() => { destroyed = true; current?.(); current = null; nav?.destroy(); nav = null; }) as DocPage;
+  // Opening another document from the nav, a band or a breadcrumb: the old page stays until the new one is ready.
+  page.open = (id: string) => { if (id === docId && current) return; docId = id; start(); };
+  return page;
 }
 
 function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext): () => void {
@@ -157,7 +170,10 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     const first = t.split('\n').find((l) => l.trim() && !/^\{\{node:/.test(l))?.replace(/^#+\s*/, '').slice(0, 60) ?? '';
     return { title: i?.title ?? (id === docId ? title : ''), section: i ? i.section : id === docId ? isSection() : false, type: i?.type ?? 'markdown', loaded: p.synced, chars: t.length, lines: t ? t.split('\n').length : 0, first };
   };
-  const nav = new NavPanel({ docId, role: () => role, tree: treeParam, onOpen: (id, tree) => openNode(id, tree), label: (id) => labelOf(id), onChanged: () => { updateCrumbs(); refreshFooter(); } });
+  const navDeps = { docId, role: () => role, tree: treeParam, onOpen: (id: string, tree: string | null) => openNode(id, tree), label: (id: string) => labelOf(id), onChanged: () => { updateCrumbs(); refreshFooter(); } };
+  const nav = ctx.nav ?? new NavPanel(navDeps);
+  if (ctx.nav) nav.rebind(navDeps);
+  ctx.keepNav?.(nav);
   const binding = new Binding({
     store: nodes,
     canEdit: (node) => (node === docId ? canEdit() : atLeast(nodes.get(node)?.role ?? null, 'editor')),
@@ -922,7 +938,6 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     const s = session;
     for (const c of cleanups) c();
     binding.detach();
-    nav.destroy();
     nodes.destroy();
     rail.cancelDraft();
     panel.close();

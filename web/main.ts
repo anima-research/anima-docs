@@ -11,7 +11,7 @@ import { mountHome } from './pages/home';
 import { mountAdmin, mountPeople } from './pages/people';
 import { mountLinkPage } from './pages/link';
 import { topBar } from './pages/shell';
-import { mountDocPage } from './editor/page';
+import { mountDocPage, type DocPage } from './editor/page';
 
 const root = document.getElementById('app')!;
 let me: Me | null = null;
@@ -29,6 +29,9 @@ function unmount() {
 }
 
 function render(path: string) {
+  // Another document while a document page is open: swap the document, keep the shell (nav, trees).
+  const docNow = me ? /^\/d\/([A-Za-z0-9]+)$/.exec(path) : null;
+  if (docNow && cleanup && typeof (cleanup as Partial<DocPage>).open === 'function') { (cleanup as DocPage).open(docNow[1]); return; }
   unmount();
   root.classList.remove('boot');
   root.removeAttribute('aria-busy');
