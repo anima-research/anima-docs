@@ -1223,3 +1223,13 @@ dialog.busy .dialog-body { opacity: 0.75; }
 .home-trees .home-trees-label { font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-3); margin-right: 4px; }
 .home-trees a.tree-card { display: inline-flex; align-items: center; gap: 8px; padding: 8px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); color: var(--text); text-decoration: none; font-weight: 500; }
 .home-trees a.tree-card:hover { border-color: var(--accent-line); background: var(--accent-soft); }
+
+/* Document completion ([[ link, {{ mount) */
+.cm-tooltip.cm-tooltip-autocomplete { background: var(--surface); border: 1px solid var(--border-strong); border-radius: 10px; box-shadow: 0 8px 28px rgba(16, 24, 40, 0.16); font: 13.5px var(--font-ui); overflow: hidden; }
+.cm-tooltip.cm-tooltip-autocomplete > ul { font-family: inherit; max-height: 280px; min-width: 260px; }
+.cm-tooltip.cm-tooltip-autocomplete > ul > li { padding: 6px 12px; color: var(--text); display: flex; gap: 10px; align-items: baseline; }
+.cm-tooltip.cm-tooltip-autocomplete > ul > li[aria-selected] { background: var(--accent-soft); color: var(--accent); }
+.cm-tooltip.cm-tooltip-autocomplete .cm-completionLabel { font-weight: 500; }
+.cm-tooltip.cm-tooltip-autocomplete .cm-completionDetail { margin-left: auto; font-style: normal; color: var(--text-3); font-size: 11.5px; }
+.cm-tooltip.cm-tooltip-autocomplete .cm-completionMatchedText { text-decoration: none; color: var(--accent); font-weight: 700; }
+.cm-tooltip.cm-completionInfo { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font: 12.5px var(--font-ui); color: var(--text-2); }

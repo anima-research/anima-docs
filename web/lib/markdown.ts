@@ -45,6 +45,7 @@ function purify(html: string): DocumentFragment {
       if (node.tagName === 'A') {
         const href = node.getAttribute('href') ?? '';
         if (/^https?:/i.test(href)) { node.setAttribute('target', '_blank'); node.setAttribute('rel', 'noopener noreferrer'); }
+        else if (/^\/d\/[A-Za-z0-9]+(\?[^#]*)?$/.test(href)) node.setAttribute('data-link', ''); // a document: the router opens it in place
       }
       if (node.tagName === 'IMG') {
         node.setAttribute('loading', 'lazy');

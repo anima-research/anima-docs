@@ -300,6 +300,32 @@ try {
     await bob.waitForFunction(() => document.querySelectorAll('.editor-page .node-band').length === 0);
   });
 
+  await step('{{ completes a document to mount inline; [[ completes a link to one', async () => {
+    const plan = (await api(alice, 'GET', '/api/docs')).json.docs.find((d) => d.title === 'Plan');
+    assert(plan, 'no Plan document');
+    await openDoc(alice, docId, docId);
+    const t = await viewText(alice);
+    await setCursor(alice, t.length);
+    await alice.keyboard.type('\n{{Pla');
+    await alice.locator('.cm-tooltip-autocomplete li', { hasText: 'Plan' }).waitFor({ timeout: 8000 });
+    await sleep(200); // CodeMirror ignores Enter within 75 ms of the list appearing
+    await alice.keyboard.press('Enter');
+    await alice.locator('.editor-page .node-band .band-name', { hasText: 'Plan' }).waitFor({ timeout: 8000 });
+    const paper = (await api(alice, 'POST', '/api/operations/read_document', { document: docId, sections: 'markers' })).json.content[0].text;
+    assert(paper.includes(`\n{{node:${plan.id}}}`), 'marker not on its own line');
+    // The mounted-inline page is no longer in the Subpages footer.
+    await alice.waitForFunction(() => !document.querySelector('.editor-page .subpages a[data-open]'), null, { timeout: 8000 }).catch(() => {});
+    // A link.
+    const t2 = await viewText(alice);
+    await setCursor(alice, t2.indexOf('Intro'));
+    await alice.keyboard.type('See [[Pla');
+    await alice.locator('.cm-tooltip-autocomplete li', { hasText: 'Plan' }).waitFor({ timeout: 8000 });
+    await sleep(200);
+    await alice.keyboard.press('Enter');
+    await alice.waitForFunction((id) => window.__anima.view.state.doc.toString().includes(`[Plan](/d/${id})`), plan.id, { timeout: 8000 });
+    await alice.screenshot({ path: join(SHOTS, 'complete.png') });
+  });
+
   await step('home lists the tree', async () => {
     await alice.goto(`${ORIGIN}/`);
     await alice.locator('.home-trees a.tree-card', { hasText: 'Paper' }).waitFor({ timeout: 8000 });

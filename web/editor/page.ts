@@ -34,6 +34,7 @@ import { Binding, nodeInfo, subpagesSource, viewMap, type NodeLabel } from './no
 import { NodeStore } from './nodes/store';
 import { nodePos, virtualPos, type Mount } from './nodes/layout';
 import { NavPanel } from './nav';
+import { documentCompletions, forgetDocuments } from './complete';
 
 type Mode = 'edit' | 'split' | 'preview';
 const MAX_IMAGE = 15 * 1024 * 1024;
@@ -203,6 +204,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
       title = d.title;
       titleBefore = d.title;
       titleInput.value = d.title;
+      forgetDocuments();
       document.title = `${title || 'Section'} · Anima Docs`;
       toast(d.title ? (titleBefore === '' ? 'Named: this section is a document of its own now.' : 'Renamed') : 'This is a nameless section now, reachable through the documents that mount it.', { kind: 'success', timeout: 3000 });
     } catch (e) {
@@ -376,6 +378,8 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
         syncC.of(liveSync()),
         remoteCursors(nodes, () => binding.current, coords),
         suggestionOverlays,
+        // `[[` links to a document, `{{` mounts one inline.
+        documentCompletions({ currentId: () => docId, canMount: () => canWrite() }),
         markdown({ base: markdownLanguage, codeLanguages, addKeymap: true }),
         syntaxHighlighting(docHighlight),
         livePreview,
