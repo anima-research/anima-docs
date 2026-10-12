@@ -19,13 +19,14 @@ Agent host (MCPL 0.5)  ─────/mcpl────┘        │
 | | |
 |---|---|
 | Documents | Markdown with images (upload, paste, drag-drop, or an agent's base64/https import) and tables. One Yjs `Y.Text` per document; garbage collection is off, so any earlier state can be rendered. |
+| Sections and trees | A document can mount other nodes (a nameless *section*, or another document) with a line `{{node:<id>}}`; the editor shows them in place as one document, with bands at the boundaries. Split a page at the cursor (⌘↵), collapse a section, name it to make it a document of its own, merge it back. The same node can be mounted in several documents. Documents can be placed in Notion-style navigation trees. See [Sections and trees](#sections-and-trees). |
 | Live collaboration | Yjs CRDT over y-protocols; remote cursors and presence (agents appear with a cursor where they last edited). Every Yjs client id is bound to one principal; an update that would put content under someone else's id is refused, so attribution can't be forged. |
 | Comments | Threads anchored to text ranges with Yjs relative positions, so they follow concurrent edits. Replies, resolve and reopen, edit and delete, assignment, `@mentions` of humans or agents. A thread whose text is deleted keeps its quote. |
 | Suggestions | Suggesting mode, as in Google Docs: type into the document and your changes become suggestions (struck-through deletions, underlined additions) instead of edits. Editors accept or reject each one, or all at once; accepting applies it as the editor's edit. Commenters always suggest; editors switch between Editing and Suggesting. Agents suggest with `suggest_edit`. See [Suggestions](#suggestions). |
 | Identity | Archipelago `aid1` (ed25519, offline verification, multi-issuer). Humans sign in by redirect and get an opaque session cookie. Agents present the token per connection. There is a principal directory (humans and agents, issuer badge), workspace roles (member / admin / blocked; blocking takes effect immediately, including on open sockets), and per-document roles (viewer / commenter / editor / owner) plus general access for everyone signed in. See [Access](#access). |
 | Ping an agent | A *Ping* button asks an agent that can open the document to look at it, with an optional message and the selected text. It arrives as an addressed `docs:ping` event, which wakes the agent per its `mentions` setting; an offline agent gets it on reconnect. Rate-limited; not available to guests. |
 | Share links | Secret links that grant viewer, commenter or editor on one document, to anyone (no sign-in; visitors become guests) or to Archipelago members only. Optional label and expiry; revoking a link ends the access of everyone who came in through it, live. |
-| Agents | Network MCPL at `/mcpl`, 36 tools in 5 feature sets, RFC-006 event coalescing, RFC-008 tool classes, per-agent wake gates, offline outbox. The same tools are also available over HTTP at `/api/operations/<tool>`. |
+| Agents | Network MCPL at `/mcpl`, 46 tools in 5 feature sets, RFC-006 event coalescing, RFC-008 tool classes, per-agent wake gates, offline outbox. The same tools are also available over HTTP at `/api/operations/<tool>`. |
 | History | Every stretch of editing is recorded as a change you can open as a diff, compare across a range, restore to (before or after it), or undo on its own. Plus named versions and a per-person summary. See [History](#history). |
 
 ## Access
@@ -192,8 +193,8 @@ Requirements and fallbacks:
 
 | feature set | tools |
 |---|---|
-| `docs.read` | `whoami`, `open_link`, `list_documents`, `read_document`, `outline`, `search`, `list_comments`, `changes`, `view_image`, `people`, `versions` |
-| `docs.write` | `create_document`, `edit_document`, `rename_document`, `insert_image`, `save_version`, `restore_version`, `undo_change`, `delete_document`, `accept_suggestion`, `reject_suggestion` |
+| `docs.read` | `whoami`, `open_link`, `list_documents`, `read_document`, `outline`, `search`, `list_comments`, `changes`, `view_image`, `people`, `versions`, `tree` |
+| `docs.write` | `create_document`, `edit_document`, `rename_document`, `insert_image`, `save_version`, `restore_version`, `undo_change`, `delete_document`, `accept_suggestion`, `reject_suggestion`, `split_section`, `merge_section`, `mount_section`, `unmount_section`, `create_section`, `create_tree`, `place_page`, `unplace_page`, `move_page` |
 | `docs.comment` | `add_comment`, `reply_comment`, `resolve_comment`, `edit_comment`, `delete_comment`, `assign_comment`, `suggest_edit` |
 | `docs.share` | `list_access` (with links), `share_document`, `set_general_access`, `create_link`, `revoke_link` |
 | `docs.watch` (uses `pushEvents`) | `watch`, `unwatch`, `list_watches` |
@@ -211,6 +212,17 @@ Wherever a tool takes `document`, it also accepts the document's URL or a share 
 Every replacement is applied as a minimal character diff, so comments on unchanged text survive a rewrite.
 
 `suggest_edit` takes the same edits but proposes them instead (see [Suggestions](#suggestions)). Its edits are planned against the current text and must not overlap.
+
+## Sections and trees
+
+Every document is a *node*. A node whose title is empty is a **section**: it is reachable only through the documents that mount it. A **mount** is a line in a body that is exactly `{{node:<id>}}` (column 0); anywhere else, `{{node:…}}` is literal text, so a table cell cannot contain a section, the same way it cannot contain a heading. Cycles are refused.
+
+- **One editor, many nodes.** The page shows the root with every mounted node in place, so selecting, cutting and pasting across a boundary just work; each node is still its own `Y.Text`, and each has its own comments, suggestions, history and permissions. Boundaries are line breaks that cannot be deleted; Backspace at a section's first line offers to merge it back.
+- **Access derives through parents:** whoever can open a document can open what it mounts (capped at editor). A node mounted in two documents is one text in both.
+- **Split** (⌘↵) cuts the page at the cursor: the rest becomes a new section, mounted there; comments on the moved text follow it, and a comment spanning the cut keeps its start and ends in the new section. **Name** a section (band or title) and it is a document too; clear the name and it is a section again.
+- **Trees.** Any document can become the root of a navigation tree (left panel). Documents mounted inside a placed page are its subpages by themselves and follow the mounts; other pages can be placed anywhere (that shares them with the tree). Removing a subpage from a tree keeps the page and is not undone by the server. A page placed under a parent but not mounted inline shows in the parent's *Subpages* footer.
+- **Agents** read a document with its sections inline (`read_document`, delimited by `[section <id> … begins]` / `[section <id> ends]` lines) and edit a section by its id; `tree` shows the structure and the navigation trees; the rest of the tools above split, merge, mount, place and move.
+- Not yet: suggesting mode in documents that mount sections (comment, or suggest on the section's own page); history and versions are per node.
 
 ## Run
 

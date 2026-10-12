@@ -299,6 +299,17 @@ subpages-not-inline, unfiled), the nav pane and footer in `src/main.ts`; six
 Playwright steps cover derivation, naming, "+ subpage", sticky removal, a second
 tree with "also in", cycle refusal and reordering synced to the other peer.
 
+## 18. As implemented (branch `nodes`)
+
+Deviations from the plan above, made while building:
+
+- **One WebSocket per node**, not per-node rooms over one socket: the existing per-document realtime stack (room, awareness, threads, role checks) is reused unchanged. A view opens a provider for each mount it discovers. Multiplexing can come later.
+- **Split and merge are server operations** (`POST /api/docs/:id/split|merge`), applied under the actor's server-side client id with a history label, not local editor edits: comments are server state and re-anchor inside the same operation. They are therefore not in the editor's undo stack (the history panel has them). Detaching a section by deleting across its seams *is* a local edit and undoes.
+- **Suggesting mode is single-node only** for now: when the root mounts anything, Editing is the only mode; commenters comment, or suggest on the section's own page.
+- **Derived access** is computed in `Documents.role()` through `Nodes.parentsOf` (mounts and placements), depth-limited and cycle-safe; a structural change (mount, placement) rechecks every open socket.
+- The **title stays `NOT NULL`**; `''` marks a section. Sections are owned by the owner of the document they were created in.
+- `read_document` shows mounted content inline with delimiter lines by default; `sections: "markers"` shows a node's own text.
+
 ## Prototype
 
 `docs-tree-proto` (local, not in this repo): CodeMirror 6 over a tree of Yjs

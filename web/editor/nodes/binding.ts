@@ -62,7 +62,13 @@ export class Binding {
   get root() { return this.opts.store.root; }
 
   layout(): Layout { return flatten(this.root, this.store.source, (k) => this.collapsed.has(k)); }
-  get current(): Layout { return this.view ? this.view.state.field(layoutField) : this.layout(); }
+  /** The layout the view is showing; computed afresh while the field is out of the state (suggesting mode swaps the extensions). */
+  get current(): Layout {
+    if (!this.view) return this.layout();
+    const L = this.view.state.field(layoutField, false);
+    return L && L.root ? L : (this.cached ??= this.layout());
+  }
+  private cached: Layout | null = null;
 
   extensions(): Extension {
     return [
@@ -94,8 +100,9 @@ export class Binding {
   }
 
   detach() { this.detached = true; this.stop?.(); this.stop = null; this.undo.destroy(); }
-  suspend() { this.suspended = true; }
-  resume() { this.suspended = false; this.reconcile(); }
+  /** Hand the view over to the suggest session: bring it up to date first (a pending reconcile would otherwise be dropped). */
+  suspend() { this.reconcile(); this.suspended = true; this.cached = this.layout(); }
+  resume() { this.suspended = false; this.cached = null; this.reconcile(); }
 
   toggle(key: string) {
     if (this.collapsed.has(key)) this.collapsed.delete(key); else this.collapsed.add(key);
