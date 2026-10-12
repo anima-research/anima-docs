@@ -34,6 +34,7 @@ test('a published tree renders pages with nav, article, asides, TOC and rewritte
   await api(ann, 'POST', `/api/operations/edit_document`, { document: method.id, edits: [{ old_text: '/d/PLAN', new_text: `/d/${plan.id}` }, { old_text: '/d/PAPER', new_text: `/d/${paper.id}` }] });
   const tree = (await api(ann, 'POST', '/api/trees', { root: paper.id })).json;
   assert.ok(tree.placements.some((p: any) => p.child === method.id), 'Method derived as a subpage');
+  assert.ok(!tree.placements.some((p: any) => p.child === facts.id), 'an aside is a panel, not a subpage');
   await api(ann, 'POST', `/api/trees/${paper.id}/place`, { parent: paper.id, child: plan.id });
   // Not published: no page for strangers, a preview for the owner.
   const nothing = await api(null, 'GET', `/w/paper/`);

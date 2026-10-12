@@ -150,12 +150,13 @@ export class Nodes extends EventEmitter {
     return false;
   }
 
-  /** Named nodes mounted in `id`'s body, looking through nameless sections. */
+  /** Named nodes mounted inline in `id`'s body, looking through nameless sections. Asides are panels, not pages: left out. */
   namedMountedChildren(id: string, seen = new Set<string>()): string[] {
     if (seen.has(id)) return [];
     seen.add(id);
     const out: string[] = [];
-    for (const { child } of this.childrenOf(id)) {
+    for (const { child, role } of this.childrenOf(id)) {
+      if (role === 'aside') continue;
       const d = this.docs.get(child);
       if (!d) continue;
       if (d.title !== '') { if (!out.includes(child)) out.push(child); }
