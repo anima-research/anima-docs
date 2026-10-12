@@ -12,9 +12,14 @@ export interface Presence { name: string; kind: Kind; color: string }
 /** Guests: people who opened an "anyone with the link" share link without signing in. */
 export const isGuestMe = (me: Pick<Me, 'kind'> | null | undefined) => me?.kind === 'guest';
 
+export type NodeType = 'markdown' | 'latex' | 'text';
+
 export interface DocSummary {
   id: string;
+  /** '' = a section: a nameless node reachable only through the documents that mount it. */
   title: string;
+  section?: boolean;
+  type?: NodeType;
   owner: { sub: string; label: string; kind?: Kind; color?: string };
   generalAccess: GeneralAccess;
   role: Role;
@@ -25,6 +30,23 @@ export interface DocSummary {
   present: Presence[];
   /** An active "anyone with the link" share link exists. */
   publicLink?: boolean;
+}
+
+/** The content tree under a document: nodes reachable through mounts. */
+export interface ContentTree {
+  root: string;
+  nodes: { id: string; title: string; section: boolean; type: NodeType; chars: number; depth: number; role: Role | null }[];
+  mounts: { parent: string; child: string; nth: number }[];
+  cycles: string[];
+  paths: TreePath[];
+}
+export interface TreePath { tree: string; title: string; path: { id: string; title: string }[] }
+export interface TreeRoot { root: string; title: string; role: Role }
+export interface Placement { tree: string; parent: string; child: string; ord: number; derived: boolean }
+export interface TreeView {
+  root: string; title: string; role: Role;
+  nodes: { id: string; title: string; section: boolean; type: NodeType; role: Role }[];
+  placements: Placement[];
 }
 
 export interface AclEntry { sub: string; role: Role; label: string; kind?: Kind; name?: string; grantedBy: string; grantedAt: number }
@@ -54,7 +76,8 @@ export interface ThreadPerson { sub: string; name: string; kind: Kind; color: st
 export interface ThreadComment { id: string; author: ThreadPerson; body: string; createdAt: number; editedAt: number | null; mentions: string[] }
 export interface Thread {
   id: string;
-  rel: { start: string; end: string } | null;
+  /** Relative positions; `endDoc` when the comment ends in another node than it starts in. */
+  rel: { start: string; end: string; endDoc?: string } | null;
   quote: string | null;
   orphaned: boolean;
   resolved: boolean;
@@ -145,7 +168,7 @@ export const api = {
   docs: (opts: { q?: string; filter?: 'all' | 'owned' | 'shared' } = {}) => call<{ docs: DocSummary[] }>('GET', `/api/docs${q({ q: opts.q, filter: opts.filter })}`),
   createDoc: (title: string, content?: string) => call<DocSummary>('POST', '/api/docs', { title, content }),
   doc: (id: string) => call<DocDetail>('GET', `/api/docs/${encodeURIComponent(id)}`),
-  patchDoc: (id: string, patch: { title?: string; generalAccess?: GeneralAccess }) => call<DocSummary>('PATCH', `/api/docs/${encodeURIComponent(id)}`, patch),
+  patchDoc: (id: string, patch: { title?: string; generalAccess?: GeneralAccess; type?: NodeType }) => call<DocSummary>('PATCH', `/api/docs/${encodeURIComponent(id)}`, patch),
   deleteDoc: (id: string) => call<{ ok: true }>('DELETE', `/api/docs/${encodeURIComponent(id)}`),
   share: (id: string, who: string, role: Role | 'none') => call<{ ok: true }>('POST', `/api/docs/${encodeURIComponent(id)}/share`, { who, role }),
   versions: (id: string) => call<{ versions: Version[] }>('GET', `/api/docs/${encodeURIComponent(id)}/versions`),
@@ -160,6 +183,25 @@ export const api = {
   restoreChange: (id: string, seq: number, at: 'before' | 'after') => call<{ ok: true }>('POST', `/api/docs/${encodeURIComponent(id)}/history/${seq}/restore`, { at }),
   undoChange: (id: string, seq: number) => call<{ ok: true }>('POST', `/api/docs/${encodeURIComponent(id)}/history/${seq}/undo`, {}),
   exportUrl: (id: string) => `/api/docs/${encodeURIComponent(id)}/export.md`,
+
+  // Nodes: the content tree and structural operations.
+  tree: (id: string) => call<ContentTree>('GET', `/api/docs/${encodeURIComponent(id)}/tree`),
+  paths: (id: string) => call<{ paths: TreePath[]; root: boolean }>('GET', `/api/docs/${encodeURIComponent(id)}/paths`),
+  subpages: (id: string, tree: string) => call<{ subpages: { id: string; title: string; type: NodeType }[] }>('GET', `/api/docs/${encodeURIComponent(id)}/subpages?tree=${encodeURIComponent(tree)}`),
+  split: (id: string, at: number, title?: string) => call<DocSummary>('POST', `/api/docs/${encodeURIComponent(id)}/split`, { at, title }),
+  merge: (id: string, child: string) => call<{ copied: boolean }>('POST', `/api/docs/${encodeURIComponent(id)}/merge`, { child }),
+  mount: (id: string, child: string, at?: number) => call<{ ok: true }>('POST', `/api/docs/${encodeURIComponent(id)}/mount`, { child, at }),
+  unmount: (id: string, child: string) => call<{ removed: number }>('POST', `/api/docs/${encodeURIComponent(id)}/unmount`, { child }),
+  createSection: (id: string, opts: { content?: string; title?: string; type?: NodeType; mount?: boolean } = {}) => call<DocSummary>('POST', `/api/docs/${encodeURIComponent(id)}/sections`, opts),
+
+  // Navigation trees.
+  trees: () => call<{ trees: TreeRoot[] }>('GET', '/api/trees'),
+  createTree: (root: string) => call<TreeView>('POST', '/api/trees', { root }),
+  dropTree: (root: string) => call<{ ok: true }>('DELETE', `/api/trees/${encodeURIComponent(root)}`),
+  treeView: (root: string) => call<TreeView>('GET', `/api/trees/${encodeURIComponent(root)}`),
+  place: (root: string, parent: string, child: string) => call<TreeView>('POST', `/api/trees/${encodeURIComponent(root)}/place`, { parent, child }),
+  unplace: (root: string, parent: string, child: string) => call<TreeView>('POST', `/api/trees/${encodeURIComponent(root)}/unplace`, { parent, child }),
+  movePage: (root: string, parent: string, child: string, dir: 'up' | 'down') => call<TreeView>('POST', `/api/trees/${encodeURIComponent(root)}/move`, { parent, child, dir }),
 
   links: (id: string) => call<{ links: ShareLink[] }>('GET', `/api/docs/${encodeURIComponent(id)}/links`),
   createLink: (id: string, opts: { role: LinkRole; who: LinkWho; label?: string; expiresInDays?: number }) => call<ShareLink>('POST', `/api/docs/${encodeURIComponent(id)}/links`, opts),

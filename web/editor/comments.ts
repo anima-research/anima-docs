@@ -17,6 +17,8 @@ import { avatar, confirmDialog, emptyState, errorMessage, kindBadge, openDialog,
 import { setHighlights, type Anchored } from './highlights';
 import type { DocProvider, ThreadEvent } from './provider';
 import { resolveRel, setOverlays, sharedCoords, wordDiff, type Coords, type OverlayItem, type SuggestSession } from './suggest';
+import { nodePos, virtualPos, type Layout } from './nodes/layout';
+import type { NodeStore, NodeThread } from './nodes/store';
 
 const b64ToBytes = (s: string) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
 const bytesToB64 = (b: Uint8Array) => { let s = ''; for (const x of b) s += String.fromCharCode(x); return btoa(s); };
@@ -41,10 +43,10 @@ export class CommentsRail {
   private cardsEl: HTMLElement;
   private headEl: HTMLElement;
   private emptyEl: HTMLElement;
-  threads: Thread[] = [];
+  threads: NodeThread[] = [];
   private anchors = new Map<string, Range | null>();
   active: string | null = null;
-  private draft: { range: Range; anchor: { start: string; end: string }; quote: string; card: HTMLElement; input: HTMLTextAreaElement } | null = null;
+  private draft: { range: Range; node: string; anchor: { start: string; end: string; endDoc?: string }; quote: string; card: HTMLElement; input: HTMLTextAreaElement } | null = null;
   private cards = new Map<string, Card>();
   layout: 'margin' | 'drawer' = 'margin';
   drawerOpen = false;
@@ -59,7 +61,11 @@ export class CommentsRail {
 
   constructor(private deps: {
     provider: DocProvider; view: () => EditorView | null; me: Me; role: () => Role | null; docId: string;
-    /** Shared-text ↔ editor positions (they differ while suggesting). */
+    /** Every node in the view (the root's provider is `provider`); threads carry their node. */
+    nodes: NodeStore;
+    /** The current flattening, for node ↔ view positions. */
+    layout: () => Layout;
+    /** Shared-text ↔ editor positions (they differ while suggesting; suggesting only happens in single-node views). */
     coords?: () => Coords;
     /** The suggesting session, while you're suggesting. */
     session?: () => SuggestSession | null;
@@ -91,7 +97,7 @@ export class CommentsRail {
     this.render();
   }
 
-  setThreads(threads: Thread[], events: ThreadEvent[] = []) {
+  setThreads(threads: NodeThread[], events: ThreadEvent[] = []) {
     this.threads = threads;
     for (const t of threads) for (const c of t.comments) remember([{ ...c.author, issuer: '', role: 'member', lastSeen: 0 } as Person].filter((p) => !personBySub(p.sub)));
     if (this.active && !threads.some((t) => t.id === this.active)) this.active = null;
@@ -162,24 +168,51 @@ export class CommentsRail {
   }
 
   /** Re-resolve every anchor against the local replica (in editor positions) and refresh highlights. */
+  private orphanSig = '';
   resolveAnchors(force = false) {
-    const p = this.deps.provider;
     const c = this.coords;
     const session = this.deps.session?.() ?? null;
+    const L = this.deps.layout();
+    const single = L.mounts.length === 0;
+    const before = this.orphanSig;
     for (const t of this.threads) {
       if (!t.rel || !this.synced) { this.anchors.set(t.id, null); continue; }
       // Your suggestions being edited in place sit where the session drew them.
       const own = session?.viewRange(t.id);
       if (own) { this.anchors.set(t.id, own); continue; }
-      const at = resolveRel(t.rel, p.doc, p.ytext);
-      if (!at) { this.anchors.set(t.id, null); continue; }
-      if (at.point) { const v = c.toView(at.from, -1); this.anchors.set(t.id, { from: v, to: v }); continue; }
-      const from = c.toView(at.from, 1), to = Math.max(from, c.toView(at.to, -1));
-      if (to > from) this.anchors.set(t.id, { from, to });
-      // Hidden by your own pending deletion: still there in the shared text.
-      else if (c.suggesting && at.to > at.from) this.anchors.set(t.id, { from, to: from });
-      else this.anchors.set(t.id, null);
+      const p = this.deps.nodes.get(t.node);
+      if (!p || !p.synced) { this.anchors.set(t.id, null); continue; }
+      if (single || c.suggesting) {
+        if (t.node !== this.deps.docId) { this.anchors.set(t.id, null); continue; }
+        const at = resolveRel(t.rel, p.doc, p.ytext);
+        if (!at) { this.anchors.set(t.id, null); continue; }
+        if (at.point) { const v = c.toView(at.from, -1); this.anchors.set(t.id, { from: v, to: v }); continue; }
+        const from = c.toView(at.from, 1), to = Math.max(from, c.toView(at.to, -1));
+        if (to > from) this.anchors.set(t.id, { from, to });
+        // Hidden by your own pending deletion: still there in the shared text.
+        else if (c.suggesting && at.to > at.from) this.anchors.set(t.id, { from, to: from });
+        else this.anchors.set(t.id, null);
+        continue;
+      }
+      // Node-aware: start in the thread's node, end possibly in another.
+      const endNode = t.rel.endDoc ?? t.node;
+      const pe = this.deps.nodes.get(endNode);
+      let s: Y.AbsolutePosition | null = null, e: Y.AbsolutePosition | null = null;
+      try {
+        s = Y.createAbsolutePositionFromRelativePosition(Y.decodeRelativePosition(b64ToBytes(t.rel.start)), p.doc);
+        const point = !t.rel.endDoc && t.rel.start === t.rel.end;
+        e = point ? s : pe && pe.synced ? Y.createAbsolutePositionFromRelativePosition(Y.decodeRelativePosition(b64ToBytes(t.rel.end)), pe.doc) : null;
+      } catch { s = null; }
+      if (!s || !e || s.type !== p.ytext || (pe && e.type !== pe.ytext)) { this.anchors.set(t.id, null); continue; }
+      const from = virtualPos(L, t.node, s.index, 'start');
+      const to = s === e ? from : virtualPos(L, endNode, e.index, 'end');
+      if (from === null || to === null) { this.anchors.set(t.id, null); continue; }
+      if (s === e) { this.anchors.set(t.id, { from, to: from }); continue; }
+      if (to > from) this.anchors.set(t.id, { from, to }); else this.anchors.set(t.id, null);
     }
+    // A section arriving (or leaving) changes which cards read as "text deleted": re-render those.
+    this.orphanSig = this.threads.map((t) => (this.anchors.get(t.id) ? '1' : '0')).join('');
+    if (this.orphanSig !== before && before !== '') this.render();
     this.pushHighlights(force);
   }
 
@@ -227,11 +260,19 @@ export class CommentsRail {
   readonly onDocChanged = rafThrottle(() => {
     if (this.draft) {
       // Keep the draft's range on the text it was made for.
-      const p = this.deps.provider;
-      const s = Y.createAbsolutePositionFromRelativePosition(Y.decodeRelativePosition(b64ToBytes(this.draft.anchor.start)), p.doc);
-      const e = Y.createAbsolutePositionFromRelativePosition(Y.decodeRelativePosition(b64ToBytes(this.draft.anchor.end)), p.doc);
-      const c = this.coords;
-      if (s && e) { const from = c.toView(s.index, 1); this.draft.range = { from, to: Math.max(from, c.toView(e.index, -1)) }; }
+      const d = this.draft;
+      const p = this.deps.nodes.get(d.node), pe = this.deps.nodes.get(d.anchor.endDoc ?? d.node);
+      const L = this.deps.layout();
+      if (p && pe) {
+        try {
+          const s = Y.createAbsolutePositionFromRelativePosition(Y.decodeRelativePosition(b64ToBytes(d.anchor.start)), p.doc);
+          const e = Y.createAbsolutePositionFromRelativePosition(Y.decodeRelativePosition(b64ToBytes(d.anchor.end)), pe.doc);
+          if (s && e) {
+            if (L.mounts.length === 0 || this.coords.suggesting) { const c = this.coords; const from = c.toView(s.index, 1); d.range = { from, to: Math.max(from, c.toView(e.index, -1)) }; }
+            else { const from = virtualPos(L, d.node, s.index, 'start'), to = virtualPos(L, d.anchor.endDoc ?? d.node, e.index, 'end'); if (from !== null && to !== null) d.range = { from, to: Math.max(from, to) }; }
+          }
+        } catch { /* keep the old range */ }
+      }
     }
     this.resolveAnchors();
     this.layoutSoon();
@@ -306,18 +347,33 @@ export class CommentsRail {
       toast('Select some text to comment on.', { kind: 'info' });
       return;
     }
-    const ytext = this.deps.provider.ytext;
     const c = this.coords;
-    const sFrom = c.toShared(sel.from, 1), sTo = c.toShared(sel.to, -1);
-    if (sTo <= sFrom) {
-      toast('That text is only in your suggestion so far. Comment on text that’s in the document, or add a note to the suggestion’s card.', { kind: 'info' });
-      return;
+    const L = this.deps.layout();
+    let anchor: { start: string; end: string; endDoc?: string };
+    let node = this.deps.docId;
+    if (L.mounts.length === 0 || c.suggesting) {
+      const ytext = this.deps.provider.ytext;
+      const sFrom = c.toShared(sel.from, 1), sTo = c.toShared(sel.to, -1);
+      if (sTo <= sFrom) {
+        toast('That text is only in your suggestion so far. Comment on text that’s in the document, or add a note to the suggestion’s card.', { kind: 'info' });
+        return;
+      }
+      anchor = {
+        start: bytesToB64(Y.encodeRelativePosition(Y.createRelativePositionFromTypeIndex(ytext, sFrom, 0))),
+        end: bytesToB64(Y.encodeRelativePosition(Y.createRelativePositionFromTypeIndex(ytext, sTo, -1))),
+      };
+    } else {
+      const s = nodePos(L, sel.from), e = nodePos(L, sel.to);
+      const ps = s && this.deps.nodes.get(s.node), pe = e && this.deps.nodes.get(e.node);
+      if (!s || !e || !ps || !pe) { toast('Select some text inside a section to comment on it.', { kind: 'info' }); return; }
+      node = s.node;
+      anchor = {
+        start: bytesToB64(Y.encodeRelativePosition(Y.createRelativePositionFromTypeIndex(ps.ytext, Math.min(s.offset, ps.ytext.length), 0))),
+        end: bytesToB64(Y.encodeRelativePosition(Y.createRelativePositionFromTypeIndex(pe.ytext, Math.min(e.offset, pe.ytext.length), -1))),
+        ...(e.node !== s.node ? { endDoc: e.node } : {}),
+      };
     }
     if (this.layout === 'drawer' && !this.drawerOpen) this.setDrawer(true);
-    const anchor = {
-      start: bytesToB64(Y.encodeRelativePosition(Y.createRelativePositionFromTypeIndex(ytext, sFrom, 0))),
-      end: bytesToB64(Y.encodeRelativePosition(Y.createRelativePositionFromTypeIndex(ytext, sTo, -1))),
-    };
     const quote = view.state.sliceDoc(sel.from, sel.to);
     this.cancelDraft();
     const input = h('textarea.comment-input', { rows: 2, placeholder: 'Add a comment… Use @ to mention people or agents', 'aria-label': 'New comment' });
@@ -334,7 +390,7 @@ export class CommentsRail {
       this.layout === 'drawer' ? h('blockquote.card-quote', null, quote) : null,
       input,
       h('div.card-actions', null, h('span.kbd-hint', null, `${modKey}Enter to send`), h('button.btn.ghost.sm', { type: 'button', onclick: () => this.cancelDraft(true) }, 'Cancel'), submit));
-    this.draft = { range: { from: sel.from, to: sel.to }, anchor, quote, card, input };
+    this.draft = { range: { from: sel.from, to: sel.to }, node, anchor, quote, card, input };
     this.fab.hidden = true;
     this.active = null;
     this.render();
@@ -358,7 +414,9 @@ export class CommentsRail {
     if (!body) return;
     d.card.classList.add('busy');
     try {
-      const res = await this.deps.provider.request<{ id: string; warnings?: string[] }>({ type: 'comment.create', body, anchor: d.anchor });
+      // A comment belongs to the node it starts in: its room creates it.
+      const via = this.deps.nodes.get(d.node) ?? this.deps.provider;
+      const res = await via.request<{ id: string; warnings?: string[] }>({ type: 'comment.create', body, anchor: d.anchor });
       for (const w of res.warnings ?? []) toast(w, { kind: 'info', timeout: 9000 });
       this.draft = null;
       d.card.remove();

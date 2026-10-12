@@ -16,7 +16,7 @@ const MSG_AWARENESS = 1;
 
 export type ConnStatus = 'connecting' | 'online' | 'offline' | 'closed';
 
-export interface DocInfo { id: string; title: string; owner: { sub: string; label: string }; generalAccess: string; publicLink?: boolean; rev: number; updatedAt: number }
+export interface DocInfo { id: string; title: string; section?: boolean; type?: string; owner: { sub: string; label: string }; generalAccess: string; publicLink?: boolean; rev: number; updatedAt: number }
 export interface ThreadEvent { kind: string; threadId: string; commentId: string; actor: string }
 
 type Events = {
@@ -34,6 +34,8 @@ type Events = {
   resync: (message: string) => void;
   /** Terminal: 4001 session ended, 4003 blocked / access removed, 4004 document deleted. */
   closed: (info: { code: number; reason: string }) => void;
+  /** A navigation tree this document is in changed. */
+  tree: (tree: string) => void;
 };
 
 export class DocProvider {
@@ -213,6 +215,7 @@ export class DocProvider {
       case 'meta': if (m.doc) this.emit('meta', m.doc); break;
       case 'role': this.role = m.role; this.emit('role', m.role); break;
       case 'you': if (m.you?.sub) this.emit('you', m.you); break;
+      case 'tree': if (typeof m.tree === 'string') this.emit('tree', m.tree); break;
       case 'error':
         if (m.resync) this.emit('resync', String(m.message ?? 'Your changes were not saved.'));
         else this.emit('error', String(m.message ?? 'Something went wrong.'));

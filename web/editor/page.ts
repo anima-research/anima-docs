@@ -8,7 +8,6 @@ import { markdown, markdownLanguage } from '@codemirror/lang-markdown';
 import { HighlightStyle, syntaxHighlighting, syntaxTree } from '@codemirror/language';
 import { search, searchKeymap } from '@codemirror/search';
 import { tags as t } from '@lezer/highlight';
-import { yCollab, yUndoManagerKeymap } from 'y-codemirror.next';
 
 import { api, ApiError, atLeast, isGuestMe, signalUnauthorized, ROLE_LABEL, ROLE_VERB, type DocDetail, type GeneralAccess, type Me, type Role } from '../lib/api';
 import { debounce, h, modKey, altKey, rafThrottle, isMac } from '../lib/dom';
@@ -16,7 +15,7 @@ import { icon } from '../lib/icons';
 import { splitLabel } from '../lib/format';
 import { renderDocument } from '../lib/markdown';
 import { searchPeople } from '../lib/people';
-import { avatar, confirmDialog, emptyState, errorMessage, openDialog, openMenu, spinner, toast, type MenuItem } from '../lib/ui';
+import { avatar, confirmDialog, emptyState, errorMessage, openDialog, openMenu, promptDialog, spinner, toast, type MenuItem } from '../lib/ui';
 import { navigate } from '../router';
 import { guestSignInButton, userMenuButton } from '../pages/shell';
 import { onMeChanged, startSignIn, updateMe } from '../lib/session';
@@ -31,6 +30,10 @@ import { SidePanel } from './panels';
 import { formatKeymap, insertBlock, insertLink, insertRule, insertTable, lineKindAt, selectedText, setLineKind, toggleCodeBlock, toggleInline, type LineKind } from './commands';
 import { SuggestSession, sharedCoords, suggestionOverlays, type Coords } from './suggest';
 import { openPingDialog } from './ping';
+import { Binding, nodeInfo, subpagesSource, type NodeLabel } from './nodes/binding';
+import { NodeStore } from './nodes/store';
+import { nodePos, virtualPos, type Mount } from './nodes/layout';
+import { NavPanel } from './nav';
 
 type Mode = 'edit' | 'split' | 'preview';
 const MAX_IMAGE = 15 * 1024 * 1024;
@@ -68,6 +71,13 @@ function loadMode(): Mode {
   return 'edit';
 }
 function saveMode(m: Mode) { try { localStorage.setItem('docs.mode', m); } catch { /* ignore */ } }
+/** The nav opens by itself when the page was opened through a tree (or was left open), on wide screens. */
+function loadNav(): boolean {
+  if (window.innerWidth < 1100) return false;
+  try { const v = localStorage.getItem('docs.nav'); if (v === '1') return true; if (v === '0') return false; } catch { /* ignore */ }
+  return new URLSearchParams(location.search).has('tree');
+}
+function saveNav(open: boolean) { try { localStorage.setItem('docs.nav', open ? '1' : '0'); } catch { /* ignore */ } }
 
 interface BuildContext {
   /** The server refused local changes: rebuild from a fresh Y.Doc. */
@@ -133,8 +143,30 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   const provider = new DocProvider(docId);
   provider.role = role;
   provider.awareness.setLocalStateField('user', { name: me.name, color: me.color, sub: me.sub, kind: me.kind });
-  const undoManager = new Y.UndoManager(provider.ytext);
   const canEdit = () => atLeast(role, 'editor');
+  /** Every node in the view: the root (this provider) and whatever it mounts, opened on demand. */
+  const nodes = new NodeStore(docId, provider);
+  const treeParam = new URLSearchParams(location.search).get('tree');
+  const isSection = () => !!detail.section || title === '';
+  const openNode = (id: string, tree: string | null = nav.tree) => navigate(`/d/${id}${tree ? `?tree=${encodeURIComponent(tree)}` : ''}`);
+  const labelOf = (id: string): NodeLabel | undefined => {
+    const p = nodes.get(id);
+    if (!p) return undefined;
+    const i = nodes.info.get(id);
+    const t = p.synced ? p.ytext.toString() : '';
+    const first = t.split('\n').find((l) => l.trim() && !/^\{\{node:/.test(l))?.replace(/^#+\s*/, '').slice(0, 60) ?? '';
+    return { title: i?.title ?? (id === docId ? title : ''), section: i ? i.section : id === docId ? isSection() : false, type: i?.type ?? 'markdown', loaded: p.synced, chars: t.length, lines: t ? t.split('\n').length : 0, first };
+  };
+  const nav = new NavPanel({ docId, role: () => role, tree: treeParam, onOpen: (id, tree) => openNode(id, tree), label: (id) => labelOf(id), onChanged: () => { updateCrumbs(); refreshFooter(); } });
+  const binding = new Binding({
+    store: nodes,
+    canEdit: (node) => (node === docId ? canEdit() : atLeast(nodes.get(node)?.role ?? null, 'editor')),
+    onNotice: (m) => toast(m, { kind: 'info', timeout: 3500 }),
+    onMergeRequest: (m) => void mergeSection(m),
+    onOpen: (id) => openNode(id),
+    onName: (id) => void nameSection(id),
+    onLayout: (L) => { nav.setLayout(L); schedulePreview(); updateCrumbs(); },
+  });
   /** Suggesting mode: your edits become suggestions (see suggest.ts). */
   let session: SuggestSession | null = null;
   let switching = false;
@@ -145,18 +177,18 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
 
   // ------------------------------------------------------------------ header
 
-  const titleInput = h('input.doc-title', { type: 'text', value: title, 'aria-label': 'Document title', spellcheck: 'false', maxlength: '300' });
+  const titleInput = h('input.doc-title', { type: 'text', value: title, 'aria-label': 'Document title', spellcheck: 'false', maxlength: '300', placeholder: detail.section ? 'Unnamed section — name it to make it a document' : 'Untitled' });
   let titleBefore = title;
   const commitTitle = async () => {
     const next = titleInput.value.trim();
-    if (!next) { titleInput.value = titleBefore; return; }
     if (next === titleBefore) return;
     try {
       const d = await api.patchDoc(docId, { title: next });
       title = d.title;
       titleBefore = d.title;
       titleInput.value = d.title;
-      document.title = `${title} · Anima Docs`;
+      document.title = `${title || 'Section'} · Anima Docs`;
+      toast(d.title ? (titleBefore === '' ? 'Named: this section is a document of its own now.' : 'Renamed') : 'This is a nameless section now, reachable through the documents that mount it.', { kind: 'success', timeout: 3000 });
     } catch (e) {
       toast(errorMessage(e), { kind: 'error' });
       titleInput.value = titleBefore;
@@ -170,6 +202,8 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   titleInput.addEventListener('blur', () => void commitTitle());
 
   const statusEl = h('span.conn', { role: 'status', 'aria-live': 'polite' });
+  const crumbsEl = h('span.doc-crumbs');
+  const navBtn = h('button.icon-btn.nav-btn', { type: 'button', 'aria-label': 'Pages and sections', 'data-tip': 'Pages and sections', 'aria-pressed': 'false', onclick: () => setNav(!navOpen) }, icon('columns', 20));
   const rolePill = h('span.role-pill');
   const ownerEl = h('span.doc-owner');
   const presenceEl = h('div.presence', { 'aria-label': 'People in this document' });
@@ -187,7 +221,8 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
 
   const header = h('header.doc-header', null,
     h('a.doc-home', { href: '/', 'data-link': '', 'aria-label': 'All documents', 'data-tip': 'All documents' }, icon('file', 22)),
-    h('div.doc-titlebox', null, titleInput, h('div.doc-subline', null, rolePill, ownerEl, statusEl)),
+    navBtn,
+    h('div.doc-titlebox', null, titleInput, h('div.doc-subline', null, crumbsEl, rolePill, ownerEl, statusEl)),
     h('div.doc-header-right', null, presenceEl, guest ? null : pingBtn, commentsBtn, modeSwitch, shareSlot, moreBtn, userMenuButton(me, { compact: true })));
 
   // ------------------------------------------------------------------ toolbar
@@ -215,8 +250,8 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   const sep = () => h('span.tb-sep', { role: 'separator' });
   imageTool = tb('image', guest ? 'Insert image (sign in to add images)' : 'Insert image', null, () => (guest ? needSignInForImages() : fileInput.click()));
   const editTools = h('div.tb-group.edit-tools', null,
-    tb('undo', 'Undo', `${modKey}Z`, () => { if (suggesting()) cmUndo(view); else undoManager.undo(); view.focus(); }),
-    tb('redo', 'Redo', isMac ? '⌘⇧Z' : 'Ctrl+Y', () => { if (suggesting()) cmRedo(view); else undoManager.redo(); view.focus(); }),
+    tb('undo', 'Undo', `${modKey}Z`, () => { if (suggesting()) cmUndo(view); else binding.runUndo(false); view.focus(); }),
+    tb('redo', 'Redo', isMac ? '⌘⇧Z' : 'Ctrl+Y', () => { if (suggesting()) cmRedo(view); else binding.runUndo(true); view.focus(); }),
     sep(), styleBtn, sep(),
     tb('bold', 'Bold', `${modKey}B`, () => toggleInline(view, '**'), 'StrongEmphasis'),
     tb('italic', 'Italic', `${modKey}I`, () => toggleInline(view, '*'), 'Emphasis'),
@@ -233,6 +268,8 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     tb('table', 'Insert table', null, () => insertTable(view)),
     tb('hr', 'Horizontal line', null, () => insertRule(view)),
     imageTool,
+    sep(),
+    tb('columns', 'Split into a section here', `${modKey}↵`, () => void splitHere()),
     fileInput);
   const commentTool = h('button.tb-btn.tb-comment', { type: 'button', 'aria-label': 'Add comment', 'data-tip': `Add comment (${modKey}${altKey}M)`, onmousedown: (e: MouseEvent) => e.preventDefault(), onclick: () => rail.startDraft() }, icon('commentAdd', 18), h('span.tb-text', null, 'Comment'));
   const readNotice = h('div.tb-notice');
@@ -273,7 +310,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   const app = h('div.doc-app', null, h('div.doc-chrome', null, header, h('div.doc-toolbar-wrap', null, toolbar)), body);
   pageEl.append(syncVeil);
   root.replaceChildren(app);
-  document.title = `${title} · Anima Docs`;
+  document.title = `${title || 'Section'} · Anima Docs`;
 
   // ------------------------------------------------------------------ editor
 
@@ -281,11 +318,11 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   const placeholderC = new Compartment();
   /** How edits reach the shared text: directly (editing) or as suggestions. */
   const syncC = new Compartment();
-  const liveSync = () => [yCollab(provider.ytext, null, { undoManager }), keymap.of(yUndoManagerKeymap)];
+  const liveSync = () => [binding.extensions(), nodeInfo.of(labelOf), subpagesSource.of(() => nav.subpagesNotInline())];
   const suggestSync = (s: SuggestSession) => [s.extension(), history(), keymap.of(historyKeymap)];
   let view!: EditorView;
 
-  const rail = new CommentsRail({ provider, view: () => view ?? null, me, role: () => role, docId, coords, session: () => session });
+  const rail = new CommentsRail({ provider, nodes, layout: () => binding.current, view: () => view ?? null, me, role: () => role, docId, coords, session: () => session });
   rail.onSuggestionsChange = (n) => {
     reviewBtn.hidden = n === 0;
     reviewLabel.textContent = `${n} suggestion${n === 1 ? '' : 's'}`;
@@ -314,12 +351,12 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   view = new EditorView({
     parent: pageEl,
     state: EditorState.create({
-      doc: provider.ytext.toString(),
+      doc: binding.layout().text,
       extensions: [
         readOnlyC.of(EditorState.readOnly.of(!canWrite())),
         placeholderC.of(canEdit() ? placeholder('Start writing…  Markdown works: # heading, **bold**, - list, | table |') : []),
         syncC.of(liveSync()),
-        remoteCursors(provider.ytext, provider.awareness, coords),
+        remoteCursors(nodes, () => binding.current, coords),
         suggestionOverlays,
         markdown({ base: markdownLanguage, codeLanguages, addKeymap: true }),
         syntaxHighlighting(docHighlight),
@@ -333,6 +370,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
         Prec.high(keymap.of([
           { key: 'Mod-Alt-m', run: () => { rail.startDraft(); return true; } },
           { key: 'Mod-k', run: () => { if (canWrite()) linkDialog(); return true; } },
+          { key: 'Mod-Enter', run: () => { void splitHere(); return true; } },
           { key: 'Escape', run: () => { if (rail.active) { rail.setActive(null); return true; } return false; } },
           ...formatKeymap,
         ])),
@@ -370,6 +408,63 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     }),
   });
   cleanups.push(() => view.destroy());
+
+  // ------------------------------------------------------------------ nodes: nav, crumbs, structural operations
+
+  let navOpen = loadNav();
+  body.prepend(nav.el);
+  function setNav(open: boolean) {
+    navOpen = open;
+    app.classList.toggle('nav-open', open);
+    navBtn.setAttribute('aria-pressed', String(open));
+    saveNav(open);
+    computeLayout();
+    requestAnimationFrame(() => view.requestMeasure());
+  }
+  function updateCrumbs() {
+    const c = nav.crumbs();
+    if (c.length < 2) { crumbsEl.replaceChildren(); crumbsEl.hidden = true; return; }
+    crumbsEl.hidden = false;
+    const parts: HTMLElement[] = [];
+    c.slice(0, -1).forEach((x, i) => { if (i) parts.push(h('span.crumb-sep', null, '›')); parts.push(h('a.crumb', { href: `/d/${x.id}?tree=${encodeURIComponent(nav.tree ?? '')}`, 'data-link': '' }, x.title || 'Untitled')); });
+    crumbsEl.replaceChildren(...parts);
+  }
+  /** The Subpages footer reads a facet: nudge the view when the tree changes. */
+  function refreshFooter() { if (view && !session) view.dispatch({}); }
+  provider.on('tree', () => void nav.refresh());
+
+  /** Where the cursor is, as (node, offset). */
+  function cursorNode(): { node: string; offset: number } | null {
+    return nodePos(binding.current, view.state.selection.main.head);
+  }
+  async function splitHere() {
+    if (!canEdit() || suggesting()) { toast('Splitting needs edit access (and not suggesting mode).', { kind: 'info' }); return; }
+    const at = cursorNode();
+    if (!at) { toast('Put the cursor where the new section should start.', { kind: 'info' }); return; }
+    if (!binding.opts.canEdit(at.node)) { toast('That section is read-only for you.', { kind: 'info' }); return; }
+    try {
+      const d = await api.split(at.node, at.offset);
+      toast(h('span', null, 'Split: the rest is a section now. ', h('button.link-btn', { type: 'button', onclick: () => void nameSection(d.id) }, 'Name it')), { kind: 'success', timeout: 6000 });
+    } catch (e) { toast(errorMessage(e), { kind: 'error' }); }
+  }
+  async function mergeSection(m: Mount) {
+    if (!binding.opts.canEdit(m.parent)) { toast('You can’t edit the containing document.', { kind: 'info' }); return; }
+    const l = labelOf(m.child);
+    const name = l?.section ? 'this section' : `“${l?.title || 'Untitled'}”`;
+    const ok = await confirmDialog({ title: `Merge ${name} into the text?`, message: 'Its text replaces the section boundary here. If it is mounted elsewhere too it is copied in and stays a node; otherwise its comments come along and it stops being a section.', confirmLabel: 'Merge' });
+    if (!ok) { view.focus(); return; }
+    try {
+      const r = await api.merge(m.parent, m.child);
+      toast(r.copied ? 'Copied in (it is still mounted elsewhere).' : 'Merged.', { kind: 'success', timeout: 3000 });
+    } catch (e) { toast(errorMessage(e), { kind: 'error' }); }
+    view.focus();
+  }
+  async function nameSection(id: string) {
+    const name = await promptDialog({ title: 'Name this section', label: 'Name', placeholder: 'A name makes it a document of its own', confirmLabel: 'Name' });
+    if (name === null) return;
+    try { await api.patchDoc(id, { title: name }); toast(name ? 'Named. It shows in trees and lists now.' : 'Nameless.', { kind: 'success', timeout: 3000 }); }
+    catch (e) { toast(errorMessage(e), { kind: 'error' }); }
+  }
 
   // ------------------------------------------------------------------ toolbar state
 
@@ -418,8 +513,9 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     app.classList.toggle('suggesting', sug);
     editTools.hidden = !canWrite();
     imageTool.hidden = sug;
-    readNotice.hidden = canWrite() || role === 'commenter';
-    readNotice.replaceChildren(icon('eye', 16), role === 'commenter' ? 'Connecting…' : 'View only. Ask the owner for access to comment or edit.');
+    const sectioned = binding.current.mounts.length > 0;
+    readNotice.hidden = canWrite() || (role === 'commenter' && !sectioned);
+    readNotice.replaceChildren(icon('eye', 16), role === 'commenter' ? (sectioned ? 'You can comment. Suggesting isn’t available yet in documents with sections; open a section on its own page to suggest there.' : 'Connecting…') : 'View only. Ask the owner for access to comment or edit.');
     toolbar.classList.toggle('reader', !canWrite());
     writeModeBtn.hidden = !atLeast(role, 'commenter');
     writeModeBtn.disabled = !canEdit();
@@ -458,6 +554,10 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   async function setSuggesting(on: boolean, opts: { remember?: boolean } = {}) {
     if (switching || on === suggesting()) return;
     if (on && !atLeast(role, 'commenter')) return;
+    if (on && binding.current.mounts.length) {
+      if (opts.remember !== false) toast('Suggesting isn’t available yet in documents with sections. Comment instead, or open a section on its own page.', { kind: 'info', timeout: 7000 });
+      return;
+    }
     if (!on && role === 'commenter') return; // commenters can only suggest
     if (opts.remember !== false && canEdit()) saveSuggestPref(docId, on);
     if (on) {
@@ -467,6 +567,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
       s.onError = (m) => toast(`A suggestion couldn’t be saved: ${m}`, { kind: 'error' });
       s.onNotice = (m) => toast(m, { kind: 'info', timeout: 8000 });
       session = s;
+      binding.suspend();
       view.dispatch({ effects: syncC.reconfigure(suggestSync(s)) });
       s.onThreads(rail.threads);
       refreshWriteUi();
@@ -493,6 +594,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
       session = null;
       switching = false;
       view.dispatch({ effects: syncC.reconfigure(liveSync()) });
+      binding.resume();
       refreshWriteUi();
       rail.refreshPermissions();
       rail.onDocChanged();
@@ -501,10 +603,11 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   let wantSuggest = false;
 
   function applyDetail(d: { title?: string; owner?: { sub: string; label: string }; generalAccess?: string; publicLink?: boolean; updatedAt?: number }) {
-    if (d.title && d.title !== title) {
+    if (typeof d.title === 'string' && d.title !== title) {
       title = d.title;
       if (document.activeElement !== titleInput) { titleInput.value = title; titleBefore = title; }
-      document.title = `${title} · Anima Docs`;
+      document.title = `${title || 'Section'} · Anima Docs`;
+      titleInput.placeholder = title ? 'Untitled' : 'Unnamed section — name it to make it a document';
     }
     if (d.owner) {
       const name = splitLabel(d.owner.label).name;
@@ -565,7 +668,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     if (ctx.restoreScroll) requestAnimationFrame(() => { editPane.scrollTop = ctx.restoreScroll!; });
     if (canEdit() && provider.ytext.length === 0) view.focus();
   });
-  provider.on('threads', (threads, ev) => { session?.onThreads(threads); rail.setThreads(threads, ev); });
+  cleanups.push(nodes.onThreads((threads, ev) => { session?.onThreads(threads.filter((t) => t.node === docId)); rail.setThreads(threads, ev); }));
   provider.on('meta', (d) => applyDetail(d));
   provider.on('role', (r) => applyRole(r, true));
   // A guest renamed (here or in another tab): show it, and re-announce so others see the new name.
@@ -638,8 +741,9 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
 
   const renderPreview = () => {
     if (mode === 'edit') return;
-    previewBody.replaceChildren(renderDocument(provider.ytext.toString()));
-    if (!provider.ytext.length) previewBody.replaceChildren(h('p.preview-empty', null, 'This document is empty.'));
+    const text = binding.current.text;
+    previewBody.replaceChildren(renderDocument(text));
+    if (!text.length) previewBody.replaceChildren(h('p.preview-empty', null, 'This document is empty.'));
   };
   const schedulePreview = debounce(renderPreview, 120);
 
@@ -682,6 +786,12 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   ro.observe(body);
   cleanups.push(() => ro.disconnect());
   setMode(mode);
+  setNav(navOpen);
+  // Everything the update listener touches exists now: start reconciling the view with the nodes.
+  binding.attach(view);
+  // For tests and debugging: the live editor objects of the open page.
+  (window as unknown as { __anima?: unknown }).__anima = { view, binding, nodes, nav: () => nav, docId };
+  cleanups.push(() => { delete (window as unknown as { __anima?: unknown }).__anima; });
 
   // Split mode: keep the preview roughly in step with the source.
   let syncing = false;
@@ -769,21 +879,26 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
 
   async function uploadImages(files: File[], at: number) {
     if (!canEdit() || guest || suggesting()) return;
-    // Track the insertion point through concurrent edits while uploading.
-    let rel = Y.createRelativePositionFromTypeIndex(provider.ytext, Math.min(at, provider.ytext.length), -1);
+    // Track the insertion point through concurrent edits while uploading (in the node under it).
+    let np = nodePos(binding.current, at);
+    let np2 = np && nodes.get(np.node) ? np : null;
+    let rel = np2 ? Y.createRelativePositionFromTypeIndex(nodes.get(np2.node)!.ytext, Math.min(np2.offset, nodes.get(np2.node)!.ytext.length), -1) : null;
     for (const f of files) {
       if (!/^image\/(png|jpeg|gif|webp)$/.test(f.type)) { toast(`${f.name}: only PNG, JPEG, GIF and WebP images are supported.`, { kind: 'error' }); continue; }
       if (f.size > MAX_IMAGE) { toast(`${f.name} is larger than 15 MB.`, { kind: 'error' }); continue; }
       const close = toast(h('span.uploading', null, spinner(14), `Uploading ${f.name}…`), { timeout: 0 });
       try {
         const info = await api.upload(docId, f);
-        const abs = Y.createAbsolutePositionFromRelativePosition(rel, provider.doc);
-        const pos = Math.min(abs?.index ?? view.state.selection.main.head, view.state.doc.length);
+        const p = np2 ? nodes.get(np2.node) : null;
+        const abs = rel && p ? Y.createAbsolutePositionFromRelativePosition(rel, p.doc) : null;
+        const pos = Math.min((abs && np2 ? virtualPos(binding.current, np2.node, abs.index, 'end') : null) ?? view.state.selection.main.head, view.state.doc.length);
         const alt = (f.name.replace(/\.[a-z0-9]+$/i, '').replace(/[[\]\\]/g, ' ').trim() || 'image').slice(0, 80);
         const md = `![${alt}](${info.url})`;
         insertBlock(view, md, { at: pos });
         const after = view.state.selection.main.head;
-        rel = Y.createRelativePositionFromTypeIndex(provider.ytext, Math.min(after, provider.ytext.length), -1);
+        np = nodePos(binding.current, after);
+        np2 = np && nodes.get(np.node) ? np : null;
+        rel = np2 ? Y.createRelativePositionFromTypeIndex(nodes.get(np2.node)!.ytext, Math.min(np2.offset, nodes.get(np2.node)!.ytext.length), -1) : null;
       } catch (e) {
         if (e instanceof ApiError && e.status === 429) { toast(`${errorMessage(e)} Images can be added again tomorrow.`, { kind: 'error' }); close(); break; }
         toast(`${f.name}: ${errorMessage(e)}`, { kind: 'error' });
@@ -808,6 +923,9 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   return () => {
     const s = session;
     for (const c of cleanups) c();
+    binding.detach();
+    nav.destroy();
+    nodes.destroy();
     rail.cancelDraft();
     panel.close();
     // Navigating away inside the app: finish saving suggestions before closing the connection.

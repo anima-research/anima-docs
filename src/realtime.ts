@@ -391,7 +391,10 @@ export class Realtime {
       const endDoc = this.app.docs.ydoc(a.endDoc);
       const e = Y.createAbsolutePositionFromRelativePosition(Y.decodeRelativePosition(end), endDoc);
       if (!s || !e) throw new Fault(400, 'Select some text to comment on.');
-      const head = room.doc.getText('body').toString().slice(s.index);
+      // The quote: from the start to the first mount line, then from the end node's start to the end.
+      const headAll = room.doc.getText('body').toString().slice(s.index);
+      const cut = headAll.search(/\n\{\{node:[A-Za-z0-9]+\}\}[ \t]*(\n|$)/);
+      const head = cut >= 0 ? headAll.slice(0, cut) : headAll;
       const tail = endDoc.getText('body').toString().slice(0, e.index);
       return { start: new Uint8Array(start), end: new Uint8Array(end), quote: `${head.slice(0, 1000)}\n…\n${tail.slice(-1000)}`, endDoc: a.endDoc };
     }

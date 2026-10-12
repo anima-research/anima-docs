@@ -35,6 +35,16 @@ export function mountHome(root: HTMLElement, me: Me): () => void {
   const guest = isGuestMe(me);
 
   const listEl = h('div.doc-list', { role: 'list', 'aria-label': 'Documents', 'aria-busy': 'true' }, h('div.list-loading', null, spinner(26)));
+  // Navigation trees: documents that are the root of a Notion-style page tree.
+  const treesEl = h('div.home-trees', { hidden: true });
+  const loadTrees = async () => {
+    try {
+      const r = await api.trees();
+      if (destroyed) return;
+      treesEl.hidden = r.trees.length === 0;
+      treesEl.replaceChildren(h('span.home-trees-label', null, 'Trees'), ...r.trees.map((t) => h('a.tree-card', { href: `/d/${t.root}?tree=${encodeURIComponent(t.root)}`, 'data-link': '' }, icon('columns', 16), t.title || 'Untitled')));
+    } catch { treesEl.hidden = true; }
+  };
   const searchInput = h('input.input.search-input', { type: 'search', placeholder: 'Search documents', 'aria-label': 'Search documents' });
   const tabs = h('div.tabs', { role: 'tablist', 'aria-label': 'Filter documents' });
   const newBtn = h('button.btn.primary', { type: 'button', onclick: () => newDocDialog() }, icon('plus', 18), 'New document');
@@ -164,11 +174,13 @@ export function mountHome(root: HTMLElement, me: Me): () => void {
           ? h('p.home-sub', null, 'You’re a guest: these are the documents you’ve opened through share links. Each stays here while its link works. ', h('button.link-btn', { type: 'button', onclick: () => startSignIn('/') }, 'Sign in'), ' to create and share your own.')
           : h('p.home-sub', null, `Welcome back, ${me.name.split(/\s+/)[0]}.`)),
         h('div.home-actions', null, h('label.search', null, icon('search', 17), searchInput), guest ? null : newBtn)),
+      guest ? null : treesEl,
       guest ? null : tabs,
       listEl)));
 
   void searchPeople('').catch(() => undefined).then(() => { if (docs) renderList(); });
   void load();
+  if (!guest) void loadTrees();
   const refresh = window.setInterval(() => { if (document.visibilityState === 'visible') void load(true); }, 15_000);
   const onFocus = () => void load(true);
   window.addEventListener('focus', onFocus);
