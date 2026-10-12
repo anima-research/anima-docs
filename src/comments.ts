@@ -36,6 +36,8 @@ export interface Comment {
   deletedAt: number | null;
   /** Roots of suggestion threads only. */
   suggestion: Suggestion | null;
+  /** A comment that ends in another node than it starts in (node model). */
+  endDocId: string | null;
 }
 
 export type SuggestionStatus = 'open' | 'accepted' | 'rejected';
@@ -43,6 +45,8 @@ export interface Suggestion { original: string; text: string; status: Suggestion
 
 export interface ResolvedAnchor {
   start: number; end: number; line: number; endLine: number; text: string; orphaned: boolean;
+  /** The end lies in another node: `end`/`endLine` are positions there; `text` is the start node's tail. */
+  endDoc?: string;
   /** An insertion point (suggestions that add text): start === end, never orphaned. */
   point: boolean;
   /** For points: the text just around it, so an insertion can be described. */
@@ -54,7 +58,7 @@ export interface ResolvedAnchor {
  * point); a point also records the word just before it, so an insertion goes
  * outdated when the text it follows changes.
  */
-export interface Anchor { start: Uint8Array; end: Uint8Array; quote: string; context?: string }
+export interface Anchor { start: Uint8Array; end: Uint8Array; quote: string; context?: string; /** The node the end position lives in, when not the comment's own. */ endDoc?: string | null }
 
 /** The word (and spacing) just before an insertion point. */
 export function pointContext(before: string): string {
@@ -65,8 +69,8 @@ export interface Thread {
   root: Comment;
   replies: Comment[];
   anchor: ResolvedAnchor | null;
-  /** base64 relative positions, for browsers to resolve against their replica. */
-  rel: { start: string; end: string } | null;
+  /** base64 relative positions, for browsers to resolve against their replica (`endDoc`: the node the end is in, if another). */
+  rel: { start: string; end: string; endDoc?: string } | null;
   /**
    * For suggestions: whether the anchored text still matches the original
    * (only open ones can be outdated), and a version that changes whenever the
@@ -99,12 +103,14 @@ type Row = {
   anchor_start: Buffer | null; anchor_end: Buffer | null; quote: string | null; resolved_at: number | null; resolved_by: string | null;
   created_at: number; edited_at: number | null; deleted_at: number | null;
   sugg_text: string | null; sugg_orig: string | null; sugg_status: SuggestionStatus | null;
+  end_doc_id: string | null;
 };
 const fromRow = (r: Row): Comment => ({
   id: r.id, docId: r.doc_id, threadId: r.thread_id, author: r.author_sub, body: r.body, mentions: JSON.parse(r.mentions),
   assignee: r.assignee_sub, quote: r.quote, resolvedAt: r.resolved_at, resolvedBy: r.resolved_by,
   createdAt: r.created_at, editedAt: r.edited_at, deletedAt: r.deleted_at,
   suggestion: r.sugg_status ? { original: r.sugg_orig ?? '', text: r.sugg_text ?? '', status: r.sugg_status } : null,
+  endDocId: r.end_doc_id ?? null,
 });
 
 const MAX_BODY = 20_000;
@@ -211,9 +217,20 @@ export class Comments extends EventEmitter {
     return end > start ? this.anchorFromRange(docId, start, end) : this.anchorPoint(docId, start);
   }
 
-  resolveAnchor(docId: string, r: Pick<Row, 'anchor_start' | 'anchor_end' | 'quote'>, pre?: { text: string; starts: number[] }): ResolvedAnchor | null {
+  resolveAnchor(docId: string, r: Pick<Row, 'anchor_start' | 'anchor_end' | 'quote'> & { end_doc_id?: string | null }, pre?: { text: string; starts: number[] }): ResolvedAnchor | null {
     if (!r.anchor_start || !r.anchor_end) return null;
     const doc = this.docs.ydoc(docId);
+    if (r.end_doc_id && r.end_doc_id !== docId) {
+      // Spans into another node: start here, end there.
+      const s = Y.createAbsolutePositionFromRelativePosition(Y.decodeRelativePosition(r.anchor_start), doc);
+      let e: Y.AbsolutePosition | null = null;
+      let endText = '';
+      try { const ed = this.docs.ydoc(r.end_doc_id); e = Y.createAbsolutePositionFromRelativePosition(Y.decodeRelativePosition(r.anchor_end), ed); endText = ed.getText('body').toString(); } catch { /* gone */ }
+      const text = pre?.text ?? doc.getText('body').toString();
+      const starts = pre?.starts ?? lineStarts(text);
+      if (!s || !e) return { start: 0, end: 0, line: 1, endLine: 1, text: '', orphaned: true, point: false, endDoc: r.end_doc_id };
+      return { start: s.index, end: e.index, line: lineOf(starts, s.index), endLine: lineOf(lineStarts(endText), Math.max(0, e.index - 1)), text: text.slice(s.index), orphaned: false, point: false, endDoc: r.end_doc_id };
+    }
     const point = Buffer.from(r.anchor_start).equals(Buffer.from(r.anchor_end));
     const s = Y.createAbsolutePositionFromRelativePosition(Y.decodeRelativePosition(r.anchor_start), doc);
     const e = point ? s : Y.createAbsolutePositionFromRelativePosition(Y.decodeRelativePosition(r.anchor_end), doc);
@@ -257,11 +274,13 @@ export class Comments extends EventEmitter {
     if (p.assignee && isGuest(actor.sub)) throw new Fault(403, 'Sign in with Archipelago to assign comments.');
     const assignee = p.assignee ? this.assignable(docId, p.assignee, warnings) : null;
     const now = Date.now();
-    this.db.prepare(`INSERT INTO comments (id, doc_id, thread_id, author_sub, body, mentions, assignee_sub, anchor_start, anchor_end, quote, created_at, sugg_text, sugg_orig, sugg_status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    if (p.anchor?.endDoc && sugg) throw new Fault(400, 'A suggestion cannot span two sections.');
+    if (p.anchor?.endDoc) this.docs.require(p.anchor.endDoc, actor, 'commenter');
+    this.db.prepare(`INSERT INTO comments (id, doc_id, thread_id, author_sub, body, mentions, assignee_sub, anchor_start, anchor_end, quote, created_at, sugg_text, sugg_orig, sugg_status, end_doc_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(id, docId, id, actor.sub, body, JSON.stringify(mentions.map((m) => m.sub)), assignee?.sub ?? null,
         p.anchor ? Buffer.from(p.anchor.start) : null, p.anchor ? Buffer.from(p.anchor.end) : null, p.anchor ? (p.anchor.context ?? p.anchor.quote).slice(0, 2000) : null, now,
-        sugg?.text ?? null, sugg?.original ?? null, sugg ? 'open' : null);
+        sugg?.text ?? null, sugg?.original ?? null, sugg ? 'open' : null, p.anchor?.endDoc ?? null);
     const addressed = [
       // A suggestion asks the owner for a decision (first: an @mention of the owner in the note doesn't replace it).
       ...(sugg && doc.ownerSub !== actor.sub ? [{ sub: doc.ownerSub, reason: 'suggestion' as const }] : []),
@@ -511,6 +530,54 @@ export class Comments extends EventEmitter {
     return { comment: this.get(c.threadId)!, warnings };
   }
 
+  // ------------------------------------------------------------------ moving text between nodes
+
+  /**
+   * Split and merge move text between nodes; relative positions do not follow
+   * text across Y.Docs. Two phases around the text op: resolve the anchors of
+   * every comment that starts or ends in `node` to offsets, then re-create
+   * them where `moves` says the text went.
+   */
+  planMove(node: string): { id: string; s: { node: string; offset: number }; e: { node: string; offset: number }; point: boolean }[] {
+    const rows = this.db.prepare('SELECT * FROM comments WHERE (doc_id = ? OR end_doc_id = ?) AND id = thread_id AND deleted_at IS NULL AND anchor_start IS NOT NULL').all(node, node) as Row[];
+    const out: ReturnType<Comments['planMove']> = [];
+    for (const r of rows) {
+      try {
+        const sd = this.docs.ydoc(r.doc_id), ed = this.docs.ydoc(r.end_doc_id ?? r.doc_id);
+        const s = Y.createAbsolutePositionFromRelativePosition(Y.decodeRelativePosition(r.anchor_start!), sd);
+        const point = !r.end_doc_id && Buffer.from(r.anchor_start!).equals(Buffer.from(r.anchor_end!));
+        const e = point ? s : Y.createAbsolutePositionFromRelativePosition(Y.decodeRelativePosition(r.anchor_end!), ed);
+        if (!s || !e) continue;
+        out.push({ id: r.id, s: { node: r.doc_id, offset: s.index }, e: { node: r.end_doc_id ?? r.doc_id, offset: e.index }, point });
+      } catch { /* a node went away: leave the comment as it is */ }
+    }
+    return out;
+  }
+
+  applyMove(plan: ReturnType<Comments['planMove']>, moves: (node: string, offset: number, side: 'start' | 'end') => { node: string; offset: number } | null): number {
+    let n = 0;
+    const upd = this.db.prepare('UPDATE comments SET doc_id = ?, anchor_start = ?, anchor_end = ?, end_doc_id = ? WHERE id = ?');
+    const updReplies = this.db.prepare('UPDATE comments SET doc_id = ? WHERE thread_id = ? AND id != thread_id');
+    this.db.transaction(() => {
+      for (const p of plan) {
+        const ns = moves(p.s.node, p.s.offset, 'start'), ne = p.point ? ns : moves(p.e.node, p.e.offset, 'end');
+        if (!ns && !ne) continue;
+        const start = ns ?? p.s, end = ne ?? p.e;
+        const mk = (node: string, offset: number, assoc: 0 | -1) => {
+          const yt = this.docs.ydoc(node).getText('body');
+          const i = Math.max(0, Math.min(offset, yt.length));
+          return Buffer.from(Y.encodeRelativePosition(Y.createRelativePositionFromTypeIndex(yt, i, i === 0 && assoc === -1 ? 0 : assoc)));
+        };
+        const sb = mk(start.node, start.offset, 0);
+        const eb = p.point ? sb : mk(end.node, end.offset, -1);
+        upd.run(start.node, sb, eb, end.node === start.node ? null : end.node, p.id);
+        updReplies.run(start.node, p.id);
+        n++;
+      }
+    })();
+    return n;
+  }
+
   // ------------------------------------------------------------------ reads
 
   threads(docId: string, opts: { includeResolved?: boolean; threadId?: string } = {}): Thread[] {
@@ -536,7 +603,7 @@ export class Comments extends EventEmitter {
         replies: t.replies.map(fromRow),
         anchor,
         rel: t.root.anchor_start && t.root.anchor_end
-          ? { start: Buffer.from(t.root.anchor_start).toString('base64'), end: Buffer.from(t.root.anchor_end).toString('base64') } : null,
+          ? { start: Buffer.from(t.root.anchor_start).toString('base64'), end: Buffer.from(t.root.anchor_end).toString('base64'), ...(t.root.end_doc_id ? { endDoc: t.root.end_doc_id } : {}) } : null,
         suggestion: root.suggestion ? { ...root.suggestion, outdated: this.outdated(root, anchor), version: versionOf(t.root) } : null,
       });
     }

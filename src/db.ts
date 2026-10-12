@@ -6,7 +6,7 @@ import { dirname } from 'node:path';
 
 export type DB = Database.Database;
 
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 
 export function openDatabase(file: string): DB {
   if (file !== ':memory:') mkdirSync(dirname(file), { recursive: true });
@@ -307,6 +307,67 @@ export function openDatabase(file: string): DB {
           kind        TEXT NOT NULL DEFAULT 'edit' CHECK (kind IN ('edit','baseline'))
         );
         CREATE INDEX IF NOT EXISTS checkpoints_doc ON checkpoints(doc_id, seq);
+      `);
+      db.pragma('user_version = 5');
+    })();
+  }
+  if ((db.pragma('user_version', { simple: true }) as number) < 6) {
+    // v6: the node model. A document is a node; a node with an empty title is a
+    // section (reachable only through the documents that mount it). A mount is
+    // a line `{{node:<id>}}` in a parent's body; `mounts` is the index of those
+    // lines. Navigation trees are placements (edges with no effect on bodies).
+    // A comment may end in another node than it starts in.
+    db.transaction(() => {
+      const docCols = new Set((db.pragma('table_info(documents)') as { name: string }[]).map((c) => c.name));
+      if (!docCols.has('type')) db.exec("ALTER TABLE documents ADD COLUMN type TEXT NOT NULL DEFAULT 'markdown'");
+      const cCols = new Set((db.pragma('table_info(comments)') as { name: string }[]).map((c) => c.name));
+      if (!cCols.has('end_doc_id')) db.exec('ALTER TABLE comments ADD COLUMN end_doc_id TEXT');
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS mounts (
+          parent_id   TEXT NOT NULL,
+          child_id    TEXT NOT NULL,
+          nth         INTEGER NOT NULL,
+          PRIMARY KEY (parent_id, child_id, nth)
+        );
+        CREATE INDEX IF NOT EXISTS mounts_child ON mounts(child_id);
+        -- Which revision of each body the mount index reflects.
+        CREATE TABLE IF NOT EXISTS mount_scan (
+          doc_id      TEXT PRIMARY KEY,
+          rev         INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS mount_log (
+          seq         INTEGER PRIMARY KEY AUTOINCREMENT,
+          parent_id   TEXT NOT NULL,
+          child_id    TEXT NOT NULL,
+          op          TEXT NOT NULL CHECK (op IN ('mount','unmount')),
+          sub         TEXT,
+          at          INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS mount_log_parent ON mount_log(parent_id, seq);
+        CREATE TABLE IF NOT EXISTS trees (
+          root_id     TEXT PRIMARY KEY,
+          created_by  TEXT NOT NULL,
+          created_at  INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS placements (
+          tree_id     TEXT NOT NULL,
+          parent_id   TEXT NOT NULL,
+          child_id    TEXT NOT NULL,
+          ord         REAL NOT NULL,
+          derived     INTEGER NOT NULL DEFAULT 0,
+          placed_by   TEXT,
+          at          INTEGER NOT NULL,
+          PRIMARY KEY (tree_id, parent_id, child_id)
+        );
+        CREATE INDEX IF NOT EXISTS placements_child ON placements(child_id);
+        CREATE TABLE IF NOT EXISTS placement_exclusions (
+          tree_id     TEXT NOT NULL,
+          parent_id   TEXT NOT NULL,
+          child_id    TEXT NOT NULL,
+          by          TEXT,
+          at          INTEGER NOT NULL,
+          PRIMARY KEY (tree_id, parent_id, child_id)
+        );
       `);
       db.pragma(`user_version = ${SCHEMA_VERSION}`);
     })();

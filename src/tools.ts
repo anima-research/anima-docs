@@ -31,7 +31,7 @@ export interface ToolDef {
 
 const text = (t: string): ToolResult => ({ content: [{ type: 'text', text: t }] });
 const S = (description: string, extra: Record<string, unknown> = {}) => ({ type: 'string', description, ...extra });
-const docArg = { document: S('Document id (e.g. "dAbc12345"), its URL, or a share link someone gave you. list_documents shows ids.') };
+const docArg = { document: S('Document id (e.g. "dAbc12345"), its URL, or a share link someone gave you. list_documents shows ids; sections (nameless nodes inside a document) have ids too, shown by read_document and tree.') };
 
 function ago(ms: number): string {
   const s = Math.round((Date.now() - ms) / 1000);
@@ -274,11 +274,14 @@ export const TOOLS: ToolDef[] = [
       line_numbers: { type: 'boolean', description: 'Prefix lines with numbers (default false; quote text without them when editing).' },
       comments: { type: 'boolean', description: 'Append open comment threads (default true).' },
       suggestions: S('Open suggestions: "list" (default: listed after the document, in full), "inline" (shown in place as CriticMarkup {~~old~>new~~} {++added++} {--deleted--} {>>id<<}; for reading only, quote the plain text when editing), or "none".', { enum: ['list', 'inline', 'none'] }),
+      sections: S('Documents can mount other nodes (sections, or other documents) with a line {{node:<id>}}. "inline" (default) shows mounted content in place between "[section <id> begins]" and "[section <id> ends]" lines (not part of any text); "markers" shows this node\'s own text with the marker lines as they are. To edit a section, use edit_document with its id.', { enum: ['inline', 'markers'] }),
     } },
     run(app, actor, a) {
       const id = need(a, 'document');
       const { doc, role } = app.docs.require(id, actor, 'viewer');
-      const full = app.docs.text(id);
+      const mounted = app.nodes.childrenOf(id);
+      const inline = mounted.length > 0 && a.sections !== 'markers';
+      const full = inline ? app.nodes.flatten(id, actor, { delimit: true }) : app.docs.text(id);
       const starts = lineStarts(full);
       let sliceFrom = 0, sliceTo = full.length, first = 1, partial = false;
       if (a.section) {
@@ -304,8 +307,13 @@ export const TOOLS: ToolDef[] = [
         app.comments.markSeen(actor.sub, all.filter((t) => inlined.has(t.root.id)));
       }
       const pending = all.filter((t) => t.suggestion?.status === 'open').length;
-      const header = `# “${doc.title}” (${doc.id}) — rev ${doc.rev}, ${starts.length} lines${partial ? `, showing lines ${first}–${last}` : ''}; you are ${role}; owner ${app.principals.label(doc.ownerSub)}; updated ${ago(doc.updatedAt)}`
-        + (pending ? `; ${pending} open suggestion${pending === 1 ? '' : 's'}${mode === 'inline' ? ' shown inline as CriticMarkup (not part of the text)' : ''}` : '');
+      const sectionNote = mounted.length
+        ? (inline
+          ? `\nThis node mounts ${mounted.length} other node${mounted.length === 1 ? '' : 's'}, shown in place between [section … begins] / [section … ends] lines (not text). Edit a section with edit_document {"document": "<section id>"}; comments and suggestions on a section go to its id. "sections": "markers" shows this node's own text.`
+          : `\nThis node's own text; its {{node:…}} lines mount other nodes (tree shows them).`)
+        : '';
+      const header = `# ${doc.title ? `“${doc.title}”` : '(section)'} (${doc.id}${doc.type !== 'markdown' ? `, ${doc.type}` : ''}) — rev ${doc.rev}, ${starts.length} lines${partial ? `, showing lines ${first}–${last}` : ''}; you are ${role}; owner ${app.principals.label(doc.ownerSub)}; updated ${ago(doc.updatedAt)}`
+        + (pending ? `; ${pending} open suggestion${pending === 1 ? '' : 's'}${mode === 'inline' ? ' shown inline as CriticMarkup (not part of the text)' : ''}` : '') + sectionNote;
       const content = a.line_numbers ? withLineNumbers(body, first) : body;
       const out = [header, '<<<DOCUMENT', content, 'DOCUMENT>>>'];
       if (wantComments || mode === 'list') {
@@ -518,7 +526,14 @@ export const TOOLS: ToolDef[] = [
     run(app, actor, a) {
       const id = need(a, 'document');
       app.docs.require(id, actor, 'editor');
-      const { report, client, deleteSet } = applyEdits(app.docs, id, { sub: actor.sub, via: 'mcpl' }, a.edits as AgentEdit[]);
+      let result: ReturnType<typeof applyEdits>;
+      try { result = applyEdits(app.docs, id, { sub: actor.sub, via: 'mcpl' }, a.edits as AgentEdit[]); }
+      catch (e) {
+        const kids = e instanceof Fault && e.status === 404 ? app.nodes.childrenOf(id) : [];
+        if (kids.length) throw new Fault(404, `${(e as Fault).message}\nNote: this node mounts ${kids.length} section${kids.length === 1 ? '' : 's'} (${[...new Set(kids.map((k) => k.child))].join(', ')}); text inside a section belongs to that node — edit it with its id.`);
+        throw e;
+      }
+      const { report, client, deleteSet } = result;
       app.attention.noteOwnEdit(actor.sub, id, client, deleteSet);
       const doc = app.docs.get(id)!;
       return text(`Applied to “${doc.title}” (rev ${doc.rev}):\n${report.applied.join('\n')}${report.lines.length ? `\n\nResult:\n${report.lines.join('\n…\n')}` : ''}`);
@@ -862,6 +877,142 @@ export const TOOLS: ToolDef[] = [
       void BASE_SETTINGS;
       return text(lines.join('\n'));
     },
+  },
+
+  // ------------------------------------------------------------------ nodes: sections, mounts, navigation trees
+  {
+    name: 'tree', featureSet: 'docs.read', toolClass: 'notes',
+    description: 'The structure around a document: the nodes it mounts (sections and documents, recursively, with ids), and the navigation trees it is placed in. Without a document: the navigation trees you can open.',
+    inputSchema: { type: 'object', properties: { document: docArg.document, navigation: S('A tree root id: show that navigation tree (pages placed under it).') } },
+    run(app, actor, a) {
+      if (a.navigation) {
+        const v = app.trees.view(String(a.navigation), actor);
+        const byId = new Map(v.nodes.map((n) => [n.id, n]));
+        const lines = [`Tree “${v.title}” (${v.root}) — you are ${v.role}`];
+        const walk = (parent: string, depth: number, seen: Set<string>) => {
+          for (const p of v.placements.filter((x) => x.parent === parent)) {
+            const n = byId.get(p.child);
+            if (!n) continue;
+            lines.push(`${'  '.repeat(depth)}- ${n.title || '(section)'} (${n.id})${p.derived ? '' : ' [placed]'}`);
+            if (!seen.has(p.child)) { seen.add(p.child); walk(p.child, depth + 1, seen); }
+          }
+        };
+        walk(v.root, 1, new Set([v.root]));
+        if (lines.length === 1) lines.push('  (no pages placed yet; place_page adds one, and documents mounted inside placed pages are added by themselves)');
+        return text(lines.join('\n'));
+      }
+      if (!a.document) {
+        const roots = app.trees.roots(actor);
+        return text(roots.length ? `Navigation trees you can open:\n${roots.map((r) => `  ${r.root}  “${r.title}” — you: ${r.role}`).join('\n')}\ntree {"navigation": "<root id>"} shows one.` : 'No navigation trees yet. create_tree makes a document the root of one.');
+      }
+      const id = need(a, 'document');
+      app.docs.require(id, actor, 'viewer');
+      const t = app.nodes.tree(id, actor);
+      const lines = t.nodes.map((n) => `${'  '.repeat(n.depth)}${n.depth ? '- ' : ''}${n.title ? `“${n.title}”` : '(section)'} (${n.id}${n.type !== 'markdown' ? `, ${n.type}` : ''}; ${n.chars} chars)`);
+      if (t.cycles.length) lines.push(`(cycles left out: ${t.cycles.join(', ')})`);
+      const paths = app.trees.pathsOf(id, actor);
+      if (paths.length) lines.push('In navigation trees:', ...paths.map((p) => `  ${p.title} (${p.tree}): ${p.path.map((x) => x.title || '(section)').join(' › ')}`));
+      const parents = app.nodes.parentsOf(id).filter((p) => app.docs.role(p, actor));
+      if (parents.length) lines.push(`Mounted in: ${parents.map((p) => `${app.docs.get(p)?.title || '(section)'} (${p})`).join(', ')}`);
+      return text(lines.join('\n'));
+    },
+  },
+  {
+    name: 'split_section', featureSet: 'docs.write', toolClass: 'notes',
+    description: 'Cut a document at a point: everything after it becomes a new section (a nameless node) mounted there. Comments on the moved text follow it. Give the split point as the exact text that should START the new section (or a line number). Name the section to make it a document in its own right.',
+    inputSchema: { type: 'object', required: ['document'], properties: { ...docArg, at_text: S('Exact text that will start the new section (must occur once; use occurrence otherwise).'), occurrence: { type: 'integer', minimum: 1 }, at_line: { type: 'integer', minimum: 1, description: 'Line number that starts the new section (1-based, this node\'s own text).' }, title: S('A name: makes the new node a document, not just a section.') } },
+    run(app, actor, a) {
+      const id = need(a, 'document');
+      app.docs.require(id, actor, 'editor');
+      const t = app.docs.text(id);
+      let at: number;
+      if (typeof a.at_text === 'string' && a.at_text) {
+        const hits: number[] = []; let i = -1; while ((i = t.indexOf(a.at_text, i + 1)) >= 0) hits.push(i);
+        if (!hits.length) throw new Fault(404, 'at_text not found in this node\'s own text (re-read with sections: "markers").');
+        if (hits.length > 1 && !a.occurrence) throw new Fault(409, `at_text occurs ${hits.length} times; pass occurrence.`);
+        at = hits[(a.occurrence ?? 1) - 1];
+        if (at === undefined) throw new Fault(400, `occurrence must be 1–${hits.length}.`);
+      } else if (Number.isInteger(a.at_line)) {
+        const starts = lineStarts(t);
+        if (a.at_line < 1 || a.at_line > starts.length) throw new Fault(400, `at_line must be 1–${starts.length}.`);
+        at = starts[a.at_line - 1];
+      } else throw new Fault(400, 'Give at_text or at_line.');
+      const child = app.nodes.split(id, { ...actor, via: 'mcpl' }, at, { title: typeof a.title === 'string' ? a.title : undefined });
+      return text(`Split: the text from there on is now ${child.title ? `document “${child.title}”` : 'section'} ${child.id}, mounted in ${id} at the cut. Edit it with edit_document {"document": "${child.id}"}.`);
+    },
+  },
+  {
+    name: 'merge_section', featureSet: 'docs.write', toolClass: 'notes',
+    description: 'Inline a mounted section back into its parent: its text replaces the mount line. If the section is mounted elsewhere too, it is copied in and stays a node; otherwise its comments move into the parent and it is left unmounted.',
+    inputSchema: { type: 'object', required: ['document', 'section'], properties: { ...docArg, section: S('The mounted node\'s id.') } },
+    run(app, actor, a) {
+      const id = need(a, 'document'), child = need(a, 'section');
+      const r = app.nodes.merge(id, child, { ...actor, via: 'mcpl' });
+      return text(r.copied ? `Copied ${child} into ${id}; it is still mounted elsewhere.` : `Merged ${child} into ${id}; its comments came along and it is no longer mounted anywhere.`);
+    },
+  },
+  {
+    name: 'mount_section', featureSet: 'docs.write', toolClass: 'notes',
+    description: 'Mount a node (a section or another document you can read) inside a document: a {{node:<id>}} line is added at the end (or at a given line). The same node can be mounted in several documents; it is one text everywhere. Typing the line yourself with edit_document does the same.',
+    inputSchema: { type: 'object', required: ['document', 'node'], properties: { ...docArg, node: S('Id of the node to mount.'), at_line: { type: 'integer', minimum: 1, description: 'Put the mount line before this line (default: at the end).' } } },
+    run(app, actor, a) {
+      const id = need(a, 'document'), child = need(a, 'node');
+      let at: number | undefined;
+      if (Number.isInteger(a.at_line)) { const starts = lineStarts(app.docs.text(id)); at = starts[Math.min(starts.length, Math.max(1, a.at_line)) - 1]; }
+      app.nodes.mount(id, child, { ...actor, via: 'mcpl' }, { at });
+      return text(`Mounted ${child} in ${id}.`);
+    },
+  },
+  {
+    name: 'unmount_section', featureSet: 'docs.write', toolClass: 'notes',
+    description: 'Remove a node\'s mount line(s) from a document. The node keeps existing (mounted elsewhere, or as an orphan).',
+    inputSchema: { type: 'object', required: ['document', 'node'], properties: { ...docArg, node: S('Id of the mounted node.') } },
+    run(app, actor, a) {
+      const id = need(a, 'document'), child = need(a, 'node');
+      const n = app.nodes.unmount(id, child, { ...actor, via: 'mcpl' });
+      return text(n ? `Removed ${n} mount line${n === 1 ? '' : 's'} of ${child} from ${id}.` : `${child} was not mounted in ${id}.`);
+    },
+  },
+  {
+    name: 'create_section', featureSet: 'docs.write', toolClass: 'notes',
+    description: 'Add a new section (a nameless node) to a document, mounted at the end, with optional content. Name it to make it a document as well.',
+    inputSchema: { type: 'object', required: ['document'], properties: { ...docArg, content: S('Initial text.'), title: S('A name (optional): the node is then a document too).'), type: S('markdown (default), latex or text.', { enum: ['markdown', 'latex', 'text'] }) } },
+    run(app, actor, a) {
+      const id = need(a, 'document');
+      const d = app.nodes.createSection(id, { ...actor, via: 'mcpl' }, { content: typeof a.content === 'string' ? a.content : '', title: typeof a.title === 'string' ? a.title : '', type: typeof a.type === 'string' ? a.type : undefined });
+      return text(`Created ${d.title ? `“${d.title}”` : 'a section'} (${d.id}) mounted at the end of ${id}.`);
+    },
+  },
+  {
+    name: 'create_tree', featureSet: 'docs.write', toolClass: 'notes',
+    description: 'Make a document the root of a navigation tree (a Notion-style page tree). Documents mounted inside it become its subpages by themselves; place_page adds others.',
+    inputSchema: { type: 'object', required: ['document'], properties: { ...docArg } },
+    run(app, actor, a) {
+      const v = app.trees.create(need(a, 'document'), actor);
+      return text(`“${v.title}” (${v.root}) is a tree root with ${v.placements.length} page${v.placements.length === 1 ? '' : 's'} under it. tree {"navigation": "${v.root}"} shows it.`);
+    },
+  },
+  {
+    name: 'place_page', featureSet: 'docs.write', toolClass: 'notes',
+    description: 'Place a document under another page in a navigation tree (no change to any text; it appears in the nav and in the parent\'s Subpages footer). Needs editor access to the parent page and editor access to the document itself (placing shares it with the tree).',
+    inputSchema: { type: 'object', required: ['tree', 'parent', 'document'], properties: { tree: S('Tree root id.'), parent: S('Page to place it under (the root, or any page in the tree).'), ...docArg } },
+    run(app, actor, a) {
+      const ok = app.trees.place(need(a, 'tree'), need(a, 'parent'), need(a, 'document'), actor);
+      if (!ok) throw new Fault(409, 'That would place a page inside itself.');
+      return text(`Placed ${a.document} under ${a.parent} in tree ${a.tree}.`);
+    },
+  },
+  {
+    name: 'unplace_page', featureSet: 'docs.write', toolClass: 'notes',
+    description: 'Remove a page from a navigation tree (under one parent). The page keeps existing and is not re-added automatically.',
+    inputSchema: { type: 'object', required: ['tree', 'parent', 'document'], properties: { tree: S('Tree root id.'), parent: S('The parent page.'), ...docArg } },
+    run(app, actor, a) { app.trees.unplace(need(a, 'tree'), need(a, 'parent'), need(a, 'document'), actor); return text(`Removed ${a.document} from under ${a.parent} in tree ${a.tree}.`); },
+  },
+  {
+    name: 'move_page', featureSet: 'docs.write', toolClass: 'notes',
+    description: 'Reorder a page among its siblings in a navigation tree.',
+    inputSchema: { type: 'object', required: ['tree', 'parent', 'document', 'direction'], properties: { tree: S('Tree root id.'), parent: S('The parent page.'), ...docArg, direction: S('up or down', { enum: ['up', 'down'] }) } },
+    run(app, actor, a) { app.trees.move(need(a, 'tree'), need(a, 'parent'), need(a, 'document'), actor, a.direction === 'up' ? -1 : 1); return text(`Moved ${a.document} ${a.direction}.`); },
   },
 ];
 

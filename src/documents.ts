@@ -19,7 +19,9 @@ export const atLeast = (role: Role | null, min: Role) => !!role && RANK[role] >=
 
 export interface DocMeta {
   id: string;
+  /** '' = a section: a node with no name, reachable only through the nodes that mount it. */
   title: string;
+  type: string;
   ownerSub: string;
   generalAccess: GeneralAccess;
   createdAt: number;
@@ -57,8 +59,11 @@ export interface DocChange {
   inserted: string;
 }
 
-type DocRow = { id: string; title: string; owner_sub: string; general_access: GeneralAccess; created_at: number; updated_at: number; rev: number; deleted_at: number | null };
-const meta = (r: DocRow): DocMeta => ({ id: r.id, title: r.title, ownerSub: r.owner_sub, generalAccess: r.general_access, createdAt: r.created_at, updatedAt: r.updated_at, rev: r.rev });
+type DocRow = { id: string; title: string; type: string; owner_sub: string; general_access: GeneralAccess; created_at: number; updated_at: number; rev: number; deleted_at: number | null };
+const meta = (r: DocRow): DocMeta => ({ id: r.id, title: r.title, type: r.type ?? 'markdown', ownerSub: r.owner_sub, generalAccess: r.general_access, createdAt: r.created_at, updatedAt: r.updated_at, rev: r.rev });
+export const NODE_TYPES = ['markdown', 'latex', 'text'];
+/** How deep access may be derived through parents. */
+const DERIVE_DEPTH = 12;
 
 const COMPACT_EVERY = 400;
 export const MAX_DOC_CHARS = 2_000_000;
@@ -101,6 +106,9 @@ export class Documents extends EventEmitter {
   private failed = new Set<string>();
   /** `${docId}\0${client}` → sub cache (authoritative copy in yclients). */
   private clientOwner = new Map<string, string>();
+  /** Parents of a node (mounts and tree placements); set by Nodes. Access derives through them. */
+  private parents: ((id: string) => string[]) | null = null;
+  setParents(fn: (id: string) => string[]) { this.parents = fn; }
 
   constructor(private db: DB, private principals: Principals, private opts: { defaultAccess: GeneralAccess }) {
     super();
@@ -136,13 +144,39 @@ export class Documents extends EventEmitter {
    * any active share link they have opened. Admins are owners everywhere.
    */
   role(docId: string, actor: Pick<Actor, 'sub' | 'admin'>): Role | null {
+    return this.roleIn(docId, actor, new Set(), 0);
+  }
+
+  /**
+   * Own role, links, and — failing those — access derived through a parent
+   * that mounts or places this node (capped at editor; never owner). Derived
+   * access is what makes sections openable at all.
+   */
+  private roleIn(docId: string, actor: Pick<Actor, 'sub' | 'admin'>, seen: Set<string>, depth: number): Role | null {
     const base = this.baseRole(docId, actor);
     if (base === 'owner') return base;
     let best: Role | null = base;
     const held = this.db.prepare(`SELECT l.* FROM link_holders h JOIN doc_links l ON l.id = h.link_id
         WHERE h.sub = ? AND h.doc_id = ? AND l.revoked_at IS NULL AND (l.expires_at IS NULL OR l.expires_at > ?)`).all(actor.sub, docId, Date.now()) as LinkRow[];
     for (const l of held) if ((!best || RANK[l.role] > RANK[best]) && this.linkBacked(l)) best = l.role;
+    if (best === 'editor' || !this.parents || depth >= DERIVE_DEPTH) return best;
+    seen.add(docId);
+    for (const p of this.parents(docId)) {
+      if (seen.has(p)) continue;
+      const r = this.roleIn(p, actor, seen, depth + 1);
+      const capped: Role | null = r === 'owner' ? 'editor' : r;
+      if (capped && (!best || RANK[capped] > RANK[best])) best = capped;
+      if (best === 'editor') break;
+    }
     return best;
+  }
+
+  /** Is the actor's access to this node derived only (no role of its own)? */
+  derivedOnly(docId: string, actor: Pick<Actor, 'sub' | 'admin'>): boolean {
+    if (this.baseRole(docId, actor)) return false;
+    const held = this.db.prepare(`SELECT l.* FROM link_holders h JOIN doc_links l ON l.id = h.link_id
+        WHERE h.sub = ? AND h.doc_id = ? AND l.revoked_at IS NULL AND (l.expires_at IS NULL OR l.expires_at > ?)`).all(actor.sub, docId, Date.now()) as LinkRow[];
+    return !held.some((l) => this.linkBacked(l)) && !!this.role(docId, actor);
   }
 
   /**
@@ -166,24 +200,43 @@ export class Documents extends EventEmitter {
     return { doc, role };
   }
 
-  create(actor: Actor, title: string, content = ''): DocMeta {
+  create(actor: Actor, title: string, content = '', type = 'markdown'): DocMeta {
     if (isGuest(actor.sub)) throw new Fault(403, 'Sign in with Archipelago to create documents.');
+    return this.createNode(actor, { title: title.trim().slice(0, 300) || 'Untitled document', content, type });
+  }
+
+  /** Any node: a document (named) or a section (title ''). Sections are owned by their parent's owner. */
+  createNode(actor: Actor, p: { title: string; content?: string; type?: string; owner?: string }): DocMeta {
+    if (isGuest(actor.sub)) throw new Fault(403, 'Sign in with Archipelago to create documents.');
+    const type = p.type ?? 'markdown';
+    if (!NODE_TYPES.includes(type)) throw new Fault(400, `type must be one of ${NODE_TYPES.join(', ')}.`);
     const id = `d${randomBytes(6).toString('base64url').replace(/[-_]/g, 'x')}`;
     const now = Date.now();
-    const clean = title.trim().slice(0, 300) || 'Untitled document';
-    this.db.prepare(`INSERT INTO documents (id, title, owner_sub, general_access, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`)
-      .run(id, clean, actor.sub, this.opts.defaultAccess, now, now);
-    if (content) this.edit(id, actor, (text) => text.insert(0, content));
+    const clean = p.title.trim().slice(0, 300);
+    const access = clean ? this.opts.defaultAccess : 'restricted'; // sections are reached through their parents
+    this.db.prepare(`INSERT INTO documents (id, title, type, owner_sub, general_access, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .run(id, clean, type, p.owner ?? actor.sub, access, now, now);
+    if (p.content) this.edit(id, actor, (text) => text.insert(0, p.content!));
     this.emit('meta', { docId: id, kind: 'created', by: actor.sub });
     return this.get(id)!;
   }
 
+  /** Rename. An empty title makes the node a section (nameless, reachable only through its parents). */
   rename(docId: string, actor: Actor, title: string): DocMeta {
     this.require(docId, actor, 'editor');
     const clean = title.trim().slice(0, 300);
-    if (!clean) throw new Fault(400, 'Title cannot be empty.');
+    const was = this.get(docId)!.title;
+    if (!clean && was !== '' && !this.parents?.(docId).length) throw new Fault(400, 'Title cannot be empty: a nameless node must be mounted somewhere, or nobody could find it.');
     this.db.prepare('UPDATE documents SET title = ?, updated_at = ? WHERE id = ?').run(clean, Date.now(), docId);
-    this.emit('meta', { docId, kind: 'renamed', by: actor.sub });
+    this.emit('meta', { docId, kind: 'renamed', by: actor.sub, section: clean === '', wasSection: was === '' });
+    return this.get(docId)!;
+  }
+
+  setType(docId: string, actor: Actor, type: string): DocMeta {
+    this.require(docId, actor, 'editor');
+    if (!NODE_TYPES.includes(type)) throw new Fault(400, `type must be one of ${NODE_TYPES.join(', ')}.`);
+    this.db.prepare('UPDATE documents SET type = ?, updated_at = ? WHERE id = ?').run(type, Date.now(), docId);
+    this.emit('meta', { docId, kind: 'retyped', by: actor.sub });
     return this.get(docId)!;
   }
 
@@ -195,11 +248,11 @@ export class Documents extends EventEmitter {
     if (doc) { doc.destroy(); this.live.delete(docId); }
   }
 
-  list(actor: Actor, opts: { query?: string; filter?: 'all' | 'owned' | 'shared'; limit?: number } = {}): (DocMeta & { role: Role })[] {
+  list(actor: Actor, opts: { query?: string; filter?: 'all' | 'owned' | 'shared'; limit?: number; sections?: boolean } = {}): (DocMeta & { role: Role })[] {
     const q = opts.query ? `%${opts.query.replace(/[%_]/g, '')}%` : '%';
     const rows = this.db.prepare(`
       SELECT d.* FROM documents d
-      WHERE d.deleted_at IS NULL AND d.title LIKE @q
+      WHERE d.deleted_at IS NULL AND d.title LIKE @q ${opts.sections ? '' : "AND d.title != ''"}
         AND (@admin = 1 OR d.owner_sub = @sub OR (@guest = 0 AND d.general_access != 'restricted')
              OR EXISTS (SELECT 1 FROM doc_acl a WHERE a.doc_id = d.id AND a.sub = @sub)
              OR EXISTS (SELECT 1 FROM link_holders h JOIN doc_links l ON l.id = h.link_id

@@ -51,7 +51,12 @@ export class Realtime {
   constructor(private app: App, private sessionFor: (req: IncomingMessage) => WebSession | null, private sessionValid: (s: WebSession) => boolean) {
     app.docs.on('update', (e: { docId: string; update: Uint8Array; origin?: { conn?: string } }) => this.broadcastUpdate(e.docId, e.update, e.origin?.conn));
     app.docs.on('change', (c: DocChange) => { if (c.origin.via !== 'web') this.showAgent(c.docId, c.origin.sub, c.ranges.at(-1)?.[1] ?? null); });
-    app.docs.on('share', (e: { docId: string }) => this.refreshRoles(e.docId));
+    app.docs.on('share', (e: { docId: string; role?: unknown }) => {
+      this.refreshRoles(e.docId);
+      // Structure changed (a mount or placement): access derived through it changed for other rooms too.
+      if (e.role === 'mounts' || e.role === 'placed' || e.role === 'unplaced') for (const id of this.rooms.keys()) if (id !== e.docId) this.recheckRoom(id);
+    });
+    app.trees.on('changed', (e: { tree: string }) => this.broadcastTree(e.tree));
     app.docs.on('meta', (e: { docId: string; kind: string }) => this.broadcastMeta(e.docId, e.kind));
     app.comments.on('event', (e: CommentEvent) => this.broadcastThreads(e.docId, e));
     app.docs.on('failed', (e: { docId: string }) => this.closeRoom(e.docId, 4500, 'Save failed; reconnecting'));
@@ -376,15 +381,35 @@ export class Realtime {
     return { start: new Uint8Array(start), end: new Uint8Array(end), quote, ...(point ? { context: pointContext(text.slice(Math.max(0, s.index - 24), s.index)) } : {}) };
   }
 
-  /** Clients send base64 relative positions computed on their replica; verify they resolve here. */
-  private anchorFromClient(room: Room, a: { start: string; end: string }) {
+  /** Clients send base64 relative positions computed on their replica; verify they resolve here. The end may lie in another node. */
+  private anchorFromClient(room: Room, a: { start: string; end: string; endDoc?: string }) {
     const start = Buffer.from(String(a.start), 'base64');
     const end = Buffer.from(String(a.end), 'base64');
     const s = Y.createAbsolutePositionFromRelativePosition(Y.decodeRelativePosition(start), room.doc);
+    if (a.endDoc && typeof a.endDoc === 'string' && a.endDoc !== room.docId) {
+      if (!/^[A-Za-z0-9]{1,40}$/.test(a.endDoc)) throw new Fault(400, 'Bad anchor.');
+      const endDoc = this.app.docs.ydoc(a.endDoc);
+      const e = Y.createAbsolutePositionFromRelativePosition(Y.decodeRelativePosition(end), endDoc);
+      if (!s || !e) throw new Fault(400, 'Select some text to comment on.');
+      const head = room.doc.getText('body').toString().slice(s.index);
+      const tail = endDoc.getText('body').toString().slice(0, e.index);
+      return { start: new Uint8Array(start), end: new Uint8Array(end), quote: `${head.slice(0, 1000)}\n…\n${tail.slice(-1000)}`, endDoc: a.endDoc };
+    }
     const e = Y.createAbsolutePositionFromRelativePosition(Y.decodeRelativePosition(end), room.doc);
     if (!s || !e || e.index <= s.index) throw new Fault(400, 'Select some text to comment on.');
     const quote = room.doc.getText('body').toString().slice(s.index, e.index);
     return { start: new Uint8Array(start), end: new Uint8Array(end), quote };
+  }
+
+  /** A navigation tree changed: every open page in it refetches it. */
+  private broadcastTree(tree: string) {
+    let members: string[];
+    try { members = this.app.trees.members(tree); } catch { return; }
+    for (const id of members) {
+      const room = this.rooms.get(id);
+      if (!room) continue;
+      for (const c of room.conns.values()) this.sendTo(c, { type: 'tree', tree });
+    }
   }
 
   threads(docId: string, includeResolved = true) {
@@ -477,7 +502,7 @@ export class Realtime {
     const d = this.app.docs.get(docId);
     if (!d) return null;
     const P = this.app.principals;
-    return { id: d.id, title: d.title, owner: { sub: d.ownerSub, label: P.label(d.ownerSub) }, generalAccess: d.generalAccess, publicLink: this.app.docs.hasPublicLink(docId), rev: d.rev, updatedAt: d.updatedAt };
+    return { id: d.id, title: d.title, section: d.title === '', type: d.type, owner: { sub: d.ownerSub, label: P.label(d.ownerSub) }, generalAccess: d.generalAccess, publicLink: this.app.docs.hasPublicLink(docId), rev: d.rev, updatedAt: d.updatedAt };
   }
 
   private broadcastUpdate(docId: string, update: Uint8Array, exceptConn?: string) {

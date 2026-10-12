@@ -9,6 +9,8 @@ import { Comments } from './comments.js';
 import { Media } from './media.js';
 import { Attention } from './attention.js';
 import { History, type HistoryOptions } from './history.js';
+import { Nodes } from './nodes.js';
+import { Trees } from './trees.js';
 import { DevIssuer, JtiCache, publicKeyFromString, verifyAid1, type Identity } from './auth.js';
 import type { Config } from './config.js';
 
@@ -21,6 +23,8 @@ export interface App {
   media: Media;
   attention: Attention;
   history: History;
+  nodes: Nodes;
+  trees: Trees;
   issuers: Map<string, KeyObject>;
   devIssuer: DevIssuer | null;
   jti: JtiCache;
@@ -37,6 +41,9 @@ export function createApp(config: Config, issuers: Map<string, KeyObject>, opts:
   const media = new Media(db, config.dataDir === ':memory:' ? join(process.cwd(), 'data') : config.dataDir);
   const attention = new Attention(db, docs, comments, principals, { log: opts.attentionLog, commentSettleMs: opts.commentSettleMs, suggestSettleMs: opts.suggestSettleMs });
   const history = new History(db, docs, principals, opts.history ?? config.history);
+  const nodes = new Nodes(db, docs);
+  nodes.attachComments(comments);
+  const trees = new Trees(db, docs, nodes);
   let devIssuer: DevIssuer | null = null;
   if (config.devIssuer) {
     devIssuer = new DevIssuer(config.devIssuer, config.dataDir === ':memory:' ? join(process.cwd(), 'data') : config.dataDir);
@@ -57,7 +64,7 @@ export function createApp(config: Config, issuers: Map<string, KeyObject>, opts:
   }, 5 * 60_000);
   maintenance.unref();
   return {
-    config, db, principals, docs, comments, media, attention, history, issuers, devIssuer,
+    config, db, principals, docs, comments, media, attention, history, nodes, trees, issuers, devIssuer,
     jti: new JtiCache(),
     verify: (token: string) => verifyAid1(token, verifierOpts),
     close() { clearInterval(maintenance); history.shutdown(); attention.close(); db.close(); },

@@ -383,7 +383,7 @@ export function createHttp(app: App) {
           createdBy: { sub: l.createdBy, label: P.label(l.createdBy) }, createdAt: l.createdAt, expiresAt: l.expiresAt, holders: l.holders, active: l.active });
         const docView = (id: string) => {
           const d = app.docs.get(id)!;
-          return { id: d.id, title: d.title, owner: { sub: d.ownerSub, label: P.label(d.ownerSub), kind: P.get(d.ownerSub)?.kind, color: P.get(d.ownerSub)?.color }, generalAccess: d.generalAccess,
+          return { id: d.id, title: d.title, section: d.title === '', type: d.type, owner: { sub: d.ownerSub, label: P.label(d.ownerSub), kind: P.get(d.ownerSub)?.kind, color: P.get(d.ownerSub)?.color }, generalAccess: d.generalAccess,
             publicLink: app.docs.hasPublicLink(id),
             role: app.docs.role(id, a), rev: d.rev, updatedAt: d.updatedAt, createdAt: d.createdAt, openComments: app.comments.openCount(id), present: realtime.presence(id) };
         };
@@ -393,9 +393,27 @@ export function createHttp(app: App) {
         }
         if (path === '/api/docs' && method === 'POST') {
           const b = await json(req);
-          const d = app.docs.create(a, String(b.title ?? ''), typeof b.content === 'string' ? b.content : '');
+          const d = app.docs.create(a, String(b.title ?? ''), typeof b.content === 'string' ? b.content : '', typeof b.type === 'string' ? b.type : 'markdown');
           send(201, docView(d.id));
           return;
+        }
+        // ---------------------------------------------------------- navigation trees
+        if (path === '/api/trees' && method === 'GET') { send(200, { trees: app.trees.roots(a) }); return; }
+        if (path === '/api/trees' && method === 'POST') { const b = await json(req); send(201, app.trees.create(String(b.root ?? ''), a)); return; }
+        const tr = /^\/api\/trees\/([A-Za-z0-9]+)(\/.*)?$/.exec(path);
+        if (tr) {
+          const root = tr[1], rest = tr[2] ?? '';
+          if (rest === '' && method === 'GET') { send(200, app.trees.view(root, a)); return; }
+          if (rest === '' && method === 'DELETE') { app.trees.drop(root, a); send(200, { ok: true }); return; }
+          if (method === 'POST' && (rest === '/place' || rest === '/unplace' || rest === '/move')) {
+            const b = await json(req);
+            const parent = String(b.parent ?? ''), child = String(b.child ?? '');
+            if (rest === '/place') { const ok = app.trees.place(root, parent, child, a); if (!ok) throw new Fault(409, 'That would place a page inside itself.'); }
+            else if (rest === '/unplace') app.trees.unplace(root, parent, child, a);
+            else app.trees.move(root, parent, child, a, b.dir === -1 || b.dir === 'up' ? -1 : 1);
+            send(200, app.trees.view(root, a));
+            return;
+          }
         }
         const m = /^\/api\/docs\/([A-Za-z0-9]+)(\/.*)?$/.exec(path);
         if (m) {
@@ -409,8 +427,39 @@ export function createHttp(app: App) {
           if (rest === '' && method === 'PATCH') {
             const b = await json(req);
             if (typeof b.title === 'string') app.docs.rename(id, a, b.title);
+            if (typeof b.type === 'string') app.docs.setType(id, a, b.type);
             if (typeof b.generalAccess === 'string') app.docs.setGeneralAccess(id, a, b.generalAccess);
             send(200, docView(id));
+            return;
+          }
+          // ---------------------------------------------------------- nodes: the content tree and structural operations
+          if (rest === '/tree' && method === 'GET') {
+            app.docs.require(id, a, 'viewer');
+            const t = app.nodes.tree(id, a);
+            send(200, { ...t, nodes: t.nodes.map((n) => ({ ...n, role: app.docs.role(n.id, a) })), paths: app.trees.pathsOf(id, a) });
+            return;
+          }
+          if (rest === '/paths' && method === 'GET') { app.docs.require(id, a, 'viewer'); send(200, { paths: app.trees.pathsOf(id, a), root: app.trees.isRoot(id) }); return; }
+          if (rest === '/subpages' && method === 'GET') {
+            app.docs.require(id, a, 'viewer');
+            const tree = url.searchParams.get('tree') ?? '';
+            const ids = tree && app.trees.isRoot(tree) ? app.trees.subpagesNotInline(tree, id).filter((c) => app.docs.role(c, a)) : [];
+            send(200, { subpages: ids.map((c) => { const d = app.docs.get(c)!; return { id: c, title: d.title, type: d.type }; }) });
+            return;
+          }
+          if (rest === '/split' && method === 'POST') {
+            const b = await json(req);
+            const child = app.nodes.split(id, { ...a, via: 'http' }, Number(b.at), { title: typeof b.title === 'string' ? b.title : undefined });
+            send(201, docView(child.id));
+            return;
+          }
+          if (rest === '/merge' && method === 'POST') { const b = await json(req); send(200, app.nodes.merge(id, String(b.child ?? ''), { ...a, via: 'http' })); return; }
+          if (rest === '/mount' && method === 'POST') { const b = await json(req); app.nodes.mount(id, String(b.child ?? ''), { ...a, via: 'http' }, { at: Number.isInteger(b.at) ? b.at : undefined }); send(200, { ok: true }); return; }
+          if (rest === '/unmount' && method === 'POST') { const b = await json(req); send(200, { removed: app.nodes.unmount(id, String(b.child ?? ''), { ...a, via: 'http' }) }); return; }
+          if (rest === '/sections' && method === 'POST') {
+            const b = await json(req);
+            const d = app.nodes.createSection(id, { ...a, via: 'http' }, { content: typeof b.content === 'string' ? b.content : '', title: typeof b.title === 'string' ? b.title : '', type: typeof b.type === 'string' ? b.type : undefined, mount: b.mount !== false });
+            send(201, docView(d.id));
             return;
           }
           if (rest === '' && method === 'DELETE') { app.docs.remove(id, a); send(200, { ok: true }); return; }
@@ -496,7 +545,8 @@ export function createHttp(app: App) {
           }
           if (rest === '/export.md' && method === 'GET') {
             const { doc } = app.docs.require(id, a, 'viewer');
-            send(200, app.docs.text(id), 'text/markdown; charset=utf-8', { 'Content-Disposition': `attachment; filename="${doc.title.replace(/[^\w .-]+/g, '_').slice(0, 80)}.md"` });
+            // The whole thing: every mounted section inlined.
+            send(200, app.nodes.flatten(id, a), 'text/markdown; charset=utf-8', { 'Content-Disposition': `attachment; filename="${(doc.title || doc.id).replace(/[^\w .-]+/g, '_').slice(0, 80)}.md"` });
             return;
           }
         }
