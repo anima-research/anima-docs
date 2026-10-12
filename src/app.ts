@@ -11,6 +11,7 @@ import { Attention } from './attention.js';
 import { History, type HistoryOptions } from './history.js';
 import { Nodes } from './nodes.js';
 import { Trees } from './trees.js';
+import { Wiki } from './wiki.js';
 import { DevIssuer, JtiCache, publicKeyFromString, verifyAid1, type Identity } from './auth.js';
 import type { Config } from './config.js';
 
@@ -25,6 +26,7 @@ export interface App {
   history: History;
   nodes: Nodes;
   trees: Trees;
+  wiki: Wiki;
   issuers: Map<string, KeyObject>;
   devIssuer: DevIssuer | null;
   jti: JtiCache;
@@ -44,6 +46,8 @@ export function createApp(config: Config, issuers: Map<string, KeyObject>, opts:
   const nodes = new Nodes(db, docs);
   nodes.attachComments(comments);
   const trees = new Trees(db, docs, nodes);
+  const partial = { config, db, principals, docs, comments, media, attention, history, nodes, trees } as unknown as App;
+  const wiki = new Wiki(partial);
   let devIssuer: DevIssuer | null = null;
   if (config.devIssuer) {
     devIssuer = new DevIssuer(config.devIssuer, config.dataDir === ':memory:' ? join(process.cwd(), 'data') : config.dataDir);
@@ -64,7 +68,7 @@ export function createApp(config: Config, issuers: Map<string, KeyObject>, opts:
   }, 5 * 60_000);
   maintenance.unref();
   return {
-    config, db, principals, docs, comments, media, attention, history, nodes, trees, issuers, devIssuer,
+    config, db, principals, docs, comments, media, attention, history, nodes, trees, wiki, issuers, devIssuer,
     jti: new JtiCache(),
     verify: (token: string) => verifyAid1(token, verifierOpts),
     close() { clearInterval(maintenance); history.shutdown(); attention.close(); db.close(); },

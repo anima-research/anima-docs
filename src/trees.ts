@@ -19,10 +19,18 @@ import type { Nodes } from './nodes.js';
 import type { Actor } from './principals.js';
 
 export interface Placement { tree: string; parent: string; child: string; ord: number; derived: boolean }
+
+export type Published = 'off' | 'public' | 'members';
+export interface Theme { name?: string; emoji?: string; accent?: string; footer?: string; tagline?: string }
+export interface PublishSettings { published: Published; slug: string | null; domain: string | null; theme: Theme }
+const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
+const DOMAIN_RE = /^(?=.{4,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/;
+export const slugify = (s: string) => s.toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64) || 'page';
 export interface TreeView {
   root: string;
   title: string;
   role: Role;
+  publish?: PublishSettings;
   nodes: { id: string; title: string; section: boolean; type: string; role: Role }[];
   placements: Placement[];
 }
@@ -40,6 +48,72 @@ export class Trees extends EventEmitter {
       if (e.kind === 'deleted') this.onDeleted(e.docId);
     });
   }
+
+  // ------------------------------------------------------------------ publishing
+
+  publishSettings(root: string): PublishSettings | null {
+    const r = this.db.prepare('SELECT published, slug, domain, theme FROM trees WHERE root_id = ?').get(root) as { published: Published; slug: string | null; domain: string | null; theme: string } | undefined;
+    if (!r) return null;
+    let theme: Theme = {};
+    try { theme = JSON.parse(r.theme || '{}'); } catch { theme = {}; }
+    return { published: r.published ?? 'off', slug: r.slug, domain: r.domain, theme };
+  }
+
+  /** Change how a tree is published (the root's owner). */
+  setPublish(root: string, actor: Actor, p: Partial<PublishSettings>): PublishSettings {
+    this.docs.require(root, actor, 'owner');
+    if (!this.isRoot(root)) throw new Fault(404, 'No such tree.');
+    const cur = this.publishSettings(root)!;
+    const next: PublishSettings = { ...cur };
+    if (p.published !== undefined) {
+      if (!['off', 'public', 'members'].includes(p.published)) throw new Fault(400, 'published must be off, public or members.');
+      next.published = p.published;
+    }
+    if (p.slug !== undefined) {
+      const slug = p.slug === null || p.slug === '' ? null : String(p.slug).trim().toLowerCase();
+      if (slug !== null && !SLUG_RE.test(slug)) throw new Fault(400, 'A slug is lowercase letters, digits and hyphens (up to 64).');
+      if (slug && (this.db.prepare('SELECT root_id FROM trees WHERE slug = ? AND root_id != ?').get(slug, root))) throw new Fault(409, `The address “${slug}” is taken by another tree.`);
+      next.slug = slug;
+    }
+    if (p.domain !== undefined) {
+      const domain = p.domain === null || p.domain === '' ? null : String(p.domain).trim().toLowerCase();
+      if (domain !== null && !DOMAIN_RE.test(domain)) throw new Fault(400, 'That does not look like a domain name.');
+      if (domain && this.db.prepare('SELECT root_id FROM trees WHERE domain = ? AND root_id != ?').get(domain, root)) throw new Fault(409, 'That domain is used by another tree.');
+      next.domain = domain;
+    }
+    if (p.theme !== undefined) {
+      const t = p.theme ?? {};
+      const clean: Theme = {};
+      for (const k of ['name', 'emoji', 'accent', 'footer', 'tagline'] as const) {
+        const v = (t as Record<string, unknown>)[k];
+        if (typeof v === 'string' && v.trim()) clean[k] = v.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, k === 'footer' ? 400 : 120);
+      }
+      if (clean.accent && !/^#[0-9a-f]{6}$/i.test(clean.accent)) throw new Fault(400, 'accent must be a hex colour like #2459e0.');
+      next.theme = clean;
+    }
+    if (next.published !== 'off' && !next.slug) next.slug = this.freeSlug(slugify(this.docs.get(root)?.title ?? root), root);
+    this.db.prepare('UPDATE trees SET published = ?, slug = ?, domain = ?, theme = ? WHERE root_id = ?').run(next.published, next.slug, next.domain, JSON.stringify(next.theme), root);
+    this.changed(root);
+    this.docs.emit('share', { docId: root, sub: null, role: `wiki:${next.published}`, by: actor.sub });
+    return next;
+  }
+
+  private freeSlug(base: string, root: string): string {
+    for (let i = 0; i < 100; i++) {
+      const s = i ? `${base}-${i + 1}` : base;
+      if (!this.db.prepare('SELECT 1 FROM trees WHERE slug = ? AND root_id != ?').get(s, root)) return s;
+    }
+    return `${base}-${root.toLowerCase()}`;
+  }
+
+  rootBySlug(slug: string): string | null {
+    return (this.db.prepare('SELECT root_id FROM trees WHERE slug = ?').get(slug) as { root_id: string } | undefined)?.root_id ?? null;
+  }
+  rootByDomain(host: string): string | null {
+    return (this.db.prepare('SELECT root_id FROM trees WHERE domain = ?').get(host.toLowerCase()) as { root_id: string } | undefined)?.root_id ?? null;
+  }
+  /** Hosts that serve a published wiki (the canonical-host redirect leaves them alone). */
+  isWikiDomain(host: string): boolean { return !!this.db.prepare("SELECT 1 FROM trees WHERE domain = ? AND published = 'public'").get(host.toLowerCase()); }
 
   // ------------------------------------------------------------------ reads
 
@@ -119,7 +193,7 @@ export class Trees extends EventEmitter {
       }
     };
     walk(root, 0);
-    return { root, title: doc.title, role, nodes, placements };
+    return { root, title: doc.title, role, nodes, placements, publish: this.publishSettings(root) ?? undefined };
   }
 
   /** Placed children of `node` in `tree` that are not mounted inline in its body (shown as a Subpages footer). */

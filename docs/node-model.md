@@ -310,6 +310,20 @@ Deviations from the plan above, made while building:
 - The **title stays `NOT NULL`**; `''` marks a section. Sections are owned by the owner of the document they were created in.
 - `read_document` shows mounted content inline with delimiter lines by default; `sections: "markers"` shows a node's own text.
 
+## 19. Wikis (built)
+
+A published tree is served as a wiki: `/w/<slug>/<page-slug>` on the docs
+origin, or at `/` of a custom domain (the server routes by `Host`; those hosts
+are exempt from the canonical-host redirect). Pages are server-rendered from
+the live nodes (markdown-it, no HTML passthrough), cached by an ETag over the
+revs of every node involved. The left nav is the placement tree, the article
+is the page with inline mounts in place, and the right column holds **asides**:
+nodes mounted with `{{node:<id>|aside}}` (a mount role, kept in the `mounts`
+index), rendered as panels, plus automatic Contents, In-this-section and
+Related (backlink) panels. Publish settings live on `trees` (`published`
+off/public/members, `slug`, `domain`, `theme` JSON). Media of pages in a public
+tree is readable without a session. Every page links back to the editor.
+
 ## Prototype
 
 `docs-tree-proto` (local, not in this repo): CodeMirror 6 over a tree of Yjs

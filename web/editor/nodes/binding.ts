@@ -284,7 +284,7 @@ export class Binding {
 class Band extends WidgetType {
   constructor(readonly m: Mount, readonly label: NodeLabel | undefined, readonly crumbs: string) { super(); }
   eq(o: Band) {
-    return o.m.key === this.m.key && o.m.from === this.m.from && o.m.collapsed === this.m.collapsed && o.m.loaded === this.m.loaded && o.crumbs === this.crumbs
+    return o.m.key === this.m.key && o.m.from === this.m.from && o.m.collapsed === this.m.collapsed && o.m.loaded === this.m.loaded && o.crumbs === this.crumbs && o.m.role === this.m.role
       && o.label?.title === this.label?.title && o.label?.section === this.label?.section && o.label?.first === this.label?.first && o.label?.lines === this.label?.lines;
   }
   toDOM() {
@@ -315,7 +315,8 @@ class Band extends WidgetType {
     name.addEventListener('click', (e) => { e.stopPropagation(); fire('node-open', this.m.child); });
     const meta = document.createElement('span');
     meta.className = 'band-meta';
-    meta.textContent = this.label && this.label.type !== 'markdown' ? this.label.type : '';
+    meta.textContent = [this.m.role === 'aside' ? 'aside · sidebar panel in the wiki' : '', this.label && this.label.type !== 'markdown' ? this.label.type : ''].filter(Boolean).join(' · ');
+    if (this.m.role === 'aside') el.classList.add('is-aside');
     el.append(tri, crumbs, name, meta);
     if (this.label?.section) {
       const nm = document.createElement('button');

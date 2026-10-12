@@ -1,10 +1,10 @@
 // The left navigation: trees (Notion-style page trees), the current tree's
 // pages, and this document's outline of sections.
 
-import { api, atLeast, type Role, type TreeRoot, type TreeView } from '../lib/api';
+import { api, atLeast, type PublishSettings, type Role, type TreeRoot, type TreeView } from '../lib/api';
 import { h } from '../lib/dom';
 import { icon } from '../lib/icons';
-import { confirmDialog, errorMessage, promptDialog, toast } from '../lib/ui';
+import { confirmDialog, errorMessage, openDialog, promptDialog, toast } from '../lib/ui';
 import type { Layout } from './nodes/layout';
 
 export interface NavDeps {
@@ -25,6 +25,7 @@ export class NavPanel {
   private treesEl = h('div.nav-trees');
   private pagesEl = h('div.nav-pages');
   private outlineEl = h('div.nav-outline');
+  private wikiEl = h('div.nav-wiki');
   private roots: TreeRoot[] = [];
   private view: TreeView | null = null;
   private layout: Layout | null = null;
@@ -36,7 +37,7 @@ export class NavPanel {
     this.tree = deps.tree;
     this.el = h('nav.doc-nav', { 'aria-label': 'Pages' },
       h('div.nav-section', null, h('div.nav-head', null, 'Trees'), this.treesEl),
-      h('div.nav-section.nav-section-pages', null, this.pagesEl),
+      h('div.nav-section.nav-section-pages', null, this.wikiEl, this.pagesEl),
       h('div.nav-section', null, h('div.nav-head', null, 'Sections in this page'), this.outlineEl));
     this.loadCollapsed();
     void this.refresh();
@@ -127,8 +128,61 @@ export class NavPanel {
     } catch (e) { toast(errorMessage(e), { kind: 'error' }); }
   }
 
+  private renderWiki() {
+    const v = this.view;
+    if (!v || !v.publish) { this.wikiEl.replaceChildren(); return; }
+    const ps = v.publish;
+    const owner = v.role === 'owner';
+    const live = ps.published !== 'off' && v.url;
+    this.wikiEl.replaceChildren(h('div.nav-wiki-row', null,
+      live ? h('a.nav-wiki-link', { href: v.url!, target: '_blank', rel: 'noopener' }, icon('globe', 14), ps.published === 'public' ? 'View wiki' : 'View wiki (members)') : h('span.meta', null, owner ? 'Not published' : ''),
+      owner ? h('button.nav-act.wide', { type: 'button', 'data-tip': 'Publish this tree as a wiki', onclick: () => void this.publishDialog() }, live ? 'Settings' : 'Publish…') : null));
+  }
+
+  private async publishDialog() {
+    const v = this.view;
+    if (!v || !v.publish) return;
+    const ps = v.publish;
+    const field = (label: string, input: HTMLElement, help?: string) => h('label.field', null, h('span.field-label', null, label), input, help ? h('span.field-help', null, help) : null);
+    const vis = (value: PublishSettings['published'], label: string, help: string) => h('label.radio', null, h('input', { type: 'radio', name: 'pub', value, checked: ps.published === value }), h('span', null, h('strong', null, label), ' ', h('span.meta', null, help)));
+    const slug = h('input.input', { type: 'text', value: ps.slug ?? '', placeholder: 'address, e.g. handbook', pattern: '[a-z0-9-]*', maxlength: '64' });
+    const name = h('input.input', { type: 'text', value: ps.theme.name ?? '', placeholder: v.title, maxlength: '120' });
+    const emoji = h('input.input.sm', { type: 'text', value: ps.theme.emoji ?? '', placeholder: '📘', maxlength: '8', style: 'width:72px' });
+    const tagline = h('input.input', { type: 'text', value: ps.theme.tagline ?? '', placeholder: 'A short line under the name', maxlength: '120' });
+    const accent = h('input', { type: 'color', value: ps.theme.accent ?? '#2459e0', 'aria-label': 'Accent colour' });
+    const footer = h('input.input', { type: 'text', value: ps.theme.footer ?? '', placeholder: 'Footer text (licence, contact…)', maxlength: '400' });
+    const domain = h('input.input', { type: 'text', value: ps.domain ?? '', placeholder: 'wiki.example.org (optional)', maxlength: '253' });
+    const err = h('div.field-error', { role: 'alert' });
+    const urlLine = h('p.meta', null, v.url ? h('span', null, 'Live at ', h('a', { href: v.url, target: '_blank', rel: 'noopener' }, v.url)) : 'Published trees get an address under /w/<address>/; a custom domain serves the wiki at its root.');
+    const body = h('div.form-stack', null,
+      h('div.radio-stack', null,
+        vis('off', 'Not published', 'only the editor'),
+        vis('members', 'Members', 'anyone signed in with Archipelago can read'),
+        vis('public', 'Public', 'anyone on the internet can read; the wiki can have its own domain')),
+      field('Address', slug, 'Lowercase letters, digits and hyphens.'),
+      h('div.row-gap', null, field('Emoji', emoji), field('Name', name)),
+      field('Tagline', tagline),
+      h('div.row-gap', null, field('Accent', accent), field('Footer', footer)),
+      field('Custom domain', domain, 'Point a CNAME at the service first; then set it here. Public wikis only.'),
+      urlLine, err);
+    const save = async () => {
+      const published = (body.querySelector('input[name=pub]:checked') as HTMLInputElement).value as PublishSettings['published'];
+      try {
+        const r = await api.publishTree(v.root, {
+          published, slug: slug.value.trim() || null, domain: domain.value.trim() || null,
+          theme: { name: name.value, emoji: emoji.value, tagline: tagline.value, accent: accent.value, footer: footer.value },
+        });
+        d.close();
+        toast(r.url && published !== 'off' ? h('span', null, 'Published: ', h('a', { href: r.url, target: '_blank', rel: 'noopener' }, r.url)) : 'Saved.', { kind: 'success', timeout: 8000 });
+        await this.refresh();
+      } catch (e) { err.textContent = errorMessage(e); }
+    };
+    const d = openDialog({ title: 'Publish as a wiki', body, footer: [h('button.btn.ghost', { type: 'button', onclick: () => d.close() }, 'Cancel'), h('button.btn.primary', { type: 'button', onclick: () => void save() }, 'Save')] });
+  }
+
   private renderPages() {
     const v = this.view;
+    this.renderWiki();
     if (!v) {
       this.pagesEl.replaceChildren(h('div.nav-note', null, this.roots.length ? 'Pick a tree above to see its pages.' : 'No trees yet. A tree is a document whose subpages show here, Notion-style.'));
       return;

@@ -307,7 +307,7 @@ try {
     const t = await viewText(alice);
     await setCursor(alice, t.length);
     await alice.keyboard.type('\n{{Pla');
-    await alice.locator('.cm-tooltip-autocomplete li', { hasText: 'Plan' }).waitFor({ timeout: 8000 });
+    await alice.locator('.cm-tooltip-autocomplete li', { hasText: 'Plan' }).first().waitFor({ timeout: 8000 });
     await sleep(200); // CodeMirror ignores Enter within 75 ms of the list appearing
     await alice.keyboard.press('Enter');
     await alice.locator('.editor-page .node-band .band-name', { hasText: 'Plan' }).waitFor({ timeout: 8000 });
@@ -319,7 +319,7 @@ try {
     const t2 = await viewText(alice);
     await setCursor(alice, t2.indexOf('Intro'));
     await alice.keyboard.type('See [[Pla');
-    await alice.locator('.cm-tooltip-autocomplete li', { hasText: 'Plan' }).waitFor({ timeout: 8000 });
+    await alice.locator('.cm-tooltip-autocomplete li', { hasText: 'Plan' }).first().waitFor({ timeout: 8000 });
     await sleep(200);
     await alice.keyboard.press('Enter');
     await alice.waitForFunction((id) => window.__anima.view.state.doc.toString().includes(`[Plan](/d/${id})`), plan.id, { timeout: 8000 });
@@ -335,6 +335,42 @@ try {
     await alice.locator('.doc-title').press('Enter');
     await alice.locator('.doc-nav .nav-pages .nav-row', { hasText: 'Plan B' }).waitFor({ timeout: 8000 });
     await bob.locator('.doc-nav .nav-pages .nav-row', { hasText: 'Plan B' }).waitFor({ timeout: 8000 });
+  });
+
+  await step('publish the tree as a public wiki: a stranger reads it, with the aside as an infobox and an Edit link back', async () => {
+    // An aside: a Facts node mounted with |aside in the paper.
+    const facts = (await api(alice, 'POST', '/api/docs', { title: 'Facts', content: '| Started | 2026 |\n|---|---|\n| Status | draft |\n' })).json;
+    await api(alice, 'POST', `/api/docs/${docId}/mount`, { child: facts.id, at: 0 });
+    await api(alice, 'POST', '/api/operations/edit_document', { document: docId, edits: [{ old_text: `{{node:${facts.id}}}`, new_text: `{{node:${facts.id}|aside}}` }] });
+    await openDoc(alice, docId, docId);
+    await alice.locator('.editor-page .node-band.is-aside').waitFor({ timeout: 8000 });
+    // Publish from the nav.
+    await alice.locator('.doc-nav .nav-wiki button', { hasText: 'Publish' }).click();
+    const dlg = alice.locator('dialog.dialog');
+    await dlg.waitFor();
+    await dlg.locator('input[name=pub][value=public]').check();
+    await dlg.locator('input[placeholder^="address"]').fill('paper-wiki');
+    await dlg.locator('input[placeholder="📘"]').fill('📘');
+    await dlg.locator('input[placeholder^="A short line"]').fill('Notes on folding trees');
+    await dlg.locator('button.btn.primary', { hasText: 'Save' }).click();
+    await alice.locator('.doc-nav .nav-wiki a', { hasText: 'View wiki' }).waitFor({ timeout: 8000 });
+    // A stranger.
+    const anon = await browser.newContext({ viewport });
+    const visitor = await anon.newPage();
+    const r = await visitor.goto(`${ORIGIN}/w/paper-wiki/`);
+    assert(r.status() === 200, `wiki status ${r.status()}`);
+    await visitor.locator('.asides.desktop .panel.infobox', { hasText: 'Facts' }).waitFor();
+    assert(await visitor.locator('.asides.desktop .panel.infobox td', { hasText: 'draft' }).count() === 1, 'infobox table');
+    assert(await visitor.locator('.side .nav-list a', { hasText: 'Plan B' }).count() === 1, 'nav lists the subpage');
+    assert(!(await visitor.locator('body').textContent()).includes('{{node:'), 'markers leaked');
+    const edit = await visitor.locator('a.edit').getAttribute('href');
+    assert(edit.startsWith(`${ORIGIN}/d/${docId}`), `edit link: ${edit}`);
+    await visitor.screenshot({ path: join(SHOTS, 'wiki.png'), fullPage: true });
+    // The subpage, via the nav.
+    await visitor.locator('.side .nav-list a', { hasText: 'Plan B' }).click();
+    await visitor.waitForURL(/\/w\/paper-wiki\/plan-b$/);
+    await visitor.locator('h1', { hasText: 'Plan B' }).waitFor();
+    await anon.close();
   });
 
   await step('home lists the tree', async () => {

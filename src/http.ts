@@ -178,6 +178,36 @@ export function createHttp(app: App) {
   // Only an https origin is canonical (local development answers on any host).
   const canonicalHost = app.config.origin.startsWith('https:') ? new URL(app.config.origin).host.toLowerCase() : null;
 
+  // ---------------------------------------------------------------- wiki pages (public, server-rendered)
+
+  async function serveWiki(req: IncomingMessage, res: ServerResponse, root: string, base: string, rest: string, url: URL, absoluteBase: string) {
+    const ps = app.trees.publishSettings(root);
+    if (!ps || !app.trees.isRoot(root)) throw new Fault(404, 'No such wiki.');
+    const session = webSession(req);
+    const actor = session?.actor ?? null;
+    const access = app.wiki.access(root, actor, ps);
+    const html = (status: number, body: string, extra: Record<string, string> = {}) => {
+      res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': ps.published === 'public' ? 'public, max-age=60' : 'private, no-store', ...extra });
+      res.end(req.method === 'HEAD' ? undefined : body);
+    };
+    if (access === 'none') throw new Fault(404, 'No such wiki.');
+    if (access === 'signin') {
+      html(401, `<!doctype html><meta charset="utf-8"><title>Sign in</title><body style="font:16px system-ui;padding:40px;max-width:560px;margin:auto"><h1>Members only</h1><p>This wiki is for signed-in members. <a href="${app.config.origin}/auth/login">Sign in</a>, then come back to this page.</p></body>`);
+      return;
+    }
+    if (rest === '/search') { html(200, app.wiki.searchHtml(root, base, url.searchParams.get('q') ?? '')); return; }
+    if (rest === '/sitemap.xml') { res.writeHead(200, { 'Content-Type': 'application/xml; charset=utf-8', 'Cache-Control': 'public, max-age=300' }); res.end(app.wiki.sitemap(root, absoluteBase)); return; }
+    if (rest === '') { res.writeHead(302, { Location: `${base}/` }); res.end(); return; }
+    const slug = rest.replace(/^\//, '').replace(/\/$/, '');
+    if (!/^[a-z0-9-]{0,80}$/.test(slug)) throw new Fault(404, 'No such page.');
+    const page = app.wiki.pageBySlug(root, slug);
+    if (!page) throw new Fault(404, 'No such page.');
+    const canEdit = !!actor && atLeast(app.docs.role(page.id, actor), 'editor');
+    const out = app.wiki.pageHtml(root, page, base, { canEdit });
+    if (req.headers['if-none-match'] === out.etag) { res.writeHead(304, { ETag: out.etag }); res.end(); return; }
+    html(200, out.html, { ETag: out.etag, Vary: 'Cookie' });
+  }
+
   // ---------------------------------------------------------------- server
 
   const server = createServer(async (req, res) => {
@@ -200,6 +230,13 @@ export function createHttp(app: App) {
       const method = req.method ?? 'GET';
 
       if (path === '/health') { app.db.prepare('SELECT 1').get(); send(200, { ok: true }); return; }
+      const wm = /^\/w\/([a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?)(\/.*)?$/.exec(path);
+      if (wm && (method === 'GET' || method === 'HEAD')) {
+        const root = app.trees.rootBySlug(wm[1]);
+        if (!root) throw new Fault(404, 'No such wiki.');
+        await serveWiki(req, res, root, `/w/${wm[1]}`, wm[2] ?? '/', url, `${app.config.origin}/w/${wm[1]}`);
+        return;
+      }
       // ---------------------------------------------------------- database copies (keyed; for a staging instance)
       if (path === '/api/admin/export' && method === 'GET') {
         const key = app.config.exportKey;
@@ -227,7 +264,14 @@ export function createHttp(app: App) {
       }
       // One public address: page and API reads arriving on another host (the platform's
       // default domain, say) are sent to the origin, so old links keep working.
-      if (canonicalHost && (method === 'GET' || method === 'HEAD') && String(req.headers.host ?? '').toLowerCase() !== canonicalHost && !path.startsWith('/debug/')) {
+      const reqHost = String(req.headers.host ?? '').toLowerCase().split(':')[0];
+      // A published wiki on its own domain is served here, as that domain.
+      const wikiDomainRoot = canonicalHost && reqHost !== canonicalHost ? app.trees.rootByDomain(reqHost) : null;
+      if (wikiDomainRoot && (method === 'GET' || method === 'HEAD') && !path.startsWith('/media/')) {
+        await serveWiki(req, res, wikiDomainRoot, '', path, url, `https://${reqHost}`);
+        return;
+      }
+      if (canonicalHost && (method === 'GET' || method === 'HEAD') && String(req.headers.host ?? '').toLowerCase() !== canonicalHost && !path.startsWith('/debug/') && !wikiDomainRoot) {
         res.writeHead(301, { Location: `${app.config.origin}${req.url ?? '/'}`, 'Cache-Control': 'no-store' });
         res.end();
         return;
@@ -386,8 +430,8 @@ export function createHttp(app: App) {
 
       // ------------------------------------------------ media
       if (path.startsWith('/media/') && (method === 'GET' || method === 'HEAD')) {
-        if (!actor) throw new Fault(401, 'Sign in to view images.');
         const id = Media.idFrom(path);
+        if (!actor && !(id && app.wiki.mediaPublic(id))) throw new Fault(401, 'Sign in to view images.');
         const f = id ? app.media.read(id) : null;
         if (!f) throw new Fault(404, 'Not found.');
         res.writeHead(200, { 'Content-Type': f.info.mime, 'Content-Length': f.info.size, 'Cache-Control': 'private, max-age=31536000, immutable' });
@@ -434,8 +478,14 @@ export function createHttp(app: App) {
         const tr = /^\/api\/trees\/([A-Za-z0-9]+)(\/.*)?$/.exec(path);
         if (tr) {
           const root = tr[1], rest = tr[2] ?? '';
-          if (rest === '' && method === 'GET') { send(200, app.trees.view(root, a)); return; }
+          if (rest === '' && method === 'GET') { send(200, { ...app.trees.view(root, a), url: app.wiki.url(root) }); return; }
           if (rest === '' && method === 'DELETE') { app.trees.drop(root, a); send(200, { ok: true }); return; }
+          if (rest === '/publish' && method === 'PATCH') {
+            const b = await json(req);
+            const ps = app.trees.setPublish(root, a, { published: b.published, slug: b.slug, domain: b.domain, theme: b.theme });
+            send(200, { ...ps, url: app.wiki.url(root) });
+            return;
+          }
           if (method === 'POST' && (rest === '/place' || rest === '/unplace' || rest === '/move')) {
             const b = await json(req);
             const parent = String(b.parent ?? ''), child = String(b.child ?? '');

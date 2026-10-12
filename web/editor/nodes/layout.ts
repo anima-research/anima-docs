@@ -10,8 +10,10 @@
 //
 // A collapsed or not-yet-loaded mount contributes nothing but its band.
 
-export const MARKER_RE = /^\{\{node:([A-Za-z0-9]+)\}\}[ \t]*$/;
-export const marker = (id: string) => `{{node:${id}}}`;
+/** `{{node:<id>}}` mounts inline; `{{node:<id>|aside}}` mounts as a sidebar panel in the wiki (inline in the editor, marked). */
+export const MARKER_RE = /^\{\{node:([A-Za-z0-9]+)(?:\|(aside))?\}\}[ \t]*$/;
+export type MountRole = 'inline' | 'aside';
+export const marker = (id: string, role: MountRole = 'inline') => (role === 'aside' ? `{{node:${id}|aside}}` : `{{node:${id}}}`);
 
 export interface NodeText { text: string; title: string; type: string; loaded: boolean; readable: boolean }
 export type TextSource = (id: string) => NodeText | undefined;
@@ -36,6 +38,7 @@ export interface Mount {
   /** Content left out: collapsed by the viewer, or not loaded yet. */
   collapsed: boolean;
   loaded: boolean;
+  role: MountRole;
 }
 
 export interface Layout { root: string; items: Item[]; mounts: Mount[]; length: number; text: string }
@@ -51,17 +54,17 @@ export function flatten(root: string, src: TextSource, isCollapsed: (key: string
     const n = src(id);
     if (!n) return;
     const text = n.text;
-    const lines: { from: number; to: number; mount: string | null }[] = [];
+    const lines: { from: number; to: number; mount: string | null; role: MountRole }[] = [];
     let at = 0;
     for (;;) {
       const i = text.indexOf('\n', at);
       const to = i < 0 ? text.length : i;
-      let mount: string | null = null;
-      if (to - at >= 9 && to - at <= 60) {
+      let mount: string | null = null, role: MountRole = 'inline';
+      if (to - at >= 9 && to - at <= 66) {
         const m = MARKER_RE.exec(text.slice(at, to));
-        if (m && !path.has(m[1]) && m[1] !== id && depth < 12) { const c = src(m[1]); if (c && c.readable) mount = m[1]; }
+        if (m && !path.has(m[1]) && m[1] !== id && depth < 12) { const c = src(m[1]); if (c && c.readable) { mount = m[1]; role = m[2] === 'aside' ? 'aside' : 'inline'; } }
       }
-      lines.push({ from: at, to, mount });
+      lines.push({ from: at, to, mount, role });
       if (i < 0) break;
       at = i + 1;
     }
@@ -86,7 +89,7 @@ export function flatten(root: string, src: TextSource, isCollapsed: (key: string
         const child = src(L.mount)!;
         const collapsed = isCollapsed(key) || !child.loaded;
         if (!collapsed) { const next = new Set(path); next.add(id); walk(L.mount, depth + 1, next); }
-        mounts.push({ parent: id, child: L.mount, key, depth: depth + 1, from, to: pos, markerFrom: L.from, markerTo: L.to, collapsed, loaded: child.loaded });
+        mounts.push({ parent: id, child: L.mount, key, depth: depth + 1, from, to: pos, markerFrom: L.from, markerTo: L.to, collapsed, loaded: child.loaded, role: L.role });
       } else if (!seg) seg = { tFrom: L.from, tTo: L.to };
       else seg.tTo = L.to;
       if (i < lines.length - 1) {

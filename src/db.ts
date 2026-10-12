@@ -6,7 +6,7 @@ import { dirname } from 'node:path';
 
 export type DB = Database.Database;
 
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 
 export function openDatabase(file: string): DB {
   if (file !== ':memory:') mkdirSync(dirname(file), { recursive: true });
@@ -369,6 +369,22 @@ export function openDatabase(file: string): DB {
           PRIMARY KEY (tree_id, parent_id, child_id)
         );
       `);
+      db.pragma('user_version = 6');
+    })();
+  }
+  if ((db.pragma('user_version', { simple: true }) as number) < 7) {
+    // v7: wikis. A tree can be published (public or members-only) under a slug
+    // and an optional custom domain, with a theme; a mount may be an aside
+    // (a sidebar panel in the wiki).
+    db.transaction(() => {
+      const t = new Set((db.pragma('table_info(trees)') as { name: string }[]).map((c) => c.name));
+      if (!t.has('published')) db.exec("ALTER TABLE trees ADD COLUMN published TEXT NOT NULL DEFAULT 'off' CHECK (published IN ('off','public','members'))");
+      if (!t.has('slug')) db.exec('ALTER TABLE trees ADD COLUMN slug TEXT');
+      if (!t.has('domain')) db.exec('ALTER TABLE trees ADD COLUMN domain TEXT');
+      if (!t.has('theme')) db.exec("ALTER TABLE trees ADD COLUMN theme TEXT NOT NULL DEFAULT '{}'");
+      db.exec('CREATE UNIQUE INDEX IF NOT EXISTS trees_slug ON trees(slug); CREATE UNIQUE INDEX IF NOT EXISTS trees_domain ON trees(domain);');
+      const m = new Set((db.pragma('table_info(mounts)') as { name: string }[]).map((c) => c.name));
+      if (!m.has('role')) db.exec("ALTER TABLE mounts ADD COLUMN role TEXT NOT NULL DEFAULT 'inline'");
       db.pragma(`user_version = ${SCHEMA_VERSION}`);
     })();
   }

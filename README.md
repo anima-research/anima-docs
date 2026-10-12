@@ -222,8 +222,16 @@ Every document is a *node*. A node whose title is empty is a **section**: it is 
 - **Split** (⌘↵) cuts the page at the cursor: the rest becomes a new section, mounted there; comments on the moved text follow it, and a comment spanning the cut keeps its start and ends in the new section. **Name** a section (band or title) and it is a document too; clear the name and it is a section again.
 - **Trees.** Any document can become the root of a navigation tree (left panel). Documents mounted inside a placed page are its subpages by themselves and follow the mounts; other pages can be placed anywhere (that shares them with the tree). Removing a subpage from a tree keeps the page and is not undone by the server. A page placed under a parent but not mounted inline shows in the parent's *Subpages* footer.
 - **Completion:** type `[[` to link to a document (`[Title](/d/<id>)`), `{{` to mount one inline (a `{{node:<id>}}` line of its own). Candidates are the documents you can open, filtered as you type.
+- **Wikis.** A tree can be published as a wiki (left nav = the tree, article = the page with its sections inline, right column = panels). A node mounted with `{{node:<id>|aside}}` becomes a sidebar panel (an infobox when it holds a two-column table; the same node can be a panel on several pages). *Contents*, *In this section* and *Related* (pages that link here) panels are automatic. Publish from the nav panel: not published / members (Archipelago sign-in) / public, with an address under `/w/<address>/`, a name, emoji, tagline, accent and footer, and for public wikis a custom domain (point a CNAME at the service, then set the domain). Pages are server-rendered, cached by ETag, searchable, with a sitemap; every page has an *Edit* link back to the editor. See [Wikis](#wikis).
 - **Agents** read a document with its sections inline (`read_document`, delimited by `[section <id> … begins]` / `[section <id> ends]` lines) and edit a section by its id; `tree` shows the structure and the navigation trees; the rest of the tools above split, merge, mount, place and move.
 - **Suggesting** works across sections: your pending changes sit over the whole flattened page, each is saved to the section it lies in, and a change is never allowed to cross a boundary (it is split around it). History and versions are per node.
+
+## Wikis
+
+- `GET /w/<address>/` — the root page; `/w/<address>/<page-slug>` — a page (slugs come from titles, unique within the tree); `/w/<address>/search?q=`; `/w/<address>/sitemap.xml`. On a custom domain the same paths are served from `/`.
+- `PATCH /api/trees/<root>/publish` `{published, slug, domain, theme: {name, emoji, tagline, accent, footer}}` (the root's owner). `GET /api/trees/<root>` reports the settings and the live URL.
+- Access: *public* needs no sign-in; *members* needs an Archipelago session (the page offers sign-in); *off* is a preview for people who can open the root. Images on pages of a public wiki are readable without signing in; everything else stays private.
+- Links written with `[[` (`/d/<id>`) are rewritten to wiki paths when the target is a page of the wiki, and left pointing at the editor (dotted) when it is not.
 
 ## Run
 

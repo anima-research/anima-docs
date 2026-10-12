@@ -16,26 +16,28 @@ import { atLeast, Documents, type DocChange, type DocMeta, type Role } from './d
 import type { Comments } from './comments.js';
 import type { Actor } from './principals.js';
 
-export const MARKER_RE = /^\{\{node:([A-Za-z0-9]+)\}\}[ \t]*$/;
-export const marker = (id: string) => `{{node:${id}}}`;
+/** `{{node:<id>}}` mounts inline; `{{node:<id>|aside}}` mounts as a sidebar panel (a wiki aside). Still a whole line. */
+export const MARKER_RE = /^\{\{node:([A-Za-z0-9]+)(?:\|(aside))?\}\}[ \t]*$/;
+export type MountRole = 'inline' | 'aside';
+export const marker = (id: string, role: MountRole = 'inline') => (role === 'aside' ? `{{node:${id}|aside}}` : `{{node:${id}}}`);
 export const MAX_DEPTH = 12;
 
 export interface Mount { parent: string; child: string; nth: number; line: number }
 
 /** A node as the tree reports it. */
 export interface TreeNode { id: string; title: string; section: boolean; type: string; chars: number; depth: number }
-export interface ContentTree { root: string; nodes: TreeNode[]; mounts: { parent: string; child: string; nth: number }[]; cycles: string[] }
+export interface ContentTree { root: string; nodes: TreeNode[]; mounts: { parent: string; child: string; nth: number; role: MountRole }[]; cycles: string[] }
 
 /** Mount lines of a body, in order. */
-export function scanMounts(text: string): { child: string; line: number; from: number; to: number }[] {
-  const out: { child: string; line: number; from: number; to: number }[] = [];
+export function scanMounts(text: string): { child: string; line: number; from: number; to: number; role: MountRole }[] {
+  const out: { child: string; line: number; from: number; to: number; role: MountRole }[] = [];
   let at = 0, line = 1;
   for (;;) {
     const i = text.indexOf('\n', at);
     const to = i < 0 ? text.length : i;
-    if (to - at <= 60 && to - at >= 9) {
+    if (to - at <= 66 && to - at >= 9) {
       const m = MARKER_RE.exec(text.slice(at, to));
-      if (m) out.push({ child: m[1], line, from: at, to });
+      if (m) out.push({ child: m[1], line, from: at, to, role: m[2] === 'aside' ? 'aside' : 'inline' });
     }
     if (i < 0) break;
     at = i + 1; line++;
@@ -94,9 +96,9 @@ export class Nodes extends EventEmitter {
     this.db.transaction(() => {
       if (changed) {
         this.db.prepare('DELETE FROM mounts WHERE parent_id = ?').run(docId);
-        const ins = this.db.prepare('INSERT INTO mounts (parent_id, child_id, nth) VALUES (?, ?, ?)');
+        const ins = this.db.prepare('INSERT INTO mounts (parent_id, child_id, nth, role) VALUES (?, ?, ?, ?)');
         const nth = new Map<string, number>();
-        for (const m of found) { const k = nth.get(m.child) ?? 0; nth.set(m.child, k + 1); ins.run(docId, m.child, k); }
+        for (const m of found) { const k = nth.get(m.child) ?? 0; nth.set(m.child, k + 1); ins.run(docId, m.child, k, m.role); }
         const log = this.db.prepare('INSERT INTO mount_log (parent_id, child_id, op, sub, at) VALUES (?, ?, ?, ?, ?)');
         const now = Date.now();
         for (const c of added) log.run(docId, c, 'mount', by, now);
@@ -124,8 +126,8 @@ export class Nodes extends EventEmitter {
   }
 
   /** Mounted children of `id`, in body order (an id appears once per mount line). */
-  childrenOf(id: string): { child: string; nth: number }[] {
-    return (this.db.prepare('SELECT child_id, nth FROM mounts WHERE parent_id = ? ORDER BY rowid').all(id) as { child_id: string; nth: number }[]).map((r) => ({ child: r.child_id, nth: r.nth }));
+  childrenOf(id: string): { child: string; nth: number; role: MountRole }[] {
+    return (this.db.prepare('SELECT child_id, nth, role FROM mounts WHERE parent_id = ? ORDER BY rowid').all(id) as { child_id: string; nth: number; role: MountRole }[]).map((r) => ({ child: r.child_id, nth: r.nth, role: r.role ?? 'inline' }));
   }
 
   /** How many live mount lines there are for `id` anywhere. */
@@ -183,7 +185,7 @@ export class Nodes extends EventEmitter {
       for (const m of this.childrenOf(id)) {
         if (path.has(m.child) || m.child === id) { cycles.push(m.child); continue; }
         if (!this.docs.get(m.child) || !this.docs.role(m.child, actor)) continue; // deleted, or not yours to see
-        mounts.push({ parent: id, child: m.child, nth: m.nth });
+        mounts.push({ parent: id, child: m.child, nth: m.nth, role: m.role });
         const next = new Set(path); next.add(id);
         walk(m.child, depth + 1, next);
       }
@@ -206,7 +208,8 @@ export class Nodes extends EventEmitter {
         const next = new Set(path); next.add(id);
         const body = walk(m.child, next, depth + 1);
         out += text.slice(at, m.from);
-        out += opts.delimit ? `[section ${m.child}${d.title ? ` “${d.title}”` : ''}${d.type !== 'markdown' ? ` ${d.type}` : ''} begins]\n${body}\n[section ${m.child} ends]` : body;
+        const kind = m.role === 'aside' ? 'aside' : 'section';
+        out += opts.delimit ? `[${kind} ${m.child}${d.title ? ` “${d.title}”` : ''}${d.type !== 'markdown' ? ` ${d.type}` : ''} begins]\n${body}\n[${kind} ${m.child} ends]` : body;
         at = m.to;
       }
       return out + text.slice(at);
@@ -225,7 +228,7 @@ export class Nodes extends EventEmitter {
   }
 
   /** Append a mount line to the parent (an editor of the parent who can read the child). */
-  mount(parent: string, child: string, actor: Actor, opts: { at?: number; /** just created by this actor: no access check on it */ fresh?: boolean } = {}): void {
+  mount(parent: string, child: string, actor: Actor, opts: { at?: number; role?: MountRole; /** just created by this actor: no access check on it */ fresh?: boolean } = {}): void {
     this.docs.require(parent, actor, 'editor');
     if (!opts.fresh) this.docs.require(child, actor, 'viewer');
     else if (!this.docs.get(child)) throw new Fault(404, `No document ${child}.`);
@@ -237,9 +240,9 @@ export class Nodes extends EventEmitter {
         const at = Math.max(0, Math.min(opts.at, text.length));
         const lineStart = at === 0 || text[at - 1] === '\n';
         const lineEnd = at === text.length || text[at] === '\n';
-        t.insert(at, `${lineStart ? '' : '\n'}${marker(child)}${lineEnd ? '' : '\n'}`);
+        t.insert(at, `${lineStart ? '' : '\n'}${marker(child, opts.role)}${lineEnd ? '' : '\n'}`);
       } else {
-        t.insert(text.length, `${text.length === 0 || text.endsWith('\n') ? '' : '\n'}${text.length === 0 || text.endsWith('\n\n') ? '' : '\n'}${marker(child)}\n`);
+        t.insert(text.length, `${text.length === 0 || text.endsWith('\n') ? '' : '\n'}${text.length === 0 || text.endsWith('\n\n') ? '' : '\n'}${marker(child, opts.role)}\n`);
       }
     });
     this.reindex(parent, actor.sub);
