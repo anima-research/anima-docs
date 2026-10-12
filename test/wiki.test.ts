@@ -101,6 +101,25 @@ test('a published tree renders pages with nav, article, asides, TOC and rewritte
   void secret;
 });
 
+test('image sizes, galleries and custom CSS render in the wiki', async () => {
+  const ann = await signIn('Ann');
+  const md = '# Gallery page\n\n![a cat|240](https://example.org/cat.png)\n\n![tall|200x300](https://example.org/tall.png)\n\n```gallery\n![First](https://example.org/1.png)\nhttps://example.org/2.png | Second one\n![Third|300](https://example.org/3.png) | Third\n```\n';
+  const g = (await api(ann, 'POST', '/api/docs', { title: 'Gallery page', content: md })).json;
+  await api(ann, 'POST', '/api/trees', { root: g.id });
+  const r = await api(ann, 'PATCH', `/api/trees/${g.id}/publish`, { published: 'public', slug: 'gallery', theme: { css: '.prose { font-family: monospace } /* custom */ </style><script>x</script>' } });
+  assert.equal(r.status, 200, r.text);
+  const page = await api(null, 'GET', '/w/gallery/');
+  assert.ok(page.text.includes('<img src="https://example.org/cat.png" alt="a cat" width="240"'), 'width from |240');
+  assert.ok(page.text.includes('alt="tall" width="200" height="300"'), 'width and height from |200x300');
+  const gal = /<div class="md-gallery">([\s\S]*?)<\/div>/.exec(page.text)?.[1] ?? '';
+  assert.equal((gal.match(/md-gallery-item/g) ?? []).length, 3, 'three gallery items');
+  assert.ok(gal.includes('data-caption="Second one"') && gal.includes('href="https://example.org/3.png"'), 'captions and full-size links');
+  assert.ok(page.text.includes('<style class="custom">.prose { font-family: monospace } /* custom */ <\\/style>'), 'custom CSS appended with a closing tag defused');
+  assert.ok(!/<\/style><script>/.test(page.text), 'no script injection through CSS');
+  assert.ok(page.text.includes('dialog class="lightbox"'), 'lightbox present');
+  assert.equal((await api(ann, 'PATCH', `/api/trees/${g.id}/publish`, { theme: { css: 'x'.repeat(60_000) } })).status, 413);
+});
+
 test('a custom domain serves the wiki at the root of that host; media of public pages is readable without signing in', async () => {
   const ann = await signIn('Ann');
   const home = (await api(ann, 'POST', '/api/docs', { title: 'Handbook', content: '# Handbook\n\nWelcome.\n' })).json;

@@ -13,6 +13,7 @@ import { StateEffect, StateField, type EditorState, type Range, type Transaction
 import { Decoration, EditorView, ViewPlugin, WidgetType, type DecorationSet, type ViewUpdate } from '@codemirror/view';
 import type { SyntaxNodeRef } from '@lezer/common';
 import { isSafeImageSrc, renderInlineHtml } from '../lib/markdown';
+import { parseAltSize, withAltSize } from '../../src/mdext';
 
 // ------------------------------------------------------------------ focus tracking
 
@@ -106,12 +107,12 @@ class RuleWidget extends WidgetType {
   }
 }
 
-interface Img { src: string; alt: string }
+interface Img { src: string; alt: string; /** Where the alt text sits in the document (resizing rewrites it). */ altFrom: number; altTo: number }
 
 class ImageWidget extends WidgetType {
   constructor(readonly images: Img[], readonly replacesLine: boolean) { super(); }
   eq(o: ImageWidget) {
-    return o.replacesLine === this.replacesLine && o.images.length === this.images.length && o.images.every((im, i) => im.src === this.images[i].src && im.alt === this.images[i].alt);
+    return o.replacesLine === this.replacesLine && o.images.length === this.images.length && o.images.every((im, i) => im.src === this.images[i].src && im.alt === this.images[i].alt && im.altFrom === this.images[i].altFrom);
   }
   get estimatedHeight() { return 260; }
   toDOM(view: EditorView) {
@@ -120,21 +121,41 @@ class ImageWidget extends WidgetType {
     for (const im of this.images) {
       const fig = document.createElement('figure');
       fig.className = 'cm-image-figure';
+      const size = parseAltSize(im.alt);
       if (!isSafeImageSrc(im.src)) {
         fig.append(placeholder(im.src ? `Images must use https:// or be uploaded (${truncate(im.src, 48)})` : 'Image has no address'));
       } else {
         const img = document.createElement('img');
-        img.alt = im.alt;
+        img.alt = size.alt;
         img.decoding = 'async';
         img.draggable = false;
+        if (size.width) { img.style.width = `${size.width}px`; if (size.height) img.style.height = `${size.height}px`; }
         img.addEventListener('load', () => { fig.classList.add('loaded'); view.requestMeasure(); });
         img.addEventListener('error', () => { img.replaceWith(placeholder(`Couldn't load image ${truncate(im.src, 48)}`)); view.requestMeasure(); });
         img.src = im.src;
         fig.append(img);
+        // A grip to resize by dragging: the size is written into the alt text (`![alt|400](url)`).
+        const grip = document.createElement('span');
+        grip.className = 'cm-image-grip';
+        grip.title = 'Drag to resize (double-click to reset)';
+        grip.setAttribute('aria-hidden', 'true');
+        grip.addEventListener('dblclick', (e) => { e.preventDefault(); e.stopPropagation(); this.writeSize(view, im, null); });
+        grip.addEventListener('mousedown', (e) => {
+          e.preventDefault(); e.stopPropagation();
+          const startX = e.clientX, startW = img.getBoundingClientRect().width;
+          const maxW = Math.max(80, (wrap.parentElement?.getBoundingClientRect().width ?? 800));
+          let w = startW;
+          const move = (ev: MouseEvent) => { w = Math.round(Math.max(40, Math.min(maxW, startW + ev.clientX - startX))); img.style.width = `${w}px`; img.style.height = ''; };
+          const up = () => { document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up); fig.classList.remove('resizing'); this.writeSize(view, im, w); };
+          fig.classList.add('resizing');
+          document.addEventListener('mousemove', move);
+          document.addEventListener('mouseup', up);
+        });
+        fig.append(grip);
       }
-      if (im.alt && this.replacesLine) {
+      if (size.alt && this.replacesLine) {
         const cap = document.createElement('figcaption');
-        cap.textContent = im.alt;
+        cap.textContent = size.alt;
         fig.append(cap);
       }
       wrap.append(fig);
@@ -150,6 +171,14 @@ class ImageWidget extends WidgetType {
       view.dispatch({ selection: { anchor: line.to } });
     });
     return wrap;
+  }
+  /** Rewrite the image's alt text with a size (or without one). */
+  private writeSize(view: EditorView, im: Img, width: number | null) {
+    const doc = view.state.doc;
+    if (im.altTo > doc.length || doc.sliceString(im.altFrom, im.altTo) !== im.alt) return; // the text moved: leave it
+    const next = withAltSize(im.alt, width);
+    if (next === im.alt) return;
+    view.dispatch({ changes: { from: im.altFrom, to: im.altTo, insert: next }, userEvent: 'input.resize' });
   }
   ignoreEvent() { return true; }
 }
@@ -432,11 +461,12 @@ function buildBlocks(state: EditorState): DecorationSet {
           const url = node.node.getChild('URL');
           const marks = node.node.getChildren('LinkMark');
           const alt = marks.length >= 2 ? doc.sliceString(marks[0].to, marks[1].from) : '';
+          const altFrom = marks.length >= 2 ? marks[0].to : node.from, altTo = marks.length >= 2 ? marks[1].from : node.from;
           let src = url ? doc.sliceString(url.from, url.to) : '';
           if (src.startsWith('<') && src.endsWith('>')) src = src.slice(1, -1);
           const line = doc.lineAt(node.from);
           const entry = byLine.get(line.number) ?? { line: { from: line.from, to: line.to, text: line.text }, imgs: [] };
-          entry.imgs.push({ src, alt, from: node.from, to: node.to });
+          entry.imgs.push({ src, alt, altFrom, altTo, from: node.from, to: node.to });
           byLine.set(line.number, entry);
           return false;
         }
@@ -447,7 +477,7 @@ function buildBlocks(state: EditorState): DecorationSet {
   });
   for (const { line, imgs } of byLine.values()) {
     const only = imgs.length === 1 && line.text.trim() === doc.sliceString(imgs[0].from, imgs[0].to);
-    const images = imgs.map(({ src, alt }) => ({ src, alt }));
+    const images = imgs.map(({ src, alt, altFrom, altTo }) => ({ src, alt, altFrom, altTo }));
     if (only && !touchesSelection(state, line.from, line.to)) {
       out.push(Decoration.replace({ widget: new ImageWidget(images, true), block: true }).range(line.from, line.to));
     } else {

@@ -21,7 +21,7 @@ import type { Actor } from './principals.js';
 export interface Placement { tree: string; parent: string; child: string; ord: number; derived: boolean }
 
 export type Published = 'off' | 'public' | 'members';
-export interface Theme { name?: string; emoji?: string; accent?: string; footer?: string; tagline?: string }
+export interface Theme { name?: string; emoji?: string; accent?: string; footer?: string; tagline?: string; /** Extra CSS appended to the wiki's stylesheet. */ css?: string }
 export interface PublishSettings { published: Published; slug: string | null; domain: string | null; theme: Theme }
 const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 const DOMAIN_RE = /^(?=.{4,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/;
@@ -87,6 +87,11 @@ export class Trees extends EventEmitter {
       for (const k of ['name', 'emoji', 'accent', 'footer', 'tagline'] as const) {
         const v = (t as Record<string, unknown>)[k];
         if (typeof v === 'string' && v.trim()) clean[k] = v.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, k === 'footer' ? 400 : 120);
+      }
+      const css = (t as Record<string, unknown>).css;
+      if (typeof css === 'string' && css.trim()) {
+        if (css.length > 50_000) throw new Fault(413, 'Custom CSS is limited to 50,000 characters.');
+        clean.css = css.replace(/<\/style/gi, '<\\/style').replace(/\u0000/g, '');
       }
       if (clean.accent && !/^#[0-9a-f]{6}$/i.test(clean.accent)) throw new Fault(400, 'accent must be a hex colour like #2459e0.');
       next.theme = clean;

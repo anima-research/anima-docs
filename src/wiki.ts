@@ -12,6 +12,7 @@ import { Fault } from './auth.js';
 import { outline } from './markdown.js';
 import { scanMounts, MAX_DEPTH } from './nodes.js';
 import { slugify, type PublishSettings } from './trees.js';
+import { galleryFence, imageSizes } from './mdext.js';
 
 export interface WikiPage { id: string; title: string; slug: string; parent: string | null; depth: number }
 interface Assembled { body: string; asides: { id: string; title: string; body: string }[]; nodes: Set<string> }
@@ -23,6 +24,8 @@ export class Wiki {
 
   constructor(private app: App) {
     this.md = new MarkdownIt({ html: false, linkify: true, typographer: true });
+    imageSizes(this.md);
+    galleryFence(this.md);
     this.md.core.ruler.after('inline', 'wiki-task-lists', (state: StateCore) => {
       const tokens = state.tokens;
       for (let i = 2; i < tokens.length; i++) {
@@ -225,6 +228,7 @@ export class Wiki {
 <meta name="description" content="${esc(excerpt(body))}">
 <link rel="canonical" href="${esc(href(page))}">
 <style>${CSS.replace('__ACCENT__', theme.accent || '#2459e0')}</style>
+${theme.css ? `<style class="custom">${theme.css}</style>` : ''}
 </head>
 <body>
 <header class="top">
@@ -254,6 +258,8 @@ export class Wiki {
   </aside>
 </div>
 <footer class="site-foot">${theme.footer ? `<span>${esc(theme.footer)}</span>` : ''}<span>Made with Anima Docs</span></footer>
+<dialog class="lightbox" aria-label="Image"><button class="lightbox-close" aria-label="Close">×</button><figure><img alt=""><figcaption></figcaption></figure></dialog>
+<script>${LIGHTBOX_JS}</script>
 </body>
 </html>`;
     return { html, etag };
@@ -317,6 +323,9 @@ function excerpt(md: string): string {
 }
 
 export class WikiFault extends Fault {}
+
+/** Click a gallery image: show it full-size in a <dialog>; Escape or a click closes it. */
+const LIGHTBOX_JS = `(function(){var d=document.querySelector('dialog.lightbox');if(!d)return;var img=d.querySelector('img'),cap=d.querySelector('figcaption');document.addEventListener('click',function(e){var a=e.target.closest&&e.target.closest('a.md-gallery-item');if(a){e.preventDefault();img.src=a.getAttribute('href');img.alt=a.dataset.caption||'';cap.textContent=a.dataset.caption||'';d.showModal();return;}if(e.target===d||e.target.closest('.lightbox-close')){d.close();}});d.addEventListener('close',function(){img.removeAttribute('src');});})();`;
 
 // ------------------------------------------------------------------ the look: a quiet encyclopedia
 
@@ -394,6 +403,19 @@ ul.plain li { margin: 4px 0; }
 .infobox .panel-body th { width: 38%; color: var(--ink-2); font-weight: 600; }
 .infobox .panel-body td:first-child { color: var(--ink-2); font-weight: 600; width: 38%; }
 .infobox .panel-body img { max-width: 100%; border-radius: 6px; display: block; margin: 0 auto 8px; }
+.prose .md-gallery, .panel .md-gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; margin: 1em 0; }
+.panel .md-gallery { grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); gap: 6px; }
+.md-gallery-item { display: block; position: relative; aspect-ratio: 1; overflow: hidden; border-radius: 8px; background: var(--panel); text-decoration: none; }
+.md-gallery-item img { width: 100%; height: 100%; object-fit: cover; display: block; margin: 0; border-radius: 0; transition: transform 0.2s; }
+.md-gallery-item:hover img { transform: scale(1.03); }
+.md-gallery-caption { position: absolute; left: 0; right: 0; bottom: 0; padding: 18px 8px 6px; font: 12px var(--sans); color: #fff; background: linear-gradient(transparent, rgba(0,0,0,0.6)); }
+.md-gallery-empty { color: var(--ink-3); font: 13px var(--sans); border: 1px dashed var(--rule); padding: 10px; border-radius: 8px; }
+dialog.lightbox { border: 0; padding: 0; background: transparent; max-width: 96vw; max-height: 96vh; }
+dialog.lightbox::backdrop { background: rgba(10, 12, 16, 0.86); }
+dialog.lightbox figure { margin: 0; display: flex; flex-direction: column; align-items: center; gap: 10px; }
+dialog.lightbox img { max-width: 94vw; max-height: 86vh; object-fit: contain; border-radius: 6px; }
+dialog.lightbox figcaption { color: #e6e8ec; font: 14px var(--sans); }
+.lightbox-close { position: fixed; top: 14px; right: 18px; font: 28px/1 var(--sans); color: #fff; background: none; border: 0; cursor: pointer; }
 .results li { margin: 0 0 14px; }
 .results p { margin: 2px 0 0; color: var(--ink-2); font-size: 14px; }
 .site-foot { display: flex; justify-content: center; gap: 18px; padding: 18px; font: 12.5px var(--sans); color: var(--ink-3); }

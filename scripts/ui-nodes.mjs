@@ -373,6 +373,37 @@ try {
     await anon.close();
   });
 
+  await step('an image resizes by dragging its grip; the size lands in the markdown; the preview and wiki honour it', async () => {
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAGQAAABkCAYAAABw4pVUAAAAKklEQVR4nO3BMQEAAADCoPVPbQhfoAAAAAAAAAAAAAAAAAAAAAAAAAAAAOA3Z0AAAbgRvTkAAAAASUVORK5CYII=', 'base64');
+    const info = await alice.evaluate(async ([id, b64]) => {
+      const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+      const r = await fetch(`/api/media?doc=${id}`, { method: 'POST', headers: { 'Content-Type': 'image/png' }, body: bytes });
+      return r.json();
+    }, [docId, png.toString('base64')]);
+    await openDoc(alice, docId, docId);
+    const t = await viewText(alice);
+    await setCursor(alice, t.indexOf('All good.') + 'All good.'.length);
+    await sleep(150);
+    await alice.keyboard.type(`\n\n![a square|60](${info.url})\n`);
+    const fig = alice.locator('.editor-page .cm-image-figure img');
+    await fig.first().waitFor({ timeout: 8000 });
+    await alice.waitForFunction(() => (document.querySelector('.editor-page .cm-image-figure img')?.style.width) === '60px');
+    // Drag the grip 40px to the right.
+    await alice.locator('.editor-page .cm-image-figure').first().hover();
+    const grip = alice.locator('.editor-page .cm-image-grip').first();
+    const box = await grip.boundingBox();
+    await alice.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await alice.mouse.down();
+    await alice.mouse.move(box.x + box.width / 2 + 40, box.y + box.height / 2, { steps: 6 });
+    await alice.mouse.up();
+    await alice.waitForFunction(() => /!\[a square\s*\|\s*1\d\d\]/.test(window.__anima.view.state.doc.toString()), null, { timeout: 8000 });
+    const w = /!\[a square\s*\|\s*(\d+)\]/.exec(await viewText(alice))[1];
+    assert(Number(w) >= 90 && Number(w) <= 110, `width after drag: ${w}`);
+    // The wiki renders the width attribute.
+    const wiki = await (await fetch(`${ORIGIN}/w/paper-wiki/`)).text();
+    assert(wiki.includes(`alt="a square" width="${w}"`), 'wiki lacks the width');
+  });
+
   await step('home lists the tree', async () => {
     await alice.goto(`${ORIGIN}/`);
     await alice.locator('.home-trees a.tree-card', { hasText: 'Paper' }).waitFor({ timeout: 8000 });

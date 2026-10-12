@@ -695,7 +695,10 @@ dialog.busy .dialog-body { opacity: 0.75; }
 
 .cm-image-block { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 6px 0 14px; cursor: text; }
 .cm-image-block.replaces-line { align-items: center; padding: 10px 0 16px; }
-.cm-image-figure { margin: 0; max-width: 100%; }
+.cm-image-figure { margin: 0; max-width: 100%; position: relative; }
+.cm-image-grip { position: absolute; right: -6px; bottom: -6px; width: 14px; height: 14px; border-radius: 4px; background: var(--accent); border: 2px solid var(--surface); cursor: nwse-resize; opacity: 0; transition: opacity 0.15s; }
+.cm-image-figure:hover .cm-image-grip, .cm-image-figure.resizing .cm-image-grip { opacity: 1; }
+.cm-image-figure.resizing img { box-shadow: 0 0 0 2px var(--accent); }
 .cm-image-figure img { display: block; max-width: 100%; max-height: 560px; border-radius: 6px; box-shadow: 0 0 0 1px var(--border); background: var(--surface-2); }
 .cm-image-figure figcaption { margin-top: 8px; text-align: center; color: var(--text-3); font-size: 13px; }
 .cm-image-missing { padding: 14px 16px; border: 1px dashed var(--border-strong); border-radius: 8px; color: var(--text-3); font-size: 13px; }
@@ -1245,3 +1248,17 @@ dialog.busy .dialog-body { opacity: 0.75; }
 .radio-stack { display: flex; flex-direction: column; gap: 6px; }
 .radio-stack .radio { display: flex; gap: 8px; align-items: baseline; }
 .field-help { font-size: 12px; color: var(--text-3); }
+
+/* Galleries (```gallery) and the lightbox in previews */
+.prose .md-gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; margin: 1em 0; }
+.md-gallery-item { display: block; position: relative; aspect-ratio: 1; overflow: hidden; border-radius: 8px; background: var(--surface-2); text-decoration: none; }
+.md-gallery-item img { width: 100%; height: 100%; object-fit: cover; display: block; margin: 0; }
+.md-gallery-caption { position: absolute; left: 0; right: 0; bottom: 0; padding: 18px 8px 6px; font: 12px var(--font-ui); color: #fff; background: linear-gradient(transparent, rgba(0,0,0,0.6)); }
+.md-gallery-empty { color: var(--text-3); font: 13px var(--font-ui); border: 1px dashed var(--border-strong); padding: 10px; border-radius: 8px; }
+dialog.lightbox { border: 0; padding: 0; background: transparent; max-width: 96vw; max-height: 96vh; }
+dialog.lightbox::backdrop { background: rgba(10, 12, 16, 0.86); }
+dialog.lightbox figure { margin: 0; display: flex; flex-direction: column; align-items: center; gap: 10px; }
+dialog.lightbox img { max-width: 94vw; max-height: 86vh; object-fit: contain; border-radius: 6px; }
+dialog.lightbox figcaption { color: #e6e8ec; font: 14px var(--font-ui); }
+.lightbox-close { position: fixed; top: 14px; right: 18px; font: 28px/1 var(--font-ui); color: #fff; background: none; border: 0; cursor: pointer; }
+.input.code { font: 12.5px/1.5 var(--font-mono); white-space: pre; }

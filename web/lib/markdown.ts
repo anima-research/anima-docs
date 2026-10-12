@@ -3,6 +3,7 @@
 import MarkdownIt from 'markdown-it';
 import type { StateCore } from 'markdown-it';
 import DOMPurify from 'dompurify';
+import { galleryFence, imageSizes } from '../../src/mdext';
 
 type MD = InstanceType<typeof MarkdownIt>;
 
@@ -33,6 +34,8 @@ function taskLists(md: MD) {
 
 const docMd = new MarkdownIt({ html: false, linkify: true, typographer: true });
 docMd.use(taskLists);
+imageSizes(docMd);
+galleryFence(docMd);
 const commentMd = new MarkdownIt({ html: false, linkify: true, breaks: true });
 commentMd.use(taskLists);
 const inlineMd = new MarkdownIt({ html: false, linkify: true, typographer: true });
@@ -63,7 +66,32 @@ export function isSafeImageSrc(src: string): boolean {
   return /^\/media\/[\w.-]+$/.test(src) || /^https:\/\//i.test(src) || /^data:image\/(png|jpeg|gif|webp);/i.test(src) || /^blob:/i.test(src);
 }
 
+let lightboxHooked = false;
+/** Gallery images open full-size in a dialog (preview panes). */
+function hookLightbox() {
+  if (lightboxHooked) return;
+  lightboxHooked = true;
+  document.addEventListener('click', (e) => {
+    const a = (e.target as Element).closest?.('a.md-gallery-item') as HTMLAnchorElement | null;
+    if (!a) return;
+    e.preventDefault();
+    const d = document.createElement('dialog');
+    d.className = 'lightbox';
+    const img = document.createElement('img');
+    img.src = a.href; img.alt = a.dataset.caption ?? '';
+    const cap = document.createElement('figcaption'); cap.textContent = a.dataset.caption ?? '';
+    const fig = document.createElement('figure'); fig.append(img, cap);
+    const close = document.createElement('button'); close.type = 'button'; close.className = 'lightbox-close'; close.setAttribute('aria-label', 'Close'); close.textContent = '×';
+    d.append(close, fig);
+    d.addEventListener('click', (ev) => { if (ev.target === d || ev.target === close) d.close(); });
+    d.addEventListener('close', () => d.remove());
+    document.body.append(d);
+    d.showModal();
+  });
+}
+
 export function renderDocument(markdown: string): DocumentFragment {
+  hookLightbox();
   const frag = purify(docMd.render(markdown));
   for (const t of frag.querySelectorAll('table')) {
     const wrap = document.createElement('div');

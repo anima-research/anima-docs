@@ -44,7 +44,7 @@ export interface TreePath { tree: string; title: string; path: { id: string; tit
 export interface TreeRoot { root: string; title: string; role: Role }
 export interface Placement { tree: string; parent: string; child: string; ord: number; derived: boolean }
 export type Published = 'off' | 'public' | 'members';
-export interface Theme { name?: string; emoji?: string; accent?: string; footer?: string; tagline?: string }
+export interface Theme { name?: string; emoji?: string; accent?: string; footer?: string; tagline?: string; css?: string }
 export interface PublishSettings { published: Published; slug: string | null; domain: string | null; theme: Theme; url?: string | null }
 export interface TreeView {
   root: string; title: string; role: Role;
