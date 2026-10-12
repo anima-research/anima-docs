@@ -202,6 +202,11 @@ test('navigation trees: derived subpages, sticky exclusion, placed-only pages, c
   assert.ok(!trees.isPlaced(paper.id, extra.id));
   docs.rename(extra.id, o, 'Extra again');
   assert.ok(trees.isPlaced(paper.id, extra.id));
+  // Renaming a page in a tree announces a tree change (the nav shows titles).
+  const changed: string[] = [];
+  trees.on('changed', (e: { tree: string }) => changed.push(e.tree));
+  docs.rename(method.id, o, 'Method renamed');
+  assert.ok(changed.includes(paper.id), 'rename did not announce the tree');
   // Cycles.
   assert.equal(trees.place(paper.id, method.id, paper.id, o), false);
   // Paths and a second tree.

@@ -326,6 +326,17 @@ try {
     await alice.screenshot({ path: join(SHOTS, 'complete.png') });
   });
 
+  await step('renaming a page by its title renames it in the tree, for the editor and for someone else in the tree', async () => {
+    await openDoc(bob, docId, docId);
+    await bob.locator('.doc-nav .nav-pages .nav-row', { hasText: 'Plan' }).waitFor({ timeout: 8000 });
+    const plan = (await api(alice, 'GET', '/api/docs')).json.docs.find((d) => d.title === 'Plan');
+    await openDoc(alice, plan.id, docId);
+    await alice.locator('.doc-title').fill('Plan B');
+    await alice.locator('.doc-title').press('Enter');
+    await alice.locator('.doc-nav .nav-pages .nav-row', { hasText: 'Plan B' }).waitFor({ timeout: 8000 });
+    await bob.locator('.doc-nav .nav-pages .nav-row', { hasText: 'Plan B' }).waitFor({ timeout: 8000 });
+  });
+
   await step('home lists the tree', async () => {
     await alice.goto(`${ORIGIN}/`);
     await alice.locator('.home-trees a.tree-card', { hasText: 'Paper' }).waitFor({ timeout: 8000 });

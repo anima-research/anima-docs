@@ -205,6 +205,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
       titleBefore = d.title;
       titleInput.value = d.title;
       forgetDocuments();
+      void nav.refresh();
       document.title = `${title || 'Section'} · Anima Docs`;
       toast(d.title ? (titleBefore === '' ? 'Named: this section is a document of its own now.' : 'Renamed') : 'This is a nameless section now, reachable through the documents that mount it.', { kind: 'success', timeout: 3000 });
     } catch (e) {
@@ -221,7 +222,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
 
   const statusEl = h('span.conn', { role: 'status', 'aria-live': 'polite' });
   const crumbsEl = h('span.doc-crumbs');
-  const navBtn = h('button.icon-btn.nav-btn', { type: 'button', 'aria-label': 'Pages and sections', 'data-tip': 'Pages and sections', 'aria-pressed': 'false', onclick: () => setNav(!navOpen) }, icon('columns', 20));
+  const navBtn = h('button.icon-btn.nav-btn', { type: 'button', 'aria-label': 'Pages and sections', 'data-tip': 'Pages and sections', 'aria-pressed': 'false', onclick: () => setNav(!navOpen, true) }, icon('columns', 20));
   const rolePill = h('span.role-pill');
   const ownerEl = h('span.doc-owner');
   const presenceEl = h('div.presence', { 'aria-label': 'People in this document' });
@@ -435,11 +436,12 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
 
   let navOpen = loadNav();
   body.prepend(nav.el);
-  function setNav(open: boolean) {
+  /** `remember`: the person chose; a default is never persisted as a choice. */
+  function setNav(open: boolean, remember = false) {
     navOpen = open;
     app.classList.toggle('nav-open', open);
     navBtn.setAttribute('aria-pressed', String(open));
-    saveNav(open);
+    if (remember) saveNav(open);
     computeLayout();
     requestAnimationFrame(() => view.requestMeasure());
   }

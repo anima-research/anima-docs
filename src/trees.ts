@@ -272,6 +272,8 @@ export class Trees extends EventEmitter {
   }
 
   private onRenamed(id: string) {
+    // The nav shows titles: every tree the node is in redraws.
+    for (const t of this.treesHolding(id)) this.changed(t);
     // Named now → may be a subpage of its parents; nameless now → derived placements of it go.
     for (const parent of this.nodes.parentsOf(id)) this.onMounts(parent);
     const d = this.docs.get(id);
