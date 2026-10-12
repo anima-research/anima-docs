@@ -6,7 +6,7 @@
 // per-depth guides; a band collapses its node (which then leaves the virtual
 // document), opens it as its own page, or names it.
 
-import { Annotation, EditorSelection, EditorState, Facet, Prec, RangeSet, StateEffect, StateField, Transaction, type ChangeSet, type Extension, type TransactionSpec } from '@codemirror/state';
+import { Annotation, ChangeSet, EditorSelection, EditorState, Facet, Prec, RangeSet, StateEffect, StateField, Transaction, type Extension, type TransactionSpec } from '@codemirror/state';
 import { Decoration, EditorView, GutterMarker, WidgetType, gutterLineClass, keymap, type DecorationSet, type KeyBinding } from '@codemirror/view';
 import { decompose, flatten, markerRemoval, placeAt, splitChange, type Layout, type Mount, type UnmountOp } from './layout';
 import type { NodeStore } from './store';
@@ -25,6 +25,10 @@ export const layoutField = StateField.define<Layout>({
 export interface NodeLabel { title: string; section: boolean; type: string; loaded: boolean; chars: number; lines: number; first: string }
 /** How the bands learn names and summaries. */
 export const nodeInfo = Facet.define<(id: string) => NodeLabel | undefined, (id: string) => NodeLabel | undefined>({ combine: (v) => v[0] ?? (() => undefined) });
+/** Editor ↔ shared (flattened) positions. Identity while editing; the suggest session's P while suggesting. */
+export interface ViewMap { toView(p: number, assoc?: -1 | 1): number; toShared(p: number, assoc?: -1 | 1): number }
+export const identityMap: ViewMap = { toView: (p) => p, toShared: (p) => p };
+export const viewMap = Facet.define<() => ViewMap, () => ViewMap>({ combine: (v) => v[0] ?? (() => identityMap) });
 /** Pages placed under the root in the current navigation tree but not mounted inline. */
 export const subpagesSource = Facet.define<() => { id: string; title: string }[], () => { id: string; title: string }[]>({ combine: (v) => v[0] ?? (() => []) });
 
@@ -48,8 +52,11 @@ export class Binding {
   private stop: (() => void) | null = null;
   private pending = false;
   private detached = false;
-  /** While suggesting (single-node views only), the suggest session owns the view text. */
+  /** While suggesting, the suggest session owns the view text: shared changes go to it as change sets instead of to the view. */
   private suspended = false;
+  private onRemote: ((R: ChangeSet) => void) | null = null;
+  /** The flattened text the view (or the session) was last given. */
+  private shown = '';
   /** Yjs transaction origin for this editor's own edits. */
   readonly origin = { binding: true };
 
@@ -80,6 +87,7 @@ export class Binding {
       EditorView.updateListener.of((u) => {
         if (!u.docChanged) return;
         const L = u.startState.field(layoutField);
+        if (this.suspended) return; // the session composes local changes into its pending set
         for (const tr of u.transactions) {
           if (tr.annotation(nodeSync)) continue;
           const unmounts = tr.effects.filter((e) => e.is(unmountsOf)).flatMap((e) => e.value);
@@ -101,8 +109,10 @@ export class Binding {
 
   detach() { this.detached = true; this.stop?.(); this.stop = null; this.undo.destroy(); }
   /** Hand the view over to the suggest session: bring it up to date first (a pending reconcile would otherwise be dropped). */
-  suspend() { this.reconcile(); this.suspended = true; this.cached = this.layout(); }
-  resume() { this.suspended = false; this.cached = null; this.reconcile(); }
+  /** Hand the shared text over to a suggest session: it gets later changes as change sets over the flattened text. */
+  suspend(onRemote: (R: ChangeSet) => void) { this.reconcile(); this.suspended = true; this.onRemote = onRemote; this.cached = this.layout(); }
+  resume() { this.suspended = false; this.onRemote = null; this.cached = null; this.reconcile(); }
+  get suggesting() { return this.suspended; }
 
   toggle(key: string) {
     if (this.collapsed.has(key)) this.collapsed.delete(key); else this.collapsed.add(key);
@@ -112,7 +122,7 @@ export class Binding {
   // ------------------------------------------------------------------ local → nodes
 
   private filter(tr: Transaction): TransactionSpec | Transaction {
-    if (!tr.docChanged || tr.annotation(nodeSync)) return tr;
+    if (!tr.docChanged || tr.annotation(nodeSync) || this.suspended) return tr;
     const L = tr.startState.field(layoutField);
     const pieces: { from: number; to: number; insert: string }[] = [];
     const unmounts: UnmountOp[] = [];
@@ -191,15 +201,33 @@ export class Binding {
   }
 
   reconcile() {
-    if (!this.view || this.detached || this.suspended) return;
+    if (!this.view || this.detached) return;
     for (const id of this.store.ids()) this.undo.track(id, this.store.get(id)!.ytext);
     const L = this.layout();
+    if (this.suspended) {
+      // The session shows P(S): give it the change to S, and the new layout for its positions.
+      const prev = this.cached?.text ?? this.shown;
+      this.cached = L;
+      if (prev !== L.text) {
+        let a = 0;
+        const max = Math.min(prev.length, L.text.length);
+        while (a < max && prev[a] === L.text[a]) a++;
+        let b = 0;
+        while (b < max - a && prev[prev.length - 1 - b] === L.text[L.text.length - 1 - b]) b++;
+        this.shown = L.text;
+        this.onRemote?.(ChangeSet.of({ from: a, to: prev.length - b, insert: L.text.slice(a, L.text.length - b) }, prev.length));
+      }
+      this.view.dispatch({ effects: setLayout.of(L), annotations: nodeSync.of(true) });
+      this.opts.onLayout?.(L);
+      return;
+    }
     // Nodes that left the tree can go.
     const reachable = new Set<string>([this.root]);
     for (const m of L.mounts) reachable.add(m.child);
     for (const id of this.store.ids()) if (!reachable.has(id)) { this.undo.forget(id); }
     this.store.prune(reachable);
     const cur = this.view.state.doc.toString();
+    this.shown = L.text;
     if (cur !== L.text) {
       let a = 0;
       const max = Math.min(cur.length, L.text.length);
@@ -222,6 +250,7 @@ export class Binding {
       {
         key: 'Backspace',
         run: (view) => {
+          if (this.suspended) return false;
           const sel = view.state.selection.main;
           if (!sel.empty) return false;
           const L = view.state.field(layoutField);
@@ -235,6 +264,7 @@ export class Binding {
       {
         key: 'Delete',
         run: (view) => {
+          if (this.suspended) return false;
           const sel = view.state.selection.main;
           if (!sel.empty) return false;
           const L = view.state.field(layoutField);
@@ -242,9 +272,9 @@ export class Binding {
           return false;
         },
       },
-      { key: 'Mod-z', run: () => this.runUndo(false) || true, preventDefault: true },
-      { key: 'Mod-Shift-z', run: () => this.runUndo(true) || true, preventDefault: true },
-      { key: 'Mod-y', run: () => this.runUndo(true) || true, preventDefault: true },
+      { key: 'Mod-z', run: () => (this.suspended ? false : this.runUndo(false) || true) },
+      { key: 'Mod-Shift-z', run: () => (this.suspended ? false : this.runUndo(true) || true) },
+      { key: 'Mod-y', run: () => (this.suspended ? false : this.runUndo(true) || true) },
     ];
   }
 }
@@ -320,21 +350,25 @@ class BandEnd extends WidgetType {
   ignoreEvent() { return true; }
 }
 
-const bandDecorations = EditorView.decorations.compute([layoutField, 'doc', nodeInfo], (state): DecorationSet => {
+const bandDecorations = EditorView.decorations.compute([layoutField, 'doc', nodeInfo, viewMap], (state): DecorationSet => {
   const L = state.field(layoutField);
   const info = state.facet(nodeInfo);
+  const vm = state.facet(viewMap)();
+  const len = state.doc.length;
+  const v = (p: number, assoc: -1 | 1) => Math.max(0, Math.min(vm.toView(p, assoc), len));
   const label = (id: string) => { const l = info(id); return !l ? '…' : l.section ? 'section' : (l.title || 'Untitled'); };
   const marks: { from: number; deco: Decoration; side: number }[] = [];
   const crumbsOf = (m: Mount) => L.mounts.filter((o) => o !== m && o.depth < m.depth && o.from <= m.from && m.to <= o.to).sort((a, b) => a.depth - b.depth).map((o) => label(o.child)).join(' › ');
   for (const m of L.mounts) {
-    marks.push({ from: m.from, side: -10 + m.depth, deco: Decoration.widget({ widget: new Band(m, info(m.child), crumbsOf(m)), block: true, side: -10 + m.depth }) });
-    if (!m.collapsed) marks.push({ from: m.to, side: 10 - m.depth, deco: Decoration.widget({ widget: new BandEnd(m, label(m.child)), block: true, side: 10 - m.depth }) });
+    marks.push({ from: v(m.from, 1), side: -10 + m.depth, deco: Decoration.widget({ widget: new Band(m, info(m.child), crumbsOf(m)), block: true, side: -10 + m.depth }) });
+    if (!m.collapsed) marks.push({ from: v(m.to, -1), side: 10 - m.depth, deco: Decoration.widget({ widget: new BandEnd(m, label(m.child)), block: true, side: 10 - m.depth }) });
   }
   const doc = state.doc;
   for (let i = 1; i <= doc.lines; i++) {
     const line = doc.line(i);
-    const at = placeAt(L, line.from);
-    const col = at ? null : L.mounts.find((m) => m.collapsed && m.from === line.from);
+    const sp = vm.toShared(line.from, 1);
+    const at = placeAt(L, sp);
+    const col = at ? null : L.mounts.find((m) => m.collapsed && m.from === sp);
     const depth = at ? at.depth : col ? col.depth : 0;
     if (depth > 0) marks.push({ from: line.from, side: 0, deco: Decoration.line({ class: `node-line depth-${Math.min(depth, 6)}${col ? ' collapsed-line' : ''}`, attributes: { 'data-node': at ? at.node : col!.child, style: `--d:${depth}` } }) });
   }
@@ -343,9 +377,10 @@ const bandDecorations = EditorView.decorations.compute([layoutField, 'doc', node
 });
 
 const hiddenNumber = new (class extends GutterMarker { elementClass = 'collapsed-gutter'; })();
-const collapsedGutter = gutterLineClass.compute([layoutField, 'doc'], (state) => {
+const collapsedGutter = gutterLineClass.compute([layoutField, 'doc', viewMap], (state) => {
   const L = state.field(layoutField);
-  const ranges = L.mounts.filter((m) => m.collapsed).map((m) => hiddenNumber.range(state.doc.lineAt(m.from).from));
+  const vm = state.facet(viewMap)();
+  const ranges = L.mounts.filter((m) => m.collapsed).map((m) => hiddenNumber.range(state.doc.lineAt(Math.min(vm.toView(m.from, 1), state.doc.length)).from));
   ranges.sort((a, b) => a.from - b.from);
   return RangeSet.of(ranges, true);
 });

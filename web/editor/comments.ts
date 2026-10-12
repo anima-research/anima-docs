@@ -16,7 +16,7 @@ import { peoplePicker } from '../lib/picker';
 import { avatar, confirmDialog, emptyState, errorMessage, kindBadge, openDialog, openMenu, shownName, toast, type MenuItem } from '../lib/ui';
 import { setHighlights, type Anchored } from './highlights';
 import type { DocProvider, ThreadEvent } from './provider';
-import { resolveRel, setOverlays, sharedCoords, wordDiff, type Coords, type OverlayItem, type SuggestSession } from './suggest';
+import { setOverlays, sharedCoords, wordDiff, type Coords, type OverlayItem, type SuggestSession } from './suggest';
 import { nodePos, virtualPos, type Layout } from './nodes/layout';
 import type { NodeStore, NodeThread } from './nodes/store';
 
@@ -173,7 +173,6 @@ export class CommentsRail {
     const c = this.coords;
     const session = this.deps.session?.() ?? null;
     const L = this.deps.layout();
-    const single = L.mounts.length === 0;
     const before = this.orphanSig;
     for (const t of this.threads) {
       if (!t.rel || !this.synced) { this.anchors.set(t.id, null); continue; }
@@ -182,19 +181,7 @@ export class CommentsRail {
       if (own) { this.anchors.set(t.id, own); continue; }
       const p = this.deps.nodes.get(t.node);
       if (!p || !p.synced) { this.anchors.set(t.id, null); continue; }
-      if (single || c.suggesting) {
-        if (t.node !== this.deps.docId) { this.anchors.set(t.id, null); continue; }
-        const at = resolveRel(t.rel, p.doc, p.ytext);
-        if (!at) { this.anchors.set(t.id, null); continue; }
-        if (at.point) { const v = c.toView(at.from, -1); this.anchors.set(t.id, { from: v, to: v }); continue; }
-        const from = c.toView(at.from, 1), to = Math.max(from, c.toView(at.to, -1));
-        if (to > from) this.anchors.set(t.id, { from, to });
-        // Hidden by your own pending deletion: still there in the shared text.
-        else if (c.suggesting && at.to > at.from) this.anchors.set(t.id, { from, to: from });
-        else this.anchors.set(t.id, null);
-        continue;
-      }
-      // Node-aware: start in the thread's node, end possibly in another.
+      // Start in the thread's node, end possibly in another; then shared → editor coordinates.
       const endNode = t.rel.endDoc ?? t.node;
       const pe = this.deps.nodes.get(endNode);
       let s: Y.AbsolutePosition | null = null, e: Y.AbsolutePosition | null = null;
@@ -204,11 +191,15 @@ export class CommentsRail {
         e = point ? s : pe && pe.synced ? Y.createAbsolutePositionFromRelativePosition(Y.decodeRelativePosition(b64ToBytes(t.rel.end)), pe.doc) : null;
       } catch { s = null; }
       if (!s || !e || s.type !== p.ytext || (pe && e.type !== pe.ytext)) { this.anchors.set(t.id, null); continue; }
-      const from = virtualPos(L, t.node, s.index, 'start');
-      const to = s === e ? from : virtualPos(L, endNode, e.index, 'end');
-      if (from === null || to === null) { this.anchors.set(t.id, null); continue; }
-      if (s === e) { this.anchors.set(t.id, { from, to: from }); continue; }
-      if (to > from) this.anchors.set(t.id, { from, to }); else this.anchors.set(t.id, null);
+      const sFrom = virtualPos(L, t.node, s.index, 'start');
+      const sTo = s === e ? sFrom : virtualPos(L, endNode, e.index, 'end');
+      if (sFrom === null || sTo === null) { this.anchors.set(t.id, null); continue; }
+      if (s === e) { const v = c.toView(sFrom, -1); this.anchors.set(t.id, { from: v, to: v }); continue; }
+      const from = c.toView(sFrom, 1), to = Math.max(from, c.toView(Math.max(sFrom, sTo), -1));
+      if (to > from) this.anchors.set(t.id, { from, to });
+      // Hidden by your own pending deletion: still there in the shared text.
+      else if (c.suggesting && sTo > sFrom) this.anchors.set(t.id, { from, to: from });
+      else this.anchors.set(t.id, null);
     }
     // A section arriving (or leaving) changes which cards read as "text deleted": re-render those.
     this.orphanSig = this.threads.map((t) => (this.anchors.get(t.id) ? '1' : '0')).join('');
@@ -263,13 +254,14 @@ export class CommentsRail {
       const d = this.draft;
       const p = this.deps.nodes.get(d.node), pe = this.deps.nodes.get(d.anchor.endDoc ?? d.node);
       const L = this.deps.layout();
+      const c = this.coords;
       if (p && pe) {
         try {
           const s = Y.createAbsolutePositionFromRelativePosition(Y.decodeRelativePosition(b64ToBytes(d.anchor.start)), p.doc);
           const e = Y.createAbsolutePositionFromRelativePosition(Y.decodeRelativePosition(b64ToBytes(d.anchor.end)), pe.doc);
           if (s && e) {
-            if (L.mounts.length === 0 || this.coords.suggesting) { const c = this.coords; const from = c.toView(s.index, 1); d.range = { from, to: Math.max(from, c.toView(e.index, -1)) }; }
-            else { const from = virtualPos(L, d.node, s.index, 'start'), to = virtualPos(L, d.anchor.endDoc ?? d.node, e.index, 'end'); if (from !== null && to !== null) d.range = { from, to: Math.max(from, to) }; }
+            const sFrom = virtualPos(L, d.node, s.index, 'start'), sTo = virtualPos(L, d.anchor.endDoc ?? d.node, e.index, 'end');
+            if (sFrom !== null && sTo !== null) { const from = c.toView(sFrom, 1); d.range = { from, to: Math.max(from, c.toView(sTo, -1)) }; }
           }
         } catch { /* keep the old range */ }
       }
@@ -349,30 +341,21 @@ export class CommentsRail {
     }
     const c = this.coords;
     const L = this.deps.layout();
-    let anchor: { start: string; end: string; endDoc?: string };
-    let node = this.deps.docId;
-    if (L.mounts.length === 0 || c.suggesting) {
-      const ytext = this.deps.provider.ytext;
-      const sFrom = c.toShared(sel.from, 1), sTo = c.toShared(sel.to, -1);
-      if (sTo <= sFrom) {
-        toast('That text is only in your suggestion so far. Comment on text that’s in the document, or add a note to the suggestion’s card.', { kind: 'info' });
-        return;
-      }
-      anchor = {
-        start: bytesToB64(Y.encodeRelativePosition(Y.createRelativePositionFromTypeIndex(ytext, sFrom, 0))),
-        end: bytesToB64(Y.encodeRelativePosition(Y.createRelativePositionFromTypeIndex(ytext, sTo, -1))),
-      };
-    } else {
-      const s = nodePos(L, sel.from), e = nodePos(L, sel.to);
-      const ps = s && this.deps.nodes.get(s.node), pe = e && this.deps.nodes.get(e.node);
-      if (!s || !e || !ps || !pe) { toast('Select some text inside a section to comment on it.', { kind: 'info' }); return; }
-      node = s.node;
-      anchor = {
-        start: bytesToB64(Y.encodeRelativePosition(Y.createRelativePositionFromTypeIndex(ps.ytext, Math.min(s.offset, ps.ytext.length), 0))),
-        end: bytesToB64(Y.encodeRelativePosition(Y.createRelativePositionFromTypeIndex(pe.ytext, Math.min(e.offset, pe.ytext.length), -1))),
-        ...(e.node !== s.node ? { endDoc: e.node } : {}),
-      };
+    // Editor → shared (flattened) → node positions.
+    const sFrom = c.toShared(sel.from, 1), sTo = c.toShared(sel.to, -1);
+    if (sTo <= sFrom) {
+      toast('That text is only in your suggestion so far. Comment on text that’s in the document, or add a note to the suggestion’s card.', { kind: 'info' });
+      return;
     }
+    const s = nodePos(L, sFrom), e = nodePos(L, sTo);
+    const ps = s && this.deps.nodes.get(s.node), pe = e && this.deps.nodes.get(e.node);
+    if (!s || !e || !ps || !pe) { toast('Select some text inside a section to comment on it.', { kind: 'info' }); return; }
+    const node = s.node;
+    const anchor: { start: string; end: string; endDoc?: string } = {
+      start: bytesToB64(Y.encodeRelativePosition(Y.createRelativePositionFromTypeIndex(ps.ytext, Math.min(s.offset, ps.ytext.length), 0))),
+      end: bytesToB64(Y.encodeRelativePosition(Y.createRelativePositionFromTypeIndex(pe.ytext, Math.min(e.offset, pe.ytext.length), -1))),
+      ...(e.node !== s.node ? { endDoc: e.node } : {}),
+    };
     if (this.layout === 'drawer' && !this.drawerOpen) this.setDrawer(true);
     const quote = view.state.sliceDoc(sel.from, sel.to);
     this.cancelDraft();

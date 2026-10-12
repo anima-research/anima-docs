@@ -1,9 +1,13 @@
 // Suggesting mode: your edits become suggestions instead of changing the text.
 //
 // The editor shows the shared text S with your pending changes P applied
-// (view = P(S)). Keystrokes compose into P and never reach the shared Y.Text;
-// changes from others arrive as Yjs events and are rebased over P with
-// CodeMirror change sets (operational transform, as @codemirror/collab does).
+// (view = P(S)). S is the flattened node tree (the binding's virtual
+// document); keystrokes compose into P and never reach any Y.Text. Changes
+// from others arrive from the binding as change sets over S and are rebased
+// over P with CodeMirror change sets (operational transform, as
+// @codemirror/collab does). A suggestion never crosses a section boundary:
+// the session splits changes at the seams, and each region is saved to the
+// node it lies in.
 // P is kept as regions in shared coordinates, one suggestion each: created,
 // revised and withdrawn on the server as you type (debounced). Your open
 // suggestions are loaded back into P when you start, so you edit them in place.
@@ -13,10 +17,11 @@
 
 import * as Y from 'yjs';
 import { diffWordsWithSpace } from 'diff';
-import { Annotation, ChangeSet, StateEffect, StateField, Text, Transaction, type Range } from '@codemirror/state';
+import { Annotation, ChangeSet, EditorSelection, EditorState, StateEffect, StateField, Text, Transaction, type Range, type TransactionSpec } from '@codemirror/state';
 import { Decoration, EditorView, ViewPlugin, WidgetType, type DecorationSet, type ViewUpdate } from '@codemirror/view';
-import type { Thread } from '../lib/api';
 import type { DocProvider } from './provider';
+import { nodePos, virtualPos, type Layout } from './nodes/layout';
+import type { NodeStore, NodeThread } from './nodes/store';
 
 /** Marks transactions the suggesting engine made itself (not the user's typing). */
 export const suggestAnn = Annotation.define<'remote' | 'internal'>();
@@ -42,6 +47,8 @@ interface Region {
   /** What the server last confirmed. */
   sent: Sent | null;
   failed: { state: Sent; count: number; message: string } | null;
+  /** The node the saved suggestion lives in (set when saved or loaded). */
+  node?: string;
 }
 
 interface SyncResult { key?: string; id?: string; ok: boolean; error?: string; status?: number }
@@ -101,8 +108,9 @@ export class SuggestSession {
   private regions: Region[] = [];
   private withdraw = new Set<string>();
   private view: EditorView | null = null;
-  private observer: ((e: Y.YTextEvent) => void) | null = null;
   private timer = 0;
+  /** Node of each saved suggestion we may need to withdraw. */
+  private nodeOf = new Map<string, string>();
   private firstDirty = 0;
   private inflight: Promise<boolean> | null = null;
   private again = false;
@@ -114,7 +122,7 @@ export class SuggestSession {
   /** Something happened to your suggestions the person should know about. */
   onNotice: (message: string) => void = () => {};
 
-  constructor(private deps: { provider: DocProvider; meSub: string }) {}
+  constructor(private deps: { provider: DocProvider; meSub: string; nodes: NodeStore; layout: () => Layout }) {}
 
   readonly coords: Coords = {
     toView: (p, assoc = 1) => this.P.mapPos(Math.max(0, Math.min(p, this.P.length)), assoc),
@@ -151,6 +159,8 @@ export class SuggestSession {
   extension() {
     const session = this;
     return [
+      // A change never crosses a section boundary: pieces on each side of a seam stay separate suggestions.
+      EditorState.transactionFilter.of((tr) => session.splitAtSeams(tr)),
       ViewPlugin.fromClass(class {
         decorations: DecorationSet;
         constructor(view: EditorView) {
@@ -171,22 +181,51 @@ export class SuggestSession {
 
   private attach(view: EditorView) {
     this.view = view;
-    const ytext = this.deps.provider.ytext;
-    // In editing mode the editor mirrors the shared text exactly.
+    // In editing mode the editor mirrors the flattened shared text exactly.
     this.S = view.state.doc;
-    if (this.S.toString() !== ytext.toString()) console.warn('[suggest] editor and shared text differ at start');
+    if (this.S.toString() !== this.deps.layout().text) console.warn('[suggest] editor and shared text differ at start');
     this.P = ChangeSet.empty(this.S.length);
     this.regions = [];
-    this.observer = (e) => this.remote(e);
-    ytext.observe(this.observer);
   }
 
   private detach() {
-    if (this.observer) this.deps.provider.ytext.unobserve(this.observer);
-    this.observer = null;
     this.view = null;
     clearTimeout(this.timer);
     this.timer = 0;
+  }
+
+  /** Seam (structural newline) positions, in editor coordinates. */
+  private seamsInView(): number[] {
+    const L = this.deps.layout();
+    const out: number[] = [];
+    for (const it of L.items) if (it.kind === 'nl') out.push(this.P.mapPos(it.from, 1));
+    return out.sort((a, b) => a - b);
+  }
+
+  private splitAtSeams(tr: Transaction): TransactionSpec | Transaction {
+    if (!tr.docChanged || tr.annotation(suggestAnn)) return tr;
+    const seams = this.seamsInView();
+    if (!seams.length) return tr;
+    const pieces: { from: number; to: number; insert: string }[] = [];
+    let rewritten = false;
+    tr.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
+      const text = inserted.toString();
+      const inside = seams.filter((p) => p >= fromA && p < toA);
+      if (!inside.length) { pieces.push({ from: fromA, to: toA, insert: text }); return; }
+      rewritten = true;
+      let cur = fromA;
+      const parts: { from: number; to: number; insert: string }[] = [];
+      for (const p of inside) { if (p > cur) parts.push({ from: cur, to: p, insert: '' }); cur = p + 1; }
+      if (toA > cur) parts.push({ from: cur, to: toA, insert: '' });
+      if (text) { const first = parts.find((x) => x.from === fromA); if (first) first.insert = text; else parts.unshift({ from: fromA, to: fromA, insert: text }); }
+      pieces.push(...parts);
+    });
+    if (!rewritten) return tr;
+    const changes = tr.startState.changes(pieces);
+    const sel = EditorSelection.create(tr.startState.selection.ranges.map((r) => EditorSelection.cursor(changes.mapPos(r.head, r.empty ? 1 : -1))));
+    const ue = tr.annotation(Transaction.userEvent);
+    this.onNotice('Section boundaries stay where they are; your change was split around one.');
+    return { changes, selection: sel, userEvent: ue ?? undefined, scrollIntoView: tr.scrollIntoView };
   }
 
   /** The user typed: their change composes into P. */
@@ -196,16 +235,10 @@ export class SuggestSession {
     this.schedule();
   }
 
-  /** Someone else changed the shared text: rebase P over it and show their change. */
-  private remote(event: Y.YTextEvent) {
-    const specs: { from: number; to?: number; insert?: string }[] = [];
-    let pos = 0;
-    for (const d of event.delta) {
-      if (d.insert != null) specs.push({ from: pos, insert: typeof d.insert === 'string' ? d.insert : '' });
-      else if (d.delete != null) { specs.push({ from: pos, to: pos + d.delete }); pos += d.delete; }
-      else pos += d.retain ?? 0;
-    }
-    const R = ChangeSet.of(specs, this.S.length);
+  /** The shared (flattened) text changed under us: rebase P over the change and show it. */
+  remote(R: ChangeSet) {
+    if (!this.view) return;
+    if (R.length !== this.S.length) { console.warn('[suggest] remote change does not fit the shared text'); return; }
     const forView = R.map(this.P, true);
     // Regions whose original text the change deleted entirely: what they replaced is gone.
     const collapsed = new Set<string>();
@@ -318,31 +351,44 @@ export class SuggestSession {
    * one (so you edit them in place), and drop regions whose suggestion was
    * accepted, rejected or deleted since.
    */
-  onThreads(threads: Thread[]) {
+  /** A thread's anchor in shared (flattened) coordinates. */
+  private resolveThread(t: NodeThread): { from: number; to: number; point: boolean } | null {
+    if (!t.rel || t.rel.endDoc) return null;
+    const p = this.deps.nodes.get(t.node);
+    if (!p || !p.synced) return null;
+    const at = resolveRel(t.rel, p.doc, p.ytext);
+    if (!at) return null;
+    const L = this.deps.layout();
+    const from = virtualPos(L, t.node, at.from, 'start');
+    const to = at.point ? from : virtualPos(L, t.node, at.to, 'end');
+    if (from === null || to === null) return null;
+    return { from, to: Math.max(from, to), point: at.point };
+  }
+
+  onThreads(threads: NodeThread[]) {
     if (!this.view) return;
+    for (const t of threads) if (t.suggestion) this.nodeOf.set(t.id, t.node);
     if (!this.loaded) {
       this.loaded = true;
-      const p = this.deps.provider;
       const add: Region[] = [];
       for (const t of threads) {
         const sg = t.suggestion;
         if (!sg || sg.status !== 'open' || sg.outdated || !t.rel || t.comments[0]?.author.sub !== this.deps.meSub) continue;
         if (this.regions.some((r) => r.id === t.id)) continue;
-        const at = resolveRel(t.rel, p.doc, p.ytext);
+        const at = this.resolveThread(t);
         if (!at || this.S.sliceString(at.from, at.to) !== sg.original) continue;
-        add.push({ key: newKey(), id: t.id, from: at.from, to: at.to, text: sg.text, vFrom: 0, vTo: 0, sent: { text: sg.text, original: sg.original }, failed: null });
+        add.push({ key: newKey(), id: t.id, node: t.node, from: at.from, to: at.to, text: sg.text, vFrom: 0, vTo: 0, sent: { text: sg.text, original: sg.original }, failed: null });
       }
       if (add.length) this.rebuild([...this.regions, ...add]);
       return;
     }
     // A suggestion of yours the server announced before acknowledging the save: adopt its id now.
-    const p = this.deps.provider;
     for (const t of threads) {
       const sg = t.suggestion;
       if (!sg || sg.status !== 'open' || !t.rel || t.comments[0]?.author.sub !== this.deps.meSub || this.regions.some((r) => r.id === t.id)) continue;
-      const at = resolveRel(t.rel, p.doc, p.ytext);
+      const at = this.resolveThread(t);
       const r = at && this.regions.find((x) => !x.id && x.from === at.from && x.to === at.to && x.text === sg.text);
-      if (r) r.id = t.id;
+      if (r) { r.id = t.id; r.node = t.node; }
     }
     const byId = new Map(threads.map((t) => [t.id, t]));
     const gone = this.regions.filter((r) => r.id && byId.get(r.id)?.suggestion?.status !== 'open');
@@ -377,8 +423,10 @@ export class SuggestSession {
 
   private async syncOnce(): Promise<boolean> {
     this.firstDirty = 0;
-    const ytext = this.deps.provider.ytext;
-    const ops: Op[] = [];
+    const L = this.deps.layout();
+    /** Ops grouped by the node they belong to: each node's room saves its own. */
+    const byNode = new Map<string, Op[]>();
+    const opsOf = (node: string) => byNode.get(node) ?? byNode.set(node, []).get(node)!;
     const states = new Map<string, Sent>();
     for (const r of this.regions) {
       const st = this.state(r);
@@ -391,21 +439,36 @@ export class SuggestSession {
         this.onError(r.failed.message);
         continue;
       }
+      const a = nodePos(L, r.from), b = r.to > r.from ? nodePos(L, r.to) : a;
+      const p = a && this.deps.nodes.get(a.node);
+      if (!a || !b || !p || a.node !== b.node) {
+        r.failed = { state: st, count: MAX_TRIES, message: 'A suggestion cannot cross a section boundary. Suggest the change on each side separately.' };
+        this.onError(r.failed.message);
+        continue;
+      }
+      if (r.id && r.node && r.node !== a.node) {
+        // The region moved into another node (a split): withdraw the old suggestion, create afresh.
+        this.withdraw.add(r.id); r.id = null; r.sent = null;
+      }
       states.set(r.key, st);
-      const anchor = anchorFor(ytext, r.from, r.to);
-      ops.push(r.id ? { op: 'update', key: r.key, id: r.id, anchor, original: st.original, text: st.text } : { op: 'create', key: r.key, anchor, original: st.original, text: st.text });
+      const anchor = anchorFor(p.ytext, Math.min(a.offset, p.ytext.length), Math.min(b.offset, p.ytext.length));
+      r.node = a.node;
+      opsOf(a.node).push(r.id ? { op: 'update', key: r.key, id: r.id, anchor, original: st.original, text: st.text } : { op: 'create', key: r.key, anchor, original: st.original, text: st.text });
     }
-    for (const id of this.withdraw) ops.push({ op: 'withdraw', id });
+    for (const id of this.withdraw) opsOf(this.nodeOf.get(id) ?? this.deps.nodes.root).push({ op: 'withdraw', id });
+    const ops = [...byNode.values()].flat();
     if (!ops.length) { this.onChange(); this.redraw(); return true; }
-    // Batches small enough for one socket frame.
-    const batches: Op[][] = [];
-    let cur: Op[] = [], chars = 0;
-    for (const op of ops) {
-      const size = op.op === 'withdraw' ? 64 : op.text.length + op.original.length + 256;
-      if (cur.length && (cur.length >= BATCH_OPS || chars + size > BATCH_CHARS)) { batches.push(cur); cur = []; chars = 0; }
-      cur.push(op); chars += size;
+    // Batches small enough for one socket frame, one node per batch.
+    const batches: { node: string; ops: Op[] }[] = [];
+    for (const [node, list] of byNode) {
+      let cur: Op[] = [], chars = 0;
+      for (const op of list) {
+        const size = op.op === 'withdraw' ? 64 : op.text.length + op.original.length + 256;
+        if (cur.length && (cur.length >= BATCH_OPS || chars + size > BATCH_CHARS)) { batches.push({ node, ops: cur }); cur = []; chars = 0; }
+        cur.push(op); chars += size;
+      }
+      if (cur.length) batches.push({ node, ops: cur });
     }
-    if (cur.length) batches.push(cur);
     let all = true;
     const fail = (op: Op, message: string) => {
       all = false;
@@ -418,23 +481,24 @@ export class SuggestSession {
       if (count === MAX_TRIES) this.onError(message);
     };
     try {
-      for (const batch of batches) {
+      for (const { node, ops: batch } of batches) {
+        const via = this.deps.nodes.get(node) ?? this.deps.provider;
         let res: { results: SyncResult[] };
         try {
-          res = await this.deps.provider.request<{ results: SyncResult[] }>({ type: 'suggestion.sync', ops: batch });
+          res = await via.request<{ results: SyncResult[] }>({ type: 'suggestion.sync', ops: batch });
         } catch (e) {
-          if (this.deps.provider.status !== 'online') return false; // offline: saved when the connection is back (the page calls sync)
+          if (via.status !== 'online') return false; // offline: saved when the connection is back (the page calls sync)
           // The server refused the whole message: count it against each change, so it can't loop.
           for (const op of batch) fail(op, (e as Error).message || 'Couldn’t save this suggestion.');
           continue;
         }
         res.results.forEach((x, i) => {
           const op = batch[i];
-          if (op.op === 'withdraw') { if (x.ok) this.withdraw.delete(op.id); else all = false; return; }
+          if (op.op === 'withdraw') { if (x.ok) { this.withdraw.delete(op.id); this.nodeOf.delete(op.id); } else all = false; return; }
           const r = this.regions.find((y) => y.key === op.key);
           if (x.ok) {
-            if (r) { if (x.id) r.id = x.id; r.sent = states.get(op.key)!; r.failed = null; }
-            else if (op.op === 'create' && x.id) this.withdraw.add(x.id); // the region vanished while saving
+            if (r) { if (x.id) { r.id = x.id; this.nodeOf.set(x.id, node); } r.sent = states.get(op.key)!; r.failed = null; }
+            else if (op.op === 'create' && x.id) { this.withdraw.add(x.id); this.nodeOf.set(x.id, node); } // the region vanished while saving
             return;
           }
           fail(op, x.error ?? 'Couldn’t save this suggestion.');

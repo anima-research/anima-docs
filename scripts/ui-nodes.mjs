@@ -21,10 +21,14 @@ const DATA = mkdtempSync(join(tmpdir(), 'docs-nodes-'));
 mkdirSync(SHOTS, { recursive: true });
 
 let failed = 0, n = 0;
+let alice, bob;
 async function step(name, fn) {
   n++;
   try { await fn(); console.log(`ok ${n} - ${name}`); }
-  catch (e) { failed++; console.log(`not ok ${n} - ${name}\n  ${String(e.stack ?? e).split('\n').slice(0, 4).join('\n  ')}`); }
+  catch (e) {
+    failed++; console.log(`not ok ${n} - ${name}\n  ${String(e.stack ?? e).split('\n').slice(0, 7).join('\n  ')}`);
+    try { await alice?.screenshot({ path: join(SHOTS, `fail-${n}-alice.png`) }); await bob?.screenshot({ path: join(SHOTS, `fail-${n}-bob.png`) }); } catch { /* ignore */ }
+  }
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const assert = (c, m) => { if (!c) throw new Error(m); };
@@ -74,8 +78,8 @@ const browser = await chromium.launch({ headless: !process.env.SMOKE_HEADED });
 const viewport = { width: 1500, height: 960 };
 const aliceCtx = await browser.newContext({ viewport });
 const bobCtx = await browser.newContext({ viewport });
-const alice = await aliceCtx.newPage();
-const bob = await bobCtx.newPage();
+alice = await aliceCtx.newPage();
+bob = await bobCtx.newPage();
 const errors = [];
 for (const p of [alice, bob]) { p.on('pageerror', (e) => errors.push(`${p === alice ? 'alice' : 'bob'}: ${e.message}`)); p.on('console', (m) => { if (m.type() === 'error') errors.push(`${p === alice ? 'alice' : 'bob'} console: ${m.text()}`); }); }
 
@@ -213,6 +217,62 @@ try {
     assert(wrong.includes('edit it with its id'), `hint: ${wrong}`);
   });
 
+  await step('Bob as a commenter suggests inside the section; it is saved to the section; Alice accepts it', async () => {
+    const bobSub = (await api(bob, 'GET', '/api/me')).json.you.sub;
+    await api(alice, 'POST', `/api/docs/${docId}/share`, { who: bobSub, role: 'commenter' });
+    await openDoc(bob, docId);
+    await bob.waitForFunction(() => document.querySelector('.doc-app')?.classList.contains('suggesting'), null, { timeout: 8000 });
+    await bob.locator('.editor-page .node-band').waitFor();
+    await bob.waitForFunction(() => window.__anima.view.state.doc.toString().includes('line by line'));
+    const t = await viewText(bob);
+    const a = t.indexOf('flatten');
+    await select(bob, a, a + 'flatten'.length);
+    await bob.keyboard.type('fold');
+    await bob.locator('.cm-sugg-ins.mine', { hasText: 'fold' }).waitFor();
+    await bob.locator('.cm-sugg-ins.mine:not(.pending)', { hasText: 'fold' }).waitFor({ timeout: 8000 });
+    // Saved on the section node, not the paper.
+    const onSection = (await api(alice, 'POST', '/api/operations/list_comments', { document: sectionId })).json.content[0].text;
+    assert(onSection.includes('fold'), `section suggestions: ${onSection}`);
+    assert((await nodeText(alice, sectionId)).includes('We flatten'), 'the section text changed before acceptance');
+    // Alice sees it in place and accepts.
+    await alice.locator('.editor-page .cm-sugg-del', { hasText: 'flatten' }).waitFor({ timeout: 8000 });
+    await alice.locator('.thread-card', { hasText: 'fold' }).locator('.accept-btn').first().click();
+    await waitText(alice, 'We fold the tree');
+    assert((await nodeText(alice, sectionId)).includes('We fold the tree'), 'acceptance did not reach the section');
+    await waitText(bob, 'We fold the tree');
+    await bob.screenshot({ path: join(SHOTS, 'suggest-section.png') });
+  });
+
+  await step('a suggestion in the paper itself and one typed across the seam (split around it)', async () => {
+    let t = await viewText(bob);
+    const i = t.indexOf('Intro');
+    await typeAt(bob, i, 'Opening: ');
+    await bob.locator('.cm-sugg-ins.mine:not(.pending)', { hasText: 'Opening:' }).waitFor({ timeout: 8000 });
+    const onPaper = (await api(alice, 'POST', '/api/operations/list_comments', { document: docId })).json.content[0].text;
+    assert(onPaper.includes('Opening:'), `paper suggestions: ${onPaper}`);
+    // Across the seam: the deletion is split, the boundary stays.
+    t = await viewText(bob);
+    const L = await layout(bob);
+    const m = L.mounts[0];
+    const from = Math.max(0, m.from - 3), to = Math.min(t.length, m.from + 4);
+    await select(bob, from, to);
+    await bob.keyboard.type('Z');
+    await sleep(300);
+    assert((await bob.locator('.editor-page .node-band').count()) >= 1, 'the band vanished');
+    const after = await viewText(bob);
+    assert(after.includes('\n'), 'seam gone');
+    // Alice rejects everything Bob has open on the paper.
+    await alice.locator('.thread-card', { hasText: 'Opening:' }).locator('.reject-btn').first().click();
+    await alice.locator('.thread-card', { hasText: 'Opening:' }).waitFor({ state: 'detached', timeout: 8000 });
+  });
+
+  await step('Bob is an editor again and sees the live text', async () => {
+    const bobSub = (await api(bob, 'GET', '/api/me')).json.you.sub;
+    await api(alice, 'POST', `/api/docs/${docId}/share`, { who: bobSub, role: 'editor' });
+    await openDoc(bob, docId);
+    await waitText(bob, 'We fold the tree');
+  });
+
   await step('a selection covering the whole section and its seams detaches it; undo puts it back', async () => {
     const L = await layout(alice);
     const m = L.mounts[0];
@@ -220,10 +280,10 @@ try {
     await alice.keyboard.press('Backspace');
     await alice.waitForFunction(() => window.__anima.binding.current.mounts.length === 0, null, { timeout: 8000 });
     await sleep(500);
-    assert((await nodeText(alice, sectionId)).includes('line by line'), 'section text was gutted');
+    assert((await nodeText(alice, sectionId)).includes('We fold the tree'), 'section text was gutted');
     await alice.keyboard.press(process.platform === 'darwin' ? 'Meta+z' : 'Control+z');
     await alice.waitForFunction(() => window.__anima.binding.current.mounts.length === 1, null, { timeout: 8000 });
-    await waitText(bob, 'line by line.', true);
+    await waitText(bob, 'We fold the tree', true);
   });
 
   await step('Backspace at the section’s first line offers a merge; merging inlines it', async () => {

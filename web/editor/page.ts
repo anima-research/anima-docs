@@ -30,7 +30,7 @@ import { SidePanel } from './panels';
 import { formatKeymap, insertBlock, insertLink, insertRule, insertTable, lineKindAt, selectedText, setLineKind, toggleCodeBlock, toggleInline, type LineKind } from './commands';
 import { SuggestSession, sharedCoords, suggestionOverlays, type Coords } from './suggest';
 import { openPingDialog } from './ping';
-import { Binding, nodeInfo, subpagesSource, type NodeLabel } from './nodes/binding';
+import { Binding, nodeInfo, subpagesSource, viewMap, type NodeLabel } from './nodes/binding';
 import { NodeStore } from './nodes/store';
 import { nodePos, virtualPos, type Mount } from './nodes/layout';
 import { NavPanel } from './nav';
@@ -318,7 +318,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   const placeholderC = new Compartment();
   /** How edits reach the shared text: directly (editing) or as suggestions. */
   const syncC = new Compartment();
-  const liveSync = () => [binding.extensions(), nodeInfo.of(labelOf), subpagesSource.of(() => nav.subpagesNotInline())];
+  const liveSync = () => [];
   const suggestSync = (s: SuggestSession) => [s.extension(), history(), keymap.of(historyKeymap)];
   let view!: EditorView;
 
@@ -355,6 +355,8 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
       extensions: [
         readOnlyC.of(EditorState.readOnly.of(!canWrite())),
         placeholderC.of(canEdit() ? placeholder('Start writing…  Markdown works: # heading, **bold**, - list, | table |') : []),
+        // The node binding is always on; suggesting adds the session on top (the binding hands it shared changes).
+        binding.extensions(), nodeInfo.of(labelOf), subpagesSource.of(() => nav.subpagesNotInline()), viewMap.of(() => coords()),
         syncC.of(liveSync()),
         remoteCursors(nodes, () => binding.current, coords),
         suggestionOverlays,
@@ -513,9 +515,8 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     app.classList.toggle('suggesting', sug);
     editTools.hidden = !canWrite();
     imageTool.hidden = sug;
-    const sectioned = binding.current.mounts.length > 0;
-    readNotice.hidden = canWrite() || (role === 'commenter' && !sectioned);
-    readNotice.replaceChildren(icon('eye', 16), role === 'commenter' ? (sectioned ? 'You can comment. Suggesting isn’t available yet in documents with sections; open a section on its own page to suggest there.' : 'Connecting…') : 'View only. Ask the owner for access to comment or edit.');
+    readNotice.hidden = canWrite() || role === 'commenter';
+    readNotice.replaceChildren(icon('eye', 16), role === 'commenter' ? 'Connecting…' : 'View only. Ask the owner for access to comment or edit.');
     toolbar.classList.toggle('reader', !canWrite());
     writeModeBtn.hidden = !atLeast(role, 'commenter');
     writeModeBtn.disabled = !canEdit();
@@ -554,20 +555,17 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   async function setSuggesting(on: boolean, opts: { remember?: boolean } = {}) {
     if (switching || on === suggesting()) return;
     if (on && !atLeast(role, 'commenter')) return;
-    if (on && binding.current.mounts.length) {
-      if (opts.remember !== false) toast('Suggesting isn’t available yet in documents with sections. Comment instead, or open a section on its own page.', { kind: 'info', timeout: 7000 });
-      return;
-    }
+
     if (!on && role === 'commenter') return; // commenters can only suggest
     if (opts.remember !== false && canEdit()) saveSuggestPref(docId, on);
     if (on) {
       if (!provider.synced) { wantSuggest = true; return; }
-      const s = new SuggestSession({ provider, meSub: me.sub });
+      const s = new SuggestSession({ provider, meSub: me.sub, nodes, layout: () => binding.current });
       s.onChange = sessionChanged;
       s.onError = (m) => toast(`A suggestion couldn’t be saved: ${m}`, { kind: 'error' });
       s.onNotice = (m) => toast(m, { kind: 'info', timeout: 8000 });
       session = s;
-      binding.suspend();
+      binding.suspend((R) => s.remote(R));
       view.dispatch({ effects: syncC.reconfigure(suggestSync(s)) });
       s.onThreads(rail.threads);
       refreshWriteUi();
@@ -668,7 +666,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     if (ctx.restoreScroll) requestAnimationFrame(() => { editPane.scrollTop = ctx.restoreScroll!; });
     if (canEdit() && provider.ytext.length === 0) view.focus();
   });
-  cleanups.push(nodes.onThreads((threads, ev) => { session?.onThreads(threads.filter((t) => t.node === docId)); rail.setThreads(threads, ev); }));
+  cleanups.push(nodes.onThreads((threads, ev) => { session?.onThreads(threads); rail.setThreads(threads, ev); }));
   provider.on('meta', (d) => applyDetail(d));
   provider.on('role', (r) => applyRole(r, true));
   // A guest renamed (here or in another tab): show it, and re-announce so others see the new name.

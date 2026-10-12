@@ -222,7 +222,7 @@ Every document is a *node*. A node whose title is empty is a **section**: it is 
 - **Split** (⌘↵) cuts the page at the cursor: the rest becomes a new section, mounted there; comments on the moved text follow it, and a comment spanning the cut keeps its start and ends in the new section. **Name** a section (band or title) and it is a document too; clear the name and it is a section again.
 - **Trees.** Any document can become the root of a navigation tree (left panel). Documents mounted inside a placed page are its subpages by themselves and follow the mounts; other pages can be placed anywhere (that shares them with the tree). Removing a subpage from a tree keeps the page and is not undone by the server. A page placed under a parent but not mounted inline shows in the parent's *Subpages* footer.
 - **Agents** read a document with its sections inline (`read_document`, delimited by `[section <id> … begins]` / `[section <id> ends]` lines) and edit a section by its id; `tree` shows the structure and the navigation trees; the rest of the tools above split, merge, mount, place and move.
-- Not yet: suggesting mode in documents that mount sections (comment, or suggest on the section's own page); history and versions are per node.
+- **Suggesting** works across sections: your pending changes sit over the whole flattened page, each is saved to the section it lies in, and a change is never allowed to cross a boundary (it is split around it). History and versions are per node.
 
 ## Run
 

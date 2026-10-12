@@ -83,21 +83,13 @@ export function remoteCursors(nodes: NodeStore, layout: () => Layout, coords: ()
     update(update: ViewUpdate) {
       const L = layout();
       const c = coords();
-      const single = L.mounts.length === 0;
       const root = nodes.get(nodes.root);
-      // ---- announce your own cursor in the node it is in
+      // ---- announce your own cursor in the node it is in (editor → shared → node)
       const focused = update.view.hasFocus && update.view.dom.ownerDocument.hasFocus();
       const sel = focused ? update.state.selection.main : null;
       let announced: string | null = null;
       if (sel && root && root.awareness.getLocalState()) {
-        let at: { node: string; offset: number } | null = null, anchorAt: { node: string; offset: number } | null = null;
-        if (single || c.suggesting) {
-          at = { node: nodes.root, offset: Math.min(c.toShared(sel.head), root.ytext.length) };
-          anchorAt = { node: nodes.root, offset: Math.min(c.toShared(sel.anchor), root.ytext.length) };
-        } else {
-          at = nodePos(L, sel.head);
-          anchorAt = nodePos(L, sel.anchor);
-        }
+        const at = nodePos(L, c.toShared(sel.head)), anchorAt = nodePos(L, c.toShared(sel.anchor));
         if (at) {
           const p = nodes.get(at.node);
           if (p) {
@@ -135,11 +127,9 @@ export function remoteCursors(nodes: NodeStore, layout: () => Layout, coords: ()
           } catch { return; }
           if (!a || !hd || a.type !== yt || hd.type !== yt) return;
           const user: RemoteUser = { name: state.user?.name ?? 'Someone', color: state.user?.color ?? '#1a73e8', sub: state.user?.sub, kind: state.user?.kind, via: state.user?.via };
-          let anchor: number | null, head: number | null;
-          if (single || c.suggesting) { anchor = id === nodes.root ? c.toView(a.index) : null; head = id === nodes.root ? c.toView(hd.index) : null; }
-          else { anchor = virtualPos(L, id, a.index, 'start'); head = virtualPos(L, id, hd.index, 'end'); }
-          if (anchor === null || head === null) return;
-          anchor = Math.min(anchor, docLen); head = Math.min(head, docLen);
+          const sa = virtualPos(L, id, a.index, 'start'), sh = virtualPos(L, id, hd.index, 'end');
+          if (sa === null || sh === null) return;
+          const anchor = Math.min(c.toView(sa), docLen), head = Math.min(c.toView(sh), docLen);
           const ck = `${id}:${client}`;
           seen.add(ck);
           const key = `${anchor}:${head}`;
