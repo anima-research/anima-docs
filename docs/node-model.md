@@ -184,9 +184,11 @@ Additions:
 
 Rendering is block substitution: render the parent with the marker line as a
 placeholder block, substitute the child's rendered block. Markdown → HTML as
-today; a LaTeX child inside markdown renders as a fragment (or verbatim); a
-LaTeX root exports by concatenation with markers mapped to `\input{}`, with an
-optional server-side `latexmk` preview. Plain export flattens with heading
+today. Implemented (10-13): a `latex` node is substituted as display math,
+one `$$ … $$` block per paragraph (KaTeX, `src/mdext.ts` `wrapByType`), and a
+`text` node as a fenced verbatim block; `$…$` / `$$…$$` in markdown render
+with KaTeX too. Still open: a LaTeX root exporting by concatenation with
+markers mapped to `\input{}`, with an optional server-side `latexmk` preview. Plain export flattens with heading
 levels shifted by depth. Import splits on H1/H2 into sections.
 
 ## 13. Performance

@@ -229,3 +229,26 @@ test('a custom domain serves the wiki at the root of that host; media of public 
   await api(ann, 'PATCH', `/api/trees/${home.id}/publish`, { published: 'off' });
   assert.equal((await fetch(`${S.base}${info.url}`)).status, 401, 'unpublished: sign in again');
 });
+
+test('math renders with KaTeX; latex and text nodes are wrapped by type; the stylesheet is linked only on pages with math', async () => {
+  const ann = await signIn('Ann');
+  const formula = (await api(ann, 'POST', '/api/docs', { title: 'Formula', content: 'E = mc^2\n\n\\int_0^1 x\\,dx', type: 'latex' })).json;
+  const raw = (await api(ann, 'POST', '/api/docs', { title: 'Raw', content: 'keep <b>this</b> as *is*\n', type: 'text' })).json;
+  const page = (await api(ann, 'POST', '/api/docs', { title: 'Math', content: `# Math\n\nInline $x^2$ costs $5 and $6.\n\n$$\n\\sum_{i=1}^n i\n$$\n\n${marker(formula.id)}\n\n${marker(raw.id)}\n` })).json;
+  const plain = (await api(ann, 'POST', '/api/docs', { title: 'Plain', content: '# Plain\n\nNo math here.\n' })).json;
+  await api(ann, 'POST', '/api/trees', { root: page.id });
+  await api(ann, 'POST', `/api/trees/${page.id}/place`, { parent: page.id, child: plain.id });
+  const pub = await api(ann, 'PATCH', `/api/trees/${page.id}/publish`, { published: 'public', slug: 'math' });
+  assert.equal(pub.status, 200, pub.text);
+  const home = await api(null, 'GET', '/w/math/');
+  assert.equal(home.status, 200);
+  assert.ok(home.text.includes('class="math math-inline"><span class="katex">'), 'inline math');
+  assert.ok(home.text.includes('costs $5 and $6.'), 'dollar amounts stay text');
+  assert.ok(home.text.includes('class="math math-block"><span class="katex-display">'), 'display math');
+  assert.equal((home.text.match(/class="math math-block"/g) ?? []).length, 3, 'the $$ block plus one per latex paragraph');
+  assert.ok(home.text.includes('<pre><code class="language-text">keep &lt;b&gt;this&lt;/b&gt; as *is*'), 'text node verbatim');
+  assert.ok(home.text.includes('<link rel="stylesheet" href="/katex/katex.min.css">'), 'KaTeX stylesheet on a page with math');
+  const other = await api(null, 'GET', '/w/math/plain');
+  assert.equal(other.status, 200);
+  assert.ok(!other.text.includes('katex.min.css'), 'no stylesheet without math');
+});

@@ -209,6 +209,7 @@ export const api = {
   unplace: (root: string, parent: string, child: string) => call<TreeView>('POST', `/api/trees/${encodeURIComponent(root)}/unplace`, { parent, child }),
   wikiTemplate: () => call<{ template: string; slots: string[] }>('GET', '/api/wiki/template'),
   publishTree: (root: string, p: Partial<PublishSettings>) => call<PublishSettings & { url: string | null }>('PATCH', `/api/trees/${encodeURIComponent(root)}/publish`, p),
+  reparent: (root: string, child: string, from: string, to: string, index: number | null) => call<TreeView>('POST', `/api/trees/${encodeURIComponent(root)}/reparent`, { child, from, to, index }),
   movePage: (root: string, parent: string, child: string, dir: 'up' | 'down') => call<TreeView>('POST', `/api/trees/${encodeURIComponent(root)}/move`, { parent, child, dir }),
 
   links: (id: string) => call<{ links: ShareLink[] }>('GET', `/api/docs/${encodeURIComponent(id)}/links`),

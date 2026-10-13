@@ -132,3 +132,105 @@ export function tableWidths(md: MD) {
     return false;
   });
 }
+
+// ------------------------------------------------------------------ math
+//
+// `$…$` inline and `$$ … $$` on its own lines (or a single `$$x$$` line), as
+// in pandoc: an opening `$` is not followed by a space, a closing one is not
+// preceded by one and not followed by a digit, so "$5 and $6" stays text.
+// Rendering is handed in (KaTeX on both sides) so this file stays free of it.
+
+export type MathRenderer = (tex: string, display: boolean) => string;
+
+export function math(md: MD, render: MathRenderer) {
+  md.inline.ruler.after('escape', 'math_inline', (state, silent) => {
+    const src = state.src, start = state.pos;
+    if (src.charCodeAt(start) !== 0x24 /* $ */) return false;
+    if (start > 0 && src.charCodeAt(start - 1) === 0x5c /* \ */) return false;
+    let pos = start + 1;
+    const double = src.charCodeAt(pos) === 0x24;
+    if (double) pos++;
+    const close = double ? '$$' : '$';
+    if (pos >= state.posMax) return false;
+    const first = src.charCodeAt(pos);
+    if (!double && (first === 0x20 || first === 0x0a || first === 0x24)) return false;
+    let end = -1;
+    for (let i = pos; i < state.posMax; i++) {
+      if (src.charCodeAt(i) === 0x5c) { i++; continue; }
+      if (src.startsWith(close, i)) {
+        if (!double) {
+          const before = src.charCodeAt(i - 1), after = src.charCodeAt(i + 1);
+          if (before === 0x20 || before === 0x0a) continue;
+          if (after >= 0x30 && after <= 0x39) continue;
+        }
+        end = i; break;
+      }
+      if (src.charCodeAt(i) === 0x0a && src.charCodeAt(i + 1) === 0x0a) break;
+    }
+    if (end < 0 || end === pos) return false;
+    if (!silent) {
+      const t = state.push(double ? 'math_block_inline' : 'math_inline', 'span', 0);
+      t.content = src.slice(pos, end);
+      t.markup = close;
+    }
+    state.pos = end + close.length;
+    return true;
+  });
+  md.block.ruler.before('fence', 'math_block', (state, startLine, endLine, silent) => {
+    const open = state.bMarks[startLine] + state.tShift[startLine];
+    const max = state.eMarks[startLine];
+    if (state.sCount[startLine] - state.blkIndent >= 4) return false;
+    if (!state.src.startsWith('$$', open)) return false;
+    const firstRest = state.src.slice(open + 2, max);
+    let content: string, next: number;
+    const single = firstRest.trimEnd();
+    if (single.endsWith('$$') && single.length >= 4) { content = single.slice(0, -2); next = startLine + 1; }
+    else {
+      if (firstRest.trim() !== '') return false;
+      let line = startLine + 1, found = -1;
+      for (; line < endLine; line++) {
+        const b = state.bMarks[line] + state.tShift[line], e = state.eMarks[line];
+        if (state.sCount[line] < state.blkIndent) break;
+        if (state.src.slice(b, e).trim() === '$$') { found = line; break; }
+      }
+      if (found < 0) return false;
+      content = state.getLines(startLine + 1, found, state.blkIndent, false);
+      next = found + 1;
+    }
+    if (silent) return true;
+    const t = state.push('math_block', 'div', 0);
+    t.block = true;
+    t.content = content;
+    t.markup = '$$';
+    t.map = [startLine, next];
+    state.line = next;
+    return true;
+  }, { alt: ['paragraph', 'reference', 'blockquote', 'list'] });
+  const safe = (tex: string, display: boolean) => {
+    try { return render(tex, display); } catch { return `<code class="math-error">${esc(tex)}</code>`; }
+  };
+  md.renderer.rules.math_inline = (tokens, i) => `<span class="math math-inline">${safe(tokens[i].content, false)}</span>`;
+  md.renderer.rules.math_block_inline = (tokens, i) => `<span class="math math-display">${safe(tokens[i].content, true)}</span>`;
+  md.renderer.rules.math_block = (tokens, i) => `<div class="math math-block">${safe(tokens[i].content.trim(), true)}</div>\n`;
+}
+
+/** Whether rendered HTML carries math (to load the math stylesheet only then). */
+export const hasMathHtml = (html: string) => html.includes('class="math ');
+
+// ------------------------------------------------------------------ node types
+//
+// A node's type says how its text renders when it is flattened into a
+// markdown page: `latex` paragraphs are display math, `text` is verbatim.
+
+export function wrapByType(text: string, type: string | undefined): string {
+  if (type === 'latex') {
+    const paras = text.split(/\n[ \t]*\n/).map((p) => p.trim()).filter(Boolean);
+    return paras.map((p) => `$$\n${p}\n$$`).join('\n\n') + (paras.length ? '\n' : '');
+  }
+  if (type === 'text') {
+    const longest = Math.max(2, ...[...text.matchAll(/`+/g)].map((m) => m[0].length));
+    const fence = '`'.repeat(longest + 1);
+    return `${fence}text\n${text.replace(/\n$/, '')}\n${fence}\n`;
+  }
+  return text;
+}

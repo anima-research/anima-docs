@@ -13,7 +13,8 @@ import { outline } from './markdown.js';
 import { scanMounts, MAX_DEPTH } from './nodes.js';
 import { sanitizeTemplate, slugify, type PublishSettings } from './trees.js';
 import sanitizeHtml from 'sanitize-html';
-import { galleryFence, imageSizes, tableWidths } from './mdext.js';
+import katex from 'katex';
+import { galleryFence, hasMathHtml, imageSizes, math, tableWidths, wrapByType } from './mdext.js';
 
 export interface WikiPage { id: string; title: string; slug: string; parent: string | null; depth: number }
 interface Assembled { body: string; asides: { id: string; title: string; body: string }[]; nodes: Set<string> }
@@ -26,6 +27,7 @@ export class Wiki {
   constructor(private app: App) {
     // Raw HTML passes through markdown-it; pages are then sanitized unless the wiki allows scripts and is served off the app's origin.
     this.md = new MarkdownIt({ html: true, linkify: true, typographer: true });
+    math(this.md, (tex, display) => katex.renderToString(tex, { displayMode: display, throwOnError: false, output: 'html' }));
     imageSizes(this.md);
     galleryFence(this.md);
     tableWidths(this.md);
@@ -119,12 +121,12 @@ export class Wiki {
           at = m.to < text.length && text[m.to] === '\n' ? m.to + 1 : m.to;
           continue;
         }
-        out += inline(m.child, next, depth + 1, collect);
+        out += wrapByType(inline(m.child, next, depth + 1, collect), d.type);
         at = m.to;
       }
       return out + text.slice(at);
     };
-    const body = inline(id, new Set(), 0, true);
+    const body = wrapByType(inline(id, new Set(), 0, true), this.app.docs.get(id)?.type);
     return { body, asides, nodes };
   }
 
@@ -225,7 +227,7 @@ export class Wiki {
       lang: 'en',
       name: esc(name),
       title: esc(page.title),
-      head: `<meta charset="utf-8">\n<meta name="viewport" content="width=device-width, initial-scale=1">\n<title>${esc(page.depth === 0 ? name : `${page.title} · ${name}`)}</title>\n<meta property="og:title" content="${esc(page.title)}">\n<meta property="og:site_name" content="${esc(name)}">\n<meta name="description" content="${esc(excerpt(body))}">\n<link rel="canonical" href="${esc(href(page))}">\n<style>${CSS.replace('__ACCENT__', theme.accent || '#2459e0')}</style>\n${theme.css ? `<style class="custom">${theme.css}</style>` : ''}`,
+      head: `<meta charset="utf-8">\n<meta name="viewport" content="width=device-width, initial-scale=1">\n<title>${esc(page.depth === 0 ? name : `${page.title} · ${name}`)}</title>\n<meta property="og:title" content="${esc(page.title)}">\n<meta property="og:site_name" content="${esc(name)}">\n<meta name="description" content="${esc(excerpt(body))}">\n<link rel="canonical" href="${esc(href(page))}">\n${hasMathHtml(article) || asides.some((x) => hasMathHtml(x.html)) ? '<link rel="stylesheet" href="/katex/katex.min.css">\n' : ''}<style>${CSS.replace('__ACCENT__', theme.accent || '#2459e0')}</style>\n${theme.css ? `<style class="custom">${theme.css}</style>` : ''}`,
       brand: `<a class="brand" href="${esc(base)}/">${theme.emoji ? `<span class="emoji">${esc(theme.emoji)}</span>` : ''}<span>${esc(name)}</span></a>`,
       tagline: theme.tagline ? `<span class="tagline">${esc(theme.tagline)}</span>` : '',
       search: `<form class="search" action="${esc(base)}/search" method="get"><input type="search" name="q" placeholder="Search ${esc(name)}" aria-label="Search"></form>`,
@@ -304,7 +306,7 @@ export class Wiki {
 function sanitizeRendered(html: string): string {
   return sanitizeHtml(html, {
     allowedTags: sanitizeHtml.defaults.allowedTags.concat(['img', 'input', 'details', 'summary', 'figure', 'figcaption', 'svg', 'path', 'video', 'audio', 'source', 'span', 'section', 'dialog']),
-    allowedAttributes: { '*': ['class', 'id', 'style', 'aria-*', 'role', 'title', 'data-*', 'width', 'height', 'align', 'loading', 'decoding', 'open'], a: ['href', 'target', 'rel', 'name'], img: ['src', 'alt', 'width', 'height', 'loading', 'decoding'], input: ['type', 'checked', 'disabled'], video: ['src', 'controls', 'poster', 'width', 'height'], audio: ['src', 'controls'], source: ['src', 'type'], svg: ['viewBox', 'xmlns', 'width', 'height', 'fill'], path: ['d', 'fill', 'stroke', 'stroke-width'] },
+    allowedAttributes: { '*': ['class', 'id', 'style', 'aria-*', 'role', 'title', 'data-*', 'width', 'height', 'align', 'loading', 'decoding', 'open'], a: ['href', 'target', 'rel', 'name'], img: ['src', 'alt', 'width', 'height', 'loading', 'decoding'], input: ['type', 'checked', 'disabled'], video: ['src', 'controls', 'poster', 'width', 'height'], audio: ['src', 'controls'], source: ['src', 'type'], svg: ['viewBox', 'xmlns', 'width', 'height', 'fill', 'preserveAspectRatio'], path: ['d', 'fill', 'stroke', 'stroke-width'] },
     allowedSchemes: ['http', 'https', 'mailto'],
     allowedSchemesByTag: { img: ['http', 'https'], video: ['http', 'https'], audio: ['http', 'https'], source: ['http', 'https'] },
     allowProtocolRelative: false,
@@ -418,6 +420,9 @@ a.wiki-private { color: var(--ink-3); text-decoration: underline dotted; }
 .prose code { font: 0.86em var(--mono); background: var(--panel); padding: 1px 5px; border-radius: 4px; }
 .prose pre { background: var(--panel); border: 1px solid var(--rule); border-radius: 8px; padding: 14px 16px; overflow: auto; font: 14px/1.5 var(--mono); }
 .prose pre code { background: none; padding: 0; font-size: inherit; }
+.prose .math-inline { white-space: nowrap; }
+.prose .math-block { margin: 0 0 1em; overflow-x: auto; overflow-y: hidden; padding: 2px 0; }
+.prose .math-display { display: block; text-align: center; margin: .6em 0; }
 .prose img { max-width: 100%; height: auto; border-radius: 6px; }
 .prose table { border-collapse: collapse; width: 100%; margin: 1em 0; font-family: var(--sans); font-size: 15px; }
 .prose th, .prose td { border: 1px solid var(--rule); padding: 7px 10px; vertical-align: top; text-align: left; }

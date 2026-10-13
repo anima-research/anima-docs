@@ -41,6 +41,8 @@ export interface BindingOptions {
   onMergeRequest?: (m: Mount) => void;
   onOpen?: (id: string) => void;
   onName?: (id: string) => void;
+  /** The type chip on a band was clicked (markdown / latex / text). */
+  onType?: (id: string, anchor: HTMLElement) => void;
   onLayout?: (l: Layout) => void;
 }
 
@@ -81,6 +83,7 @@ export class Binding {
     return [
       layoutField,
       bandDecorations,
+      nodeHover,
       collapsedGutter,
       subpagesDeco,
       EditorState.transactionFilter.of((tr) => this.filter(tr)),
@@ -103,6 +106,7 @@ export class Binding {
     view.dom.addEventListener('node-toggle', (e) => this.toggle((e as CustomEvent<string>).detail));
     view.dom.addEventListener('node-open', (e) => this.opts.onOpen?.((e as CustomEvent<string>).detail));
     view.dom.addEventListener('node-name', (e) => this.opts.onName?.((e as CustomEvent<string>).detail));
+    view.dom.addEventListener('node-type', (e) => { const d = (e as CustomEvent<{ id: string; anchor: HTMLElement }>).detail; this.opts.onType?.(d.id, d.anchor); });
     this.stop = this.store.onChange(() => this.scheduleReconcile());
     this.reconcile();
   }
@@ -282,15 +286,15 @@ export class Binding {
 // ------------------------------------------------------------------ decorations
 
 class Band extends WidgetType {
-  constructor(readonly m: Mount, readonly label: NodeLabel | undefined, readonly crumbs: string) { super(); }
+  constructor(readonly m: Mount, readonly label: NodeLabel | undefined, readonly crumbs: string, readonly hover: boolean) { super(); }
   eq(o: Band) {
-    return o.m.key === this.m.key && o.m.from === this.m.from && o.m.collapsed === this.m.collapsed && o.m.loaded === this.m.loaded && o.crumbs === this.crumbs && o.m.role === this.m.role
-      && o.label?.title === this.label?.title && o.label?.section === this.label?.section && o.label?.first === this.label?.first && o.label?.lines === this.label?.lines;
+    return o.m.key === this.m.key && o.m.from === this.m.from && o.m.collapsed === this.m.collapsed && o.m.loaded === this.m.loaded && o.crumbs === this.crumbs && o.m.role === this.m.role && o.hover === this.hover
+      && o.label?.title === this.label?.title && o.label?.section === this.label?.section && o.label?.first === this.label?.first && o.label?.lines === this.label?.lines && o.label?.type === this.label?.type;
   }
   toDOM() {
     const el = document.createElement('div');
     const d = Math.min(this.m.depth, 6);
-    el.className = `node-band depth-${d}${this.m.collapsed ? ' collapsed' : ''}${this.label?.section ? ' is-section' : ''}`;
+    el.className = `node-band depth-${d}${this.m.collapsed ? ' collapsed' : ''}${this.label?.section ? ' is-section' : ''}${this.hover ? ' node-hover' : ''}`;
     el.style.setProperty('--d', String(this.m.depth));
     el.dataset.node = this.m.child;
     el.dataset.key = this.m.key;
@@ -315,9 +319,17 @@ class Band extends WidgetType {
     name.addEventListener('click', (e) => { e.stopPropagation(); fire('node-open', this.m.child); });
     const meta = document.createElement('span');
     meta.className = 'band-meta';
-    meta.textContent = [this.m.role === 'aside' ? 'aside · sidebar panel in the wiki' : '', this.label && this.label.type !== 'markdown' ? this.label.type : ''].filter(Boolean).join(' · ');
+    meta.textContent = this.m.role === 'aside' ? 'aside · sidebar panel in the wiki' : '';
     if (this.m.role === 'aside') el.classList.add('is-aside');
     el.append(tri, crumbs, name, meta);
+    if (this.label) {
+      // The node's type: markdown, latex (display math) or text (verbatim). Click to change.
+      const ty = document.createElement('button');
+      ty.type = 'button'; ty.className = `band-act band-type${this.label.type !== 'markdown' ? ' on' : ''}`; ty.textContent = this.label.type; ty.title = 'Change how this node renders';
+      ty.addEventListener('mousedown', (e) => { e.preventDefault(); e.stopPropagation(); });
+      ty.addEventListener('click', (e) => { e.stopPropagation(); el.dispatchEvent(new CustomEvent('node-type', { detail: { id: this.m.child, anchor: ty }, bubbles: true })); });
+      el.append(ty);
+    }
     if (this.label?.section) {
       const nm = document.createElement('button');
       nm.type = 'button'; nm.className = 'band-act'; nm.textContent = 'Name…'; nm.title = 'Give this section a name: it becomes a document of its own';
@@ -337,22 +349,32 @@ class Band extends WidgetType {
   ignoreEvent() { return true; }
 }
 
-class BandEnd extends WidgetType {
-  constructor(readonly m: Mount, readonly title: string) { super(); }
-  eq(o: BandEnd) { return o.m.key === this.m.key && o.m.to === this.m.to && o.title === this.title; }
-  toDOM() {
-    const el = document.createElement('div');
-    el.className = `node-band-end depth-${Math.min(this.m.depth, 6)}`;
-    el.style.setProperty('--d', String(this.m.depth));
-    el.setAttribute('contenteditable', 'false');
-    el.textContent = `end of ${this.title}`;
-    return el;
-  }
-  ignoreEvent() { return true; }
-}
+/**
+ * Hovering a section's lines lights up its band (name, type, actions) and its
+ * rail. Kept in the state (not toggled on the DOM: CodeMirror re-syncs line
+ * attributes, and treats attribute changes on lines as DOM edits).
+ */
+const setHover = StateEffect.define<string | null>();
+const hoverField = StateField.define<string | null>({
+  create: () => null,
+  update(v, tr) { for (const e of tr.effects) if (e.is(setHover)) return e.value; return v; },
+});
+const nodeHover = [
+  hoverField,
+  EditorView.domEventHandlers({
+    mousemove(e, view) {
+      const t = (e.target as Element).closest?.('[data-node]') as HTMLElement | null;
+      const id = t?.dataset.node ?? null;
+      if (id !== view.state.field(hoverField)) view.dispatch({ effects: setHover.of(id) });
+      return false;
+    },
+    mouseleave(_e, view) { if (view.state.field(hoverField) !== null) view.dispatch({ effects: setHover.of(null) }); return false; },
+  }),
+];
 
-const bandDecorations = EditorView.decorations.compute([layoutField, 'doc', nodeInfo, viewMap], (state): DecorationSet => {
+const bandDecorations = EditorView.decorations.compute([layoutField, 'doc', nodeInfo, viewMap, hoverField], (state): DecorationSet => {
   const L = state.field(layoutField);
+  const hovered = state.field(hoverField);
   const info = state.facet(nodeInfo);
   const vm = state.facet(viewMap)();
   const len = state.doc.length;
@@ -361,17 +383,22 @@ const bandDecorations = EditorView.decorations.compute([layoutField, 'doc', node
   const marks: { from: number; deco: Decoration; side: number }[] = [];
   const crumbsOf = (m: Mount) => L.mounts.filter((o) => o !== m && o.depth < m.depth && o.from <= m.from && m.to <= o.to).sort((a, b) => a.depth - b.depth).map((o) => label(o.child)).join(' › ');
   for (const m of L.mounts) {
-    marks.push({ from: v(m.from, 1), side: -10 + m.depth, deco: Decoration.widget({ widget: new Band(m, info(m.child), crumbsOf(m)), block: true, side: -10 + m.depth }) });
-    if (!m.collapsed) marks.push({ from: v(m.to, -1), side: 10 - m.depth, deco: Decoration.widget({ widget: new BandEnd(m, label(m.child)), block: true, side: 10 - m.depth }) });
+    marks.push({ from: v(m.from, 1), side: -10 + m.depth, deco: Decoration.widget({ widget: new Band(m, info(m.child), crumbsOf(m), hovered === m.child), block: true, side: -10 + m.depth }) });
   }
   const doc = state.doc;
+  // The last line of each open section closes it (no "end of" band: the rail and a rule do).
+  const last = new Set<number>();
+  for (const m of L.mounts) if (!m.collapsed && m.loaded) last.add(doc.lineAt(v(m.to, -1)).number);
   for (let i = 1; i <= doc.lines; i++) {
     const line = doc.line(i);
     const sp = vm.toShared(line.from, 1);
     const at = placeAt(L, sp);
     const col = at ? null : L.mounts.find((m) => m.collapsed && m.from === sp);
     const depth = at ? at.depth : col ? col.depth : 0;
-    if (depth > 0) marks.push({ from: line.from, side: 0, deco: Decoration.line({ class: `node-line depth-${Math.min(depth, 6)}${col ? ' collapsed-line' : ''}`, attributes: { 'data-node': at ? at.node : col!.child, style: `--d:${depth}` } }) });
+    if (depth > 0) {
+      const node = at ? at.node : col!.child;
+      marks.push({ from: line.from, side: 0, deco: Decoration.line({ class: `node-line depth-${Math.min(depth, 6)}${col ? ' collapsed-line' : ''}${last.has(i) ? ' node-last' : ''}${hovered === node ? ' node-hover' : ''}`, attributes: { 'data-node': node, style: `--d:${depth}` } }) });
+    }
   }
   marks.sort((a, b) => a.from - b.from || a.side - b.side);
   return Decoration.set(marks.map((m) => m.deco.range(m.from)), true);

@@ -42,7 +42,7 @@ export function mountHome(root: HTMLElement, me: Me): () => void {
       const r = await api.trees();
       if (destroyed) return;
       treesEl.hidden = r.trees.length === 0;
-      treesEl.replaceChildren(h('span.home-trees-label', null, 'Trees'), ...r.trees.map((t) => h('a.tree-card', { href: `/d/${t.root}?tree=${encodeURIComponent(t.root)}`, 'data-link': '' }, icon('columns', 16), t.title || 'Untitled')));
+      treesEl.replaceChildren(h('span.home-trees-label', null, 'Spaces'), ...r.trees.map((t) => h('a.tree-card', { href: `/d/${t.root}?tree=${encodeURIComponent(t.root)}`, 'data-link': '' }, icon('columns', 16), t.title || 'Untitled')));
     } catch { treesEl.hidden = true; }
   };
   const searchInput = h('input.input.search-input', { type: 'search', placeholder: 'Search documents', 'aria-label': 'Search documents' });

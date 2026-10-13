@@ -9,11 +9,12 @@ import { HighlightStyle, syntaxHighlighting, syntaxTree } from '@codemirror/lang
 import { search, searchKeymap } from '@codemirror/search';
 import { tags as t } from '@lezer/highlight';
 
-import { api, ApiError, atLeast, isGuestMe, signalUnauthorized, ROLE_LABEL, ROLE_VERB, type DocDetail, type GeneralAccess, type Me, type Role } from '../lib/api';
+import { api, ApiError, atLeast, isGuestMe, signalUnauthorized, ROLE_LABEL, ROLE_VERB, type DocDetail, type GeneralAccess, type Me, type NodeType, type Role } from '../lib/api';
 import { debounce, h, modKey, altKey, rafThrottle, isMac } from '../lib/dom';
 import { icon } from '../lib/icons';
 import { splitLabel } from '../lib/format';
 import { renderDocument } from '../lib/markdown';
+import { wrapByType } from '../../src/mdext';
 import { searchPeople } from '../lib/people';
 import { avatar, confirmDialog, emptyState, errorMessage, openDialog, openMenu, promptDialog, spinner, toast, type MenuItem } from '../lib/ui';
 import { navigate } from '../router';
@@ -32,7 +33,7 @@ import { SuggestSession, sharedCoords, suggestionOverlays, type Coords } from '.
 import { openPingDialog } from './ping';
 import { Binding, nodeInfo, subpagesSource, viewMap, type NodeLabel } from './nodes/binding';
 import { NodeStore } from './nodes/store';
-import { nodePos, virtualPos, type Mount } from './nodes/layout';
+import { nodePos, virtualPos, type Layout, type Mount } from './nodes/layout';
 import { NavPanel } from './nav';
 import { documentCompletions, forgetDocuments } from './complete';
 
@@ -182,6 +183,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     onMergeRequest: (m) => void mergeSection(m),
     onOpen: (id) => openNode(id),
     onName: (id) => void nameSection(id),
+    onType: (id, anchor) => typeMenu(id, anchor),
     onLayout: (L) => { nav.setLayout(L); schedulePreview(); updateCrumbs(); },
   });
   /** Suggesting mode: your edits become suggestions (see suggest.ts). */
@@ -261,11 +263,14 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
       { label: 'Gallery from images…', icon: 'image', onSelect: () => (guest ? needSignInForImages() : galleryInput.click()) },
       { label: 'Empty gallery block', icon: 'image', onSelect: () => { insertBlock(view, '```gallery\n\n```', { select: [11, 11] }); view.focus(); } },
       'separator',
+      { label: 'Math, inline: $…$', icon: 'sparkle', hint: '$x$', onSelect: () => { toggleInline(view, '$'); view.focus(); } },
+      { label: 'Math block: $$ … $$', icon: 'sparkle', onSelect: () => { insertBlock(view, '$$\n\n$$', { select: [3, 3] }); view.focus(); } },
+      'separator',
       { label: 'Sidebar panel: new…', icon: 'columns', onSelect: () => void newPanel('aside') },
       { label: 'Sidebar panel: existing document…', icon: 'columns', onSelect: () => void mountExisting('aside') },
       'separator',
       { label: 'New section here (split)', icon: 'columns', hint: `${modKey}↵`, onSelect: () => void splitHere() },
-      { label: 'New empty section…', icon: 'file', onSelect: () => void newPanel('inline') },
+      { label: 'New empty section', icon: 'file', onSelect: () => void newPanel('inline') },
       { label: 'Mount an existing document…', icon: 'file', onSelect: () => void mountExisting('inline') },
     ], { align: 'start' }),
   }, icon('plus', 18), h('span.tb-text', null, 'Insert'), icon('chevronDown', 14));
@@ -517,7 +522,8 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     if (!canEdit()) { toast('You need edit access to add sections.', { kind: 'info' }); return; }
     const at = cursorNode();
     if (!at || !binding.opts.canEdit(at.node)) { toast('Put the cursor where it should go.', { kind: 'info' }); return; }
-    const title = await promptDialog({ title: role === 'aside' ? 'New sidebar panel' : 'New section', label: 'Name', placeholder: role === 'aside' ? 'e.g. Facts (shown as a panel in the wiki)' : 'Optional: a name makes it a document too', confirmLabel: 'Create' });
+    // Sections are nameless until named (the band's "Name…"); a panel asks, since its name is its heading in the wiki.
+    const title = role === 'aside' ? await promptDialog({ title: 'New sidebar panel', label: 'Name', placeholder: 'e.g. Facts (shown as a panel in the wiki)', confirmLabel: 'Create' }) : '';
     if (title === null) return;
     try {
       const d = await api.createSection(at.node, { title: title.trim(), content: role === 'aside' ? '| | |\n|---|---|\n| Key | Value |\n' : '', mount: false });
@@ -565,6 +571,16 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
       toast(r.copied ? 'Copied in (it is still mounted elsewhere).' : 'Merged.', { kind: 'success', timeout: 3000 });
     } catch (e) { toast(errorMessage(e), { kind: 'error' }); }
     view.focus();
+  }
+  /** Change how a node renders: markdown, latex (each paragraph a display formula) or text (verbatim). */
+  function typeMenu(id: string, anchor: HTMLElement) {
+    const cur = labelOf(id)?.type ?? 'markdown';
+    const canChange = id === docId ? canEdit() : binding.opts.canEdit(id);
+    const kinds: [NodeType, string, string][] = [['markdown', 'Markdown', 'text with formatting'], ['latex', 'LaTeX (math)', 'each paragraph is a display formula'], ['text', 'Plain text', 'shown verbatim, monospace']];
+    openMenu(anchor, [
+      { heading: 'Node type' },
+      ...kinds.map(([t, label, hint]) => ({ label, hint, checked: cur === t, disabled: !canChange, onSelect: () => { void api.patchDoc(id, { type: t }).then(() => { toast(`Now ${label}.`, { kind: 'success', timeout: 2500 }); schedulePreview(); }).catch((e) => toast(errorMessage(e), { kind: 'error' })); } })),
+    ], { align: 'start' });
   }
   async function nameSection(id: string) {
     const name = await promptDialog({ title: 'Name this section', label: 'Name', placeholder: 'A name makes it a document of its own', confirmLabel: 'Name' });
@@ -842,9 +858,23 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
 
   // ------------------------------------------------------------------ modes & layout
 
+  /** The flattened text for rendering: latex and text nodes wrapped by type (markdown as is). */
+  function renderSource(L: Layout): string {
+    const typeOf = (id: string) => labelOf(id)?.type ?? 'markdown';
+    let text = L.text;
+    const wrapped: Mount[] = [];
+    // Deepest and latest first, so earlier offsets stay valid and an outer wrap covers inner ones.
+    for (const m of [...L.mounts].sort((a, b) => b.from - a.from || b.depth - a.depth)) {
+      if (m.collapsed || !m.loaded || typeOf(m.child) === 'markdown') continue;
+      if (wrapped.some((w) => w.from <= m.from && m.to <= w.to)) continue;
+      text = text.slice(0, m.from) + wrapByType(text.slice(m.from, m.to), typeOf(m.child)) + text.slice(m.to);
+      wrapped.push(m);
+    }
+    return wrapByType(text, typeOf(docId));
+  }
   const renderPreview = () => {
     if (mode === 'edit') return;
-    const text = binding.current.text;
+    const text = renderSource(binding.current);
     previewBody.replaceChildren(renderDocument(text));
     if (!text.length) previewBody.replaceChildren(h('p.preview-empty', null, 'This document is empty.'));
   };
@@ -922,6 +952,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
       { label: 'Download as Markdown (.md)', icon: 'download', onSelect: () => { const a = h('a', { href: api.exportUrl(docId), download: '' }); document.body.append(a); a.click(); a.remove(); } },
       // A guest's /d/ address opens only for them: there's nothing useful to copy.
       ...(guest ? [] : [{ label: 'Copy link', icon: 'link', onSelect: () => { void navigator.clipboard.writeText(`${location.origin}/d/${docId}`).then(() => toast('Link copied', { kind: 'success', timeout: 2000 }), () => toast(`${location.origin}/d/${docId}`)); } }]));
+    if (canEdit()) items.push({ label: `Document type: ${labelOf(docId)?.type ?? 'markdown'}…`, icon: 'file', onSelect: () => typeMenu(docId, moreBtn) });
     if (atLeast(role, 'owner')) items.push('separator', { label: 'Delete document', icon: 'trash', danger: true, onSelect: () => void deleteDoc() });
     return items;
   }

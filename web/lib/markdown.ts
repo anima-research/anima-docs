@@ -3,7 +3,8 @@
 import MarkdownIt from 'markdown-it';
 import type { StateCore } from 'markdown-it';
 import DOMPurify from 'dompurify';
-import { galleryFence, imageSizes, tableWidths } from '../../src/mdext';
+import katex from 'katex';
+import { galleryFence, hasMathHtml, imageSizes, math, tableWidths } from '../../src/mdext';
 
 type MD = InstanceType<typeof MarkdownIt>;
 
@@ -37,6 +38,7 @@ docMd.use(taskLists);
 imageSizes(docMd);
 galleryFence(docMd);
 tableWidths(docMd);
+math(docMd, (tex, display) => katex.renderToString(tex, { displayMode: display, throwOnError: false, output: 'html' }));
 const commentMd = new MarkdownIt({ html: false, linkify: true, breaks: true });
 commentMd.use(taskLists);
 const inlineMd = new MarkdownIt({ html: false, linkify: true, typographer: true });
@@ -91,9 +93,20 @@ function hookLightbox() {
   });
 }
 
+let mathCss = false;
+/** KaTeX's stylesheet (and fonts) load the first time a page shows math. */
+function needMathCss() {
+  if (mathCss) return;
+  mathCss = true;
+  const l = document.createElement('link'); l.rel = 'stylesheet'; l.href = '/katex/katex.min.css';
+  document.head.append(l);
+}
+
 export function renderDocument(markdown: string): DocumentFragment {
   hookLightbox();
-  const frag = purify(docMd.render(markdown));
+  const html = docMd.render(markdown);
+  if (hasMathHtml(html)) needMathCss();
+  const frag = purify(html);
   for (const t of frag.querySelectorAll('table')) {
     const wrap = document.createElement('div');
     wrap.className = 'table-wrap';

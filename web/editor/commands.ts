@@ -186,7 +186,68 @@ export function selectedText(view: EditorView): string {
   return view.state.sliceDoc(r.from, r.to);
 }
 
+const ITEM = /^(\s*)([-*+]|\d+[.)])(\s+)/;
+
+/**
+ * Tab on a list item nests it under the item above (indented by that item's
+ * marker width, so the markdown stays valid: "1. " → 3 columns, "- " → 2);
+ * Shift-Tab un-nests it. Ordered items in the list are then renumbered per
+ * level: a nested list restarts at 1, siblings count on.
+ */
+export function listIndent(view: EditorView, dir: 1 | -1): boolean {
+  if (!editable(view)) return false;
+  const { state } = view;
+  const sel = state.selection.main;
+  const a = state.doc.lineAt(sel.from).number, b = state.doc.lineAt(sel.to).number;
+  const item = (n: number) => { const m = ITEM.exec(state.doc.line(n).text); return m ? { indent: m[1].length, width: m[2].length + m[3].length, ordered: /\d/.test(m[2]) } : null; };
+  for (let n = a; n <= b; n++) if (!item(n)) return false;
+  // The list block around the selection: items, blank lines and indented continuations.
+  const inBlock = (n: number) => { const t = state.doc.line(n).text; return !!ITEM.exec(t) || t.trim() === '' || /^\s/.test(t); };
+  let top = a; while (top > 1 && inBlock(top - 1)) top--;
+  let bottom = b; while (bottom < state.doc.lines && inBlock(bottom + 1)) bottom++;
+  while (top < a && state.doc.line(top).text.trim() === '') top++;
+  while (bottom > b && state.doc.line(bottom).text.trim() === '') bottom--;
+  const newIndent = new Map<number, number>();
+  for (let n = a; n <= b; n++) {
+    const cur = item(n)!;
+    if (dir === 1) {
+      let parent: ReturnType<typeof item> = null;
+      for (let k = n - 1; k >= top; k--) { const it = item(k); if (it && it.indent <= cur.indent) { parent = it; break; } }
+      if (!parent) return n === a ? false : true; // the first item has nothing to nest under
+      newIndent.set(n, parent.indent + parent.width);
+    } else {
+      if (cur.indent === 0) continue;
+      let up = 0;
+      for (let k = n - 1; k >= top; k--) { const it = item(k); if (it && it.indent < cur.indent) { up = it.indent; break; } }
+      newIndent.set(n, up);
+    }
+  }
+  if (!newIndent.size) return dir === -1;
+  // Renumber with the new indents in place.
+  const changes: { from: number; to: number; insert: string }[] = [];
+  const stack: { indent: number; ordered: boolean; count: number }[] = [];
+  for (let n = top; n <= bottom; n++) {
+    const line = state.doc.line(n);
+    const m = ITEM.exec(line.text);
+    if (!m) continue;
+    const indent = newIndent.get(n) ?? m[1].length;
+    const ordered = /\d/.test(m[2]);
+    while (stack.length && stack[stack.length - 1].indent > indent) stack.pop();
+    let lvl = stack[stack.length - 1];
+    if (!lvl || lvl.indent < indent || lvl.ordered !== ordered) { lvl = { indent, ordered, count: indent === 0 && ordered && !stack.length ? Number.parseInt(m[2], 10) : 1 }; if (stack.length && stack[stack.length - 1].indent === indent) stack.pop(); stack.push(lvl); }
+    else lvl.count++;
+    const markerText = ordered ? `${lvl.count}${m[2].slice(-1)}` : m[2];
+    const head = ' '.repeat(indent) + markerText + (newIndent.has(n) || ordered ? ' ' : m[3]);
+    const oldHead = m[0];
+    if (head !== oldHead) changes.push({ from: line.from, to: line.from + oldHead.length, insert: head });
+  }
+  if (changes.length) view.dispatch({ changes, scrollIntoView: true, userEvent: 'input.indent' });
+  return true;
+}
+
 export const formatKeymap: KeyBinding[] = [
+  { key: 'Tab', run: (v) => listIndent(v, 1) },
+  { key: 'Shift-Tab', run: (v) => listIndent(v, -1) },
   { key: 'Mod-b', run: (v) => toggleInline(v, '**') },
   { key: 'Mod-i', run: (v) => toggleInline(v, '*') },
   { key: 'Mod-Shift-x', run: (v) => toggleInline(v, '~~') },

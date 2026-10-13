@@ -1010,9 +1010,13 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: 'move_page', featureSet: 'docs.write', toolClass: 'notes',
-    description: 'Reorder a page among its siblings in a navigation tree.',
-    inputSchema: { type: 'object', required: ['tree', 'parent', 'document', 'direction'], properties: { tree: S('Tree root id.'), parent: S('The parent page.'), ...docArg, direction: S('up or down', { enum: ['up', 'down'] }) } },
-    run(app, actor, a) { app.trees.move(need(a, 'tree'), need(a, 'parent'), need(a, 'document'), actor, a.direction === 'up' ? -1 : 1); return text(`Moved ${a.document} ${a.direction}.`); },
+    description: 'Move a page in a navigation tree: up or down among its siblings (direction), or under another parent (to, with an optional position index).',
+    inputSchema: { type: 'object', required: ['tree', 'parent', 'document'], properties: { tree: S('Tree root id.'), parent: S('The page it is under now.'), ...docArg, direction: S('up or down (reorder among siblings)', { enum: ['up', 'down'] }), to: S('New parent page (the root, or any page in the tree).'), index: { type: 'integer', minimum: 0, description: 'Position under the new parent (default: last).' } } },
+    run(app, actor, a) {
+      if (typeof a.to === 'string' && a.to) { app.trees.reparent(need(a, 'tree'), need(a, 'document'), need(a, 'parent'), a.to, actor, Number.isInteger(a.index) ? a.index : null); return text(`Moved ${a.document} under ${a.to}.`); }
+      if (a.direction !== 'up' && a.direction !== 'down') throw new Fault(400, 'Give direction (up/down) or to (a new parent).');
+      app.trees.move(need(a, 'tree'), need(a, 'parent'), need(a, 'document'), actor, a.direction === 'up' ? -1 : 1); return text(`Moved ${a.document} ${a.direction}.`);
+    },
   },
 ];
 

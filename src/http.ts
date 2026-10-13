@@ -275,13 +275,13 @@ export function createHttp(app: App) {
       const reqHost = String(req.headers.host ?? '').toLowerCase().split(':')[0];
       // A published wiki on its own domain is served here, as that domain.
       const wikiDomainRoot = canonicalHost && reqHost !== canonicalHost ? app.trees.rootByDomain(reqHost) : null;
-      if (wikiDomainRoot && (method === 'GET' || method === 'HEAD') && !path.startsWith('/media/')) {
+      if (wikiDomainRoot && (method === 'GET' || method === 'HEAD') && !path.startsWith('/media/') && !path.startsWith('/katex/')) {
         await serveWiki(req, res, wikiDomainRoot, '', path, url, `https://${reqHost}`, true);
         return;
       }
       // The shared wiki host: /<slug>/... for every public wiki; scripts may run here (it is not the app's origin).
       const onWikiHost = !!app.config.wikiHost && reqHost === app.config.wikiHost && reqHost !== (canonicalHost ?? new URL(app.config.origin).host.toLowerCase());
-      if (onWikiHost && (method === 'GET' || method === 'HEAD') && !path.startsWith('/media/')) {
+      if (onWikiHost && (method === 'GET' || method === 'HEAD') && !path.startsWith('/media/') && !path.startsWith('/katex/')) {
         const hm = /^\/([a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?)(\/.*)?$/.exec(path);
         const root = hm ? app.trees.rootBySlug(hm[1]) : null;
         if (!root) throw new Fault(404, 'No such wiki.');
@@ -505,6 +505,12 @@ export function createHttp(app: App) {
             send(200, { ...ps, url: app.wiki.url(root) });
             return;
           }
+          if (rest === '/reparent' && method === 'POST') {
+            const b = await json(req);
+            app.trees.reparent(root, String(b.child ?? ''), String(b.from ?? ''), String(b.to ?? ''), a, Number.isInteger(b.index) ? b.index : null);
+            send(200, app.trees.view(root, a));
+            return;
+          }
           if (method === 'POST' && (rest === '/place' || rest === '/unplace' || rest === '/move')) {
             const b = await json(req);
             const parent = String(b.parent ?? ''), child = String(b.child ?? '');
@@ -680,7 +686,9 @@ export function createHttp(app: App) {
 
       // ------------------------------------------------ static app shell
       if (method !== 'GET' && method !== 'HEAD') throw new Fault(405, 'Method not allowed.');
-      const st = STATIC[path];
+      // KaTeX's stylesheet and fonts (copied into public/katex by the web build); on wiki hosts too.
+      const km = /^\/katex\/(katex\.min\.css|fonts\/KaTeX_[A-Za-z0-9-]+\.(?:woff2|woff|ttf))$/.exec(path);
+      const st = km ? [`katex/${km[1]}`, km[1].endsWith('.css') ? 'text/css; charset=utf-8' : km[1].endsWith('.woff2') ? 'font/woff2' : km[1].endsWith('.woff') ? 'font/woff' : 'font/ttf'] as [string, string] : STATIC[path];
       if (st) {
         const file = join(PUBLIC_DIR, st[0]);
         if (!existsSync(file)) throw new Fault(404, 'Not built. Run npm run build:web.');
@@ -691,7 +699,7 @@ export function createHttp(app: App) {
         let cached = staticCache.get(file);
         if (!cached || cached.mtime !== mtime) staticCache.set(file, cached = { mtime, raw: readFileSync(file), gz: null });
         if (gzip && !cached.gz) cached.gz = gzipSync(cached.raw, { level: 9 });
-        send(200, gzip ? cached.gz! : cached.raw, st[1], { 'Cache-Control': 'no-cache', ETag: etag, Vary: 'Accept-Encoding', ...(gzip ? { 'Content-Encoding': 'gzip' } : {}) });
+        send(200, gzip ? cached.gz! : cached.raw, st[1], { 'Cache-Control': km ? 'public, max-age=604800' : 'no-cache', ETag: etag, Vary: 'Accept-Encoding', ...(gzip ? { 'Content-Encoding': 'gzip' } : {}) });
         return;
       }
       if (path === '/' || path === '/auth/callback' || path === '/admin' || path === '/people' || /^\/d\/[A-Za-z0-9]+$/.test(path) || /^\/l\/[A-Za-z0-9_-]{20,40}$/.test(path)) {

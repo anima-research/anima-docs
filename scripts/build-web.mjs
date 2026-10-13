@@ -5,9 +5,15 @@
 import * as esbuild from 'esbuild';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { cpSync, mkdirSync } from 'node:fs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const watch = process.argv.includes('--watch');
+
+// KaTeX's stylesheet and fonts, served at /katex/ (loaded only by pages that show math).
+mkdirSync(join(root, 'public/katex/fonts'), { recursive: true });
+cpSync(join(root, 'node_modules/katex/dist/katex.min.css'), join(root, 'public/katex/katex.min.css'));
+cpSync(join(root, 'node_modules/katex/dist/fonts'), join(root, 'public/katex/fonts'), { recursive: true });
 
 const options = {
   absWorkingDir: root,

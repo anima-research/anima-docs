@@ -325,6 +325,31 @@ export class Trees extends EventEmitter {
     this.docs.emit('share', { docId: child, sub: null, role: 'unplaced', by: actor.sub });
   }
 
+  /**
+   * Move a page to another parent (or another position under the same one)
+   * within a tree. Editors of both parents may; the page is already in the
+   * tree, so no new sharing is involved. Becomes an explicit placement.
+   */
+  reparent(tree: string, child: string, from: string, to: string, actor: Actor, index: number | null = null): void {
+    if (!this.isRoot(tree)) throw new Fault(404, 'No such tree.');
+    if (!this.db.prepare('SELECT 1 FROM placements WHERE tree_id = ? AND parent_id = ? AND child_id = ?').get(tree, from, child)) throw new Fault(404, 'That page is not placed there.');
+    this.docs.require(from, actor, 'editor');
+    if (to !== from) this.docs.require(to, actor, 'editor');
+    if (!this.docs.get(to)) throw new Fault(404, 'No such page.');
+    if (this.wouldCycle(tree, to, child)) throw new Fault(409, 'A page cannot be moved inside itself.');
+    const siblings = this.children(tree, to).filter((p) => p.child !== child);
+    const at = index === null ? siblings.length : Math.max(0, Math.min(index, siblings.length));
+    const before = siblings[at - 1]?.ord ?? null, after = siblings[at]?.ord ?? null;
+    const ord = before === null && after === null ? 1 : before === null ? after! - 1 : after === null ? before + 1 : (before + after) / 2;
+    this.db.transaction(() => {
+      this.db.prepare('DELETE FROM placements WHERE tree_id = ? AND parent_id = ? AND child_id = ?').run(tree, from, child);
+      this.db.prepare('DELETE FROM placement_exclusions WHERE tree_id = ? AND parent_id = ? AND child_id = ?').run(tree, to, child);
+      if (from !== to) this.db.prepare('INSERT OR REPLACE INTO placement_exclusions (tree_id, parent_id, child_id, by, at) VALUES (?, ?, ?, ?, ?)').run(tree, from, child, actor.sub, Date.now());
+      this.db.prepare('INSERT OR REPLACE INTO placements (tree_id, parent_id, child_id, ord, derived, placed_by, at) VALUES (?, ?, ?, ?, 0, ?, ?)').run(tree, to, child, ord, actor.sub, Date.now());
+    })();
+    this.changed(tree);
+  }
+
   move(tree: string, parent: string, child: string, actor: Actor, dir: -1 | 1): void {
     if (!this.isRoot(tree)) throw new Fault(404, 'No such tree.');
     this.docs.require(parent, actor, 'editor');

@@ -207,6 +207,16 @@ test('navigation trees: derived subpages, sticky exclusion, placed-only pages, c
   trees.on('changed', (e: { tree: string }) => changed.push(e.tree));
   docs.rename(method.id, o, 'Method renamed');
   assert.ok(changed.includes(paper.id), 'rename did not announce the tree');
+  // Reparent: under another page, at a position; cycles refused; editors of both parents only.
+  const extra2 = docs.create(o, 'Extra2', 'x');
+  trees.place(paper.id, paper.id, extra2.id, o);
+  trees.reparent(paper.id, extra2.id, paper.id, method.id, o, 0);
+  assert.deepEqual(trees.children(paper.id, method.id).map((p) => p.child)[0], extra2.id);
+  assert.ok(!trees.children(paper.id, paper.id).some((p) => p.child === extra2.id));
+  assert.throws(() => trees.reparent(paper.id, method.id, paper.id, extra2.id, o), (e: Fault) => e.status === 409);
+  trees.reparent(paper.id, extra2.id, method.id, paper.id, o, 0);
+  assert.equal(trees.children(paper.id, paper.id)[0].child, extra2.id);
+  assert.throws(() => trees.reparent(paper.id, extra2.id, paper.id, method.id, r, 0), (e: Fault) => e.status === 403);
   // Cycles.
   assert.equal(trees.place(paper.id, method.id, paper.id, o), false);
   // Paths and a second tree.

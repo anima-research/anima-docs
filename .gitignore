@@ -7,3 +7,4 @@ public/app.css
 *.log
 .env
 public/*.map
+public/katex/

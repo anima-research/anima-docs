@@ -181,7 +181,7 @@ try {
 
   await step('a navigation tree: the paper becomes a root, Method is its subpage by itself; a placed-only subpage shows in the footer', async () => {
     if (!(await alice.evaluate(() => document.querySelector('.doc-app').classList.contains('nav-open')))) await alice.locator('.nav-btn').click();
-    await alice.locator('.doc-nav .nav-tree-chip.new').click();
+    await alice.locator('.doc-nav .nav-space-acts .nav-act').click();
     await alice.locator('.doc-nav .nav-row', { hasText: 'Method' }).waitFor({ timeout: 8000 });
     // + subpage on the root: a placed page that is not mounted inline.
     await alice.locator('.doc-nav .nav-row').first().hover();
@@ -198,6 +198,33 @@ try {
     await alice.locator('.editor-page .subpages a', { hasText: 'Plan' }).waitFor({ timeout: 8000 });
     assert(!(await viewText(alice)).includes('Plan'), 'Plan leaked into the body');
     await alice.screenshot({ path: join(SHOTS, 'tree.png') });
+  });
+
+  await step('pages are arranged in the left panel: drag Plan onto Method nests it; Move to… puts it back; right-click renames', async () => {
+    await openDoc(alice, docId, docId);
+    const row = (t) => alice.locator('.doc-nav .nav-pages .nav-row', { hasText: t });
+    await row('Plan').waitFor({ timeout: 8000 });
+    assert((await row('Plan').getAttribute('aria-level')) === '2', 'Plan should start as a child of the space');
+    await row('Plan').dragTo(row('Method'));
+    await alice.waitForFunction(() => [...document.querySelectorAll('.doc-nav .nav-pages .nav-row')].some((r) => r.textContent.includes('Plan') && r.getAttribute('aria-level') === '3'), null, { timeout: 8000 });
+    const view = (await api(alice, 'GET', `/api/trees/${docId}`)).json;
+    const method = view.nodes.find((n) => n.title === 'Method'), plan = view.nodes.find((n) => n.title === 'Plan');
+    assert(view.placements.some((p) => p.parent === method.id && p.child === plan.id), 'Plan not placed under Method on the server');
+    // Back under the space through the context menu.
+    await row('Plan').click({ button: 'right' });
+    await alice.getByRole('menuitem', { name: 'Move to…' }).click();
+    await alice.locator('dialog.dialog .pick-row', { hasText: 'Paper' }).click();
+    await alice.waitForFunction(() => [...document.querySelectorAll('.doc-nav .nav-pages .nav-row')].some((r) => r.textContent.includes('Plan') && r.getAttribute('aria-level') === '2'), null, { timeout: 8000 });
+    // Rename from the menu, and back.
+    for (const [from, to] of [['Plan', 'Plan 1'], ['Plan 1', 'Plan']]) {
+      await row(from).hover();
+      await row(from).locator('.nav-more').click();
+      await alice.getByRole('menuitem', { name: 'Rename…' }).click();
+      const inp = alice.locator('dialog.dialog input.input');
+      await inp.waitFor(); await inp.fill(to);
+      await alice.locator('dialog.dialog button.btn.primary').click();
+      await row(to).waitFor({ timeout: 8000 });
+    }
   });
 
   await step('an agent reads the paper with the section inline, edits the section by id, and sees the tree', async () => {
@@ -468,6 +495,38 @@ try {
     } catch (e) { throw new Error(`no width written; doc around the table: ${JSON.stringify((await viewText(alice)).match(/\| Column 1[\s\S]{0,400}/)?.[0])}`); }
     await alice.waitForFunction(() => [...document.querySelectorAll('.cm-table-widget.editable th')].some((th) => /ch$/.test(th.style.width)), null, { timeout: 8000 });
     await alice.screenshot({ path: join(SHOTS, 'table.png') });
+  });
+
+  await step('nested numbered lists: Tab nests under the item above with the parent’s marker width and restarts at 1; Shift-Tab returns', async () => {
+    await openDoc(alice, docId, docId);
+    const text = await viewText(alice);
+    await setCursor(alice, text.length);
+    await alice.keyboard.press('Enter'); await alice.keyboard.press('Enter');
+    await alice.keyboard.type('1. first');
+    await alice.keyboard.press('Enter');
+    await alice.keyboard.type('second');
+    await alice.keyboard.press('Tab');
+    await alice.waitForFunction(() => window.__anima.view.state.doc.toString().endsWith('1. first\n   1. second'), null, { timeout: 5000 });
+    await alice.keyboard.press('Enter');
+    await alice.keyboard.type('third');
+    await alice.waitForFunction(() => window.__anima.view.state.doc.toString().endsWith('1. first\n   1. second\n   2. third'), null, { timeout: 5000 });
+    await alice.keyboard.press('Shift+Tab');
+    await alice.waitForFunction(() => window.__anima.view.state.doc.toString().endsWith('1. first\n   1. second\n2. third'), null, { timeout: 5000 });
+  });
+
+  await step('an empty section needs no dialog; math renders in the preview', async () => {
+    await alice.keyboard.press('Enter'); await alice.keyboard.press('Enter');
+    await alice.keyboard.type('Energy $E = mc^2$ here.');
+    await alice.keyboard.press('Enter'); await alice.keyboard.press('Enter');
+    const bands = await alice.locator('.editor-page .node-band').count();
+    await alice.locator('.insert-btn').click();
+    await alice.getByRole('menuitem', { name: 'New empty section' }).click();
+    await alice.waitForFunction((n) => document.querySelectorAll('.editor-page .node-band').length === n + 1, bands, { timeout: 8000 });
+    assert((await alice.locator('dialog.dialog').count()) === 0, 'a dialog opened for an empty section');
+    assert((await alice.locator('.editor-page .node-band-end').count()) === 0, '"end of" bands are back');
+    await alice.locator('.seg-btn[data-mode=split]').click();
+    await alice.locator('.preview-body .math-inline .katex').first().waitFor({ timeout: 8000 });
+    await alice.locator('.seg-btn[data-mode=edit]').click();
   });
 
   await step('home lists the tree', async () => {

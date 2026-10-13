@@ -1,16 +1,17 @@
-// The left navigation: trees (Notion-style page trees), the current tree's
-// pages, and this document's outline of sections.
+// The left navigation: spaces (a space is a tree whose root is a document),
+// the current space's pages (drag to move, right-click for actions), the
+// wiki state, and this document's outline of sections.
 
 import { api, atLeast, type PublishSettings, type Role, type TreeRoot, type TreeView } from '../lib/api';
 import { h } from '../lib/dom';
 import { icon } from '../lib/icons';
-import { confirmDialog, errorMessage, openDialog, promptDialog, toast } from '../lib/ui';
+import { confirmDialog, errorMessage, openDialog, openMenu, promptDialog, toast, type MenuItem } from '../lib/ui';
 import type { Layout } from './nodes/layout';
 
 export interface NavDeps {
   docId: string;
   role: () => Role | null;
-  /** The tree this page was opened through (from the URL), if any. */
+  /** The space this page was opened through (from the URL), if any. */
   tree: string | null;
   onOpen: (id: string, tree: string | null) => void;
   /** Names of nodes in the view (for the outline), by id. */
@@ -19,10 +20,11 @@ export interface NavDeps {
 }
 
 const collapsedKey = (tree: string) => `docs.nav.collapsed.${tree}`;
+type DropZone = 'before' | 'after' | 'inside';
 
 export class NavPanel {
   readonly el: HTMLElement;
-  private treesEl = h('div.nav-trees');
+  private spaceEl = h('div.nav-space');
   private pagesEl = h('div.nav-pages');
   private outlineEl = h('div.nav-outline');
   private wikiEl = h('div.nav-wiki');
@@ -32,11 +34,12 @@ export class NavPanel {
   private collapsed = new Set<string>();
   tree: string | null;
   private destroyed = false;
+  private dragging: { child: string; from: string } | null = null;
 
   constructor(private deps: NavDeps) {
     this.tree = deps.tree;
     this.el = h('nav.doc-nav', { 'aria-label': 'Pages' },
-      h('div.nav-section', null, h('div.nav-head', null, 'Trees'), this.treesEl),
+      h('div.nav-section.nav-section-space', null, this.spaceEl),
       h('div.nav-section.nav-section-pages', null, this.wikiEl, this.pagesEl),
       h('div.nav-section', null, h('div.nav-head', null, 'Sections in this page'), this.outlineEl));
     this.loadCollapsed();
@@ -57,9 +60,9 @@ export class NavPanel {
     try {
       const r = await api.trees();
       if (this.destroyed) return;
-      this.roots = r.trees;
+      this.roots = r.trees.sort((a, b) => (a.title || '').localeCompare(b.title || ''));
       if (this.tree && !this.roots.some((t) => t.root === this.tree)) this.tree = null;
-      // A page in exactly one tree is shown in it even without ?tree=.
+      // A page in exactly one space is shown in it even without ?tree=.
       if (!this.tree) {
         const p = await api.paths(this.deps.docId).catch(() => null);
         if (this.destroyed) return;
@@ -80,7 +83,7 @@ export class NavPanel {
 
   setLayout(L: Layout) { this.layout = L; this.renderOutline(); }
 
-  /** Another document opened in the same shell: keep the trees and the tree, re-point the panel at it. */
+  /** Another document opened in the same shell: keep the spaces and the space, re-point the panel at it. */
   rebind(deps: NavDeps) {
     const treeChanged = deps.tree !== null && deps.tree !== this.tree;
     this.deps = deps;
@@ -90,7 +93,7 @@ export class NavPanel {
     void this.refresh();
   }
 
-  /** Subpages of the open document in the current tree that are not mounted inline (for the editor's footer). */
+  /** Subpages of the open document in the current space that are not mounted inline (for the editor's footer). */
   subpagesNotInline(): { id: string; title: string }[] {
     if (!this.view || !this.layout) return [];
     const inline = new Set(this.layout.mounts.map((m) => m.child));
@@ -99,7 +102,7 @@ export class NavPanel {
       .map((p) => ({ id: p.child, title: byId.get(p.child)?.title ?? '' }));
   }
 
-  /** Breadcrumb of the open document in the current tree. */
+  /** Breadcrumb of the open document in the current space. */
   crumbs(): { id: string; title: string }[] {
     if (!this.view) return [];
     const byId = new Map(this.view.nodes.map((n) => [n.id, n]));
@@ -109,24 +112,61 @@ export class NavPanel {
 
   private render() {
     const top = this.el.scrollTop;
-    const canEdit = atLeast(this.deps.role(), 'editor');
-    const chips: HTMLElement[] = this.roots.map((t) => h('button.nav-tree-chip', { type: 'button', class: t.root === this.tree ? 'on' : '', onclick: () => { this.tree = t.root; this.loadCollapsed(); void this.refresh(); this.deps.onOpen(this.deps.docId, t.root); } }, t.title || 'Untitled'));
-    if (canEdit && !this.roots.some((t) => t.root === this.deps.docId)) chips.push(h('button.nav-tree-chip.new', { type: 'button', 'data-tip': 'Make this document the root of a navigation tree', onclick: () => void this.makeTree() }, icon('plus', 14), 'Tree'));
-    this.treesEl.replaceChildren(...chips);
+    this.renderSpace();
     this.renderPages();
     this.renderOutline();
     this.el.scrollTop = top;
   }
 
-  private async makeTree() {
+  // ------------------------------------------------------------------ spaces
+
+  private renderSpace() {
+    const canEdit = atLeast(this.deps.role(), 'editor');
+    const cur = this.roots.find((t) => t.root === this.tree);
+    const btn: HTMLButtonElement = h('button.nav-space-btn', { type: 'button', 'aria-haspopup': 'listbox', 'aria-label': 'Choose a space', onclick: () => this.spaceMenu(btn) },
+      icon('columns', 16), h('span.nav-space-name', null, cur ? (cur.title || 'Untitled') : this.roots.length ? 'Choose a space' : 'No spaces yet'), icon('chevronDown', 14));
+    const actions = h('span.nav-space-acts', null,
+      canEdit && !this.roots.some((t) => t.root === this.deps.docId)
+        ? h('button.nav-act', { type: 'button', 'aria-label': 'Make this document a space', 'data-tip': 'Make this document the root of a space', onclick: () => void this.makeSpace() }, '+')
+        : null);
+    this.spaceEl.replaceChildren(h('div.nav-space-row', null, btn, actions));
+  }
+
+  private spaceMenu(anchor: HTMLElement) {
+    const pop = h('div.nav-space-pop', { role: 'listbox', 'aria-label': 'Spaces' });
+    const input = h('input.input.sm', { type: 'search', placeholder: 'Find a space', 'aria-label': 'Find a space' });
+    const list = h('div.nav-space-list');
+    const fill = () => {
+      const q = input.value.trim().toLowerCase();
+      const items = this.roots.filter((t) => !q || (t.title || '').toLowerCase().includes(q));
+      list.replaceChildren(...items.map((t) => h('button.nav-space-item', { type: 'button', role: 'option', 'aria-selected': String(t.root === this.tree), class: t.root === this.tree ? 'on' : '', onclick: () => { close(); this.tree = t.root; this.loadCollapsed(); void this.refresh(); this.deps.onOpen(t.root, t.root); } },
+        h('span', null, t.title || 'Untitled'), h('span.meta', null, t.role))));
+      if (!items.length) list.replaceChildren(h('div.nav-note', null, this.roots.length ? 'No space matches.' : 'A space is a document whose subpages show here, Notion-style. Make one with + above.'));
+    };
+    input.addEventListener('input', fill);
+    input.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.preventDefault(); close(); } if (e.key === 'Enter') { (list.querySelector('.nav-space-item') as HTMLButtonElement | null)?.click(); } });
+    pop.append(input, list);
+    fill();
+    const r = anchor.getBoundingClientRect();
+    pop.style.left = `${r.left}px`; pop.style.top = `${r.bottom + 4}px`; pop.style.minWidth = `${Math.max(240, r.width)}px`;
+    document.body.append(pop);
+    const close = () => { pop.remove(); document.removeEventListener('mousedown', onDown, true); };
+    const onDown = (e: MouseEvent) => { if (!pop.contains(e.target as Node) && e.target !== anchor && !anchor.contains(e.target as Node)) close(); };
+    setTimeout(() => document.addEventListener('mousedown', onDown, true), 0);
+    input.focus();
+  }
+
+  private async makeSpace() {
     try {
       await api.createTree(this.deps.docId);
       this.tree = this.deps.docId;
-      toast('This document is now a tree. Documents mounted inside it are its subpages; place others from their pages.', { kind: 'success' });
+      toast('This document is a space now. Documents mounted inside it are its pages; drag pages in the panel to arrange them.', { kind: 'success' });
       await this.refresh();
       this.deps.onOpen(this.deps.docId, this.tree);
     } catch (e) { toast(errorMessage(e), { kind: 'error' }); }
   }
+
+  // ------------------------------------------------------------------ wiki
 
   private renderWiki() {
     const v = this.view;
@@ -136,7 +176,7 @@ export class NavPanel {
     const live = ps.published !== 'off' && v.url;
     this.wikiEl.replaceChildren(h('div.nav-wiki-row', null,
       live ? h('a.nav-wiki-link', { href: v.url!, target: '_blank', rel: 'noopener' }, icon('globe', 14), ps.published === 'public' ? 'View wiki' : 'View wiki (members)') : h('span.meta', null, owner ? 'Not published' : ''),
-      owner ? h('button.nav-act.wide', { type: 'button', 'data-tip': 'Publish this tree as a wiki', onclick: () => void this.publishDialog() }, live ? 'Settings' : 'Publish…') : null));
+      owner ? h('button.nav-act.wide', { type: 'button', 'data-tip': 'Publish this space as a wiki', onclick: () => void this.publishDialog() }, live ? 'Settings' : 'Publish…') : null));
   }
 
   private async publishDialog() {
@@ -154,13 +194,13 @@ export class NavPanel {
     const domain = h('input.input', { type: 'text', value: ps.domain ?? '', placeholder: 'wiki.example.org (optional)', maxlength: '253' });
     const css = h('textarea.input.code', { rows: 8, spellcheck: 'false', placeholder: '/* Extra CSS for the wiki. Hooks: .top .brand .side .article .prose .asides .panel .infobox .page-foot .site-foot; variables --accent --ink --paper --panel --serif --sans */' });
     css.value = ps.theme.css ?? '';
-    const template = h('textarea.input.code', { rows: 10, spellcheck: 'false', placeholder: 'Leave empty for the standard layout. HTML with {{slots}}: {{head}} {{brand}} {{tagline}} {{search}} {{edit}} {{nav}} {{crumbs}} {{title}} {{content}} {{infoboxes}} {{contents}} {{related}} {{asides}} {{subpages}} {{pagefoot}} {{footer}} {{lightbox}}. Scripts are removed.' });
+    const template = h('textarea.input.code', { rows: 10, spellcheck: 'false', placeholder: 'Leave empty for the standard layout. HTML with {{slots}}: {{head}} {{brand}} {{tagline}} {{search}} {{edit}} {{nav}} {{crumbs}} {{title}} {{content}} {{infoboxes}} {{contents}} {{related}} {{asides}} {{subpages}} {{pagefoot}} {{footer}} {{lightbox}}. Scripts are removed unless scripts are allowed below.' });
     template.value = ps.theme.template ?? '';
+    const loadDefault = h('button.btn.ghost.sm', { type: 'button', onclick: async () => { try { const r = await api.wikiTemplate(); template.value = r.template; template.focus(); } catch (e) { toast(errorMessage(e), { kind: 'error' }); } } }, 'Start from the standard layout');
     const scripts = h('input', { type: 'checkbox', checked: !!ps.scripts });
     const scriptsRow = h('label.radio', null, scripts, h('span', null, h('strong', null, 'Allow HTML and scripts'), ' ', h('span.meta', null, 'raw HTML and <script> in pages and the template. Runs only on the wiki’s own host (its domain or the shared wiki host), never here. Anyone who can edit a page can then run code in visitors’ browsers.')));
-    const loadDefault = h('button.btn.ghost.sm', { type: 'button', onclick: async () => { try { const r = await api.wikiTemplate(); template.value = r.template; template.focus(); } catch (e) { toast(errorMessage(e), { kind: 'error' }); } } }, 'Start from the standard layout');
     const err = h('div.field-error', { role: 'alert' });
-    const urlLine = h('p.meta', null, v.url ? h('span', null, 'Live at ', h('a', { href: v.url, target: '_blank', rel: 'noopener' }, v.url)) : 'Published trees get an address under /w/<address>/; a custom domain serves the wiki at its root.');
+    const urlLine = h('p.meta', null, v.url ? h('span', null, 'Live at ', h('a', { href: v.url, target: '_blank', rel: 'noopener' }, v.url)) : 'Published spaces get an address under /w/<address>/; a custom domain serves the wiki at its root.');
     const body = h('div.form-stack', null,
       h('div.radio-stack', null,
         vis('off', 'Not published', 'only the editor'),
@@ -191,35 +231,160 @@ export class NavPanel {
     const d = openDialog({ title: 'Publish as a wiki', body, footer: [h('button.btn.ghost', { type: 'button', onclick: () => d.close() }, 'Cancel'), h('button.btn.primary', { type: 'button', onclick: () => void save() }, 'Save')] });
   }
 
+  // ------------------------------------------------------------------ pages
+
   private renderPages() {
     const v = this.view;
     this.renderWiki();
     if (!v) {
-      this.pagesEl.replaceChildren(h('div.nav-note', null, this.roots.length ? 'Pick a tree above to see its pages.' : 'No trees yet. A tree is a document whose subpages show here, Notion-style.'));
+      this.pagesEl.replaceChildren(h('div.nav-note', null, this.roots.length ? 'Choose a space above to see its pages.' : 'No spaces yet. A space is a document whose pages show here, Notion-style.'));
       return;
     }
     const byId = new Map(v.nodes.map((n) => [n.id, n]));
     const canArrange = atLeast(v.role, 'editor');
     const rows: HTMLElement[] = [];
-    const row = (id: string, depth: number, parent: string | null, placedExplicitly: boolean) => {
+    const row = (id: string, depth: number, parent: string | null, index: number) => {
       const n = byId.get(id);
-      const kids = v.placements.filter((p) => p.parent === id);
+      const kids = v.placements.filter((p) => p.parent === id).sort((a, b) => a.ord - b.ord);
       const col = this.collapsed.has(id);
       const current = id === this.deps.docId;
       const tri = kids.length
         ? h('button.nav-tri', { type: 'button', 'aria-label': col ? 'Expand' : 'Collapse', onclick: (e: Event) => { e.stopPropagation(); if (col) this.collapsed.delete(id); else this.collapsed.add(id); this.saveCollapsed(); this.renderPages(); } }, col ? '▸' : '▾')
         : h('span.nav-tri.leaf', null, '·');
-      const acts = canArrange && parent ? h('span.nav-acts', null,
-        h('button.nav-act', { type: 'button', 'aria-label': 'Move up', 'data-tip': 'Move up', onclick: (e: Event) => { e.stopPropagation(); void this.act(api.movePage(v.root, parent, id, 'up')); } }, '↑'),
-        h('button.nav-act', { type: 'button', 'aria-label': 'Move down', 'data-tip': 'Move down', onclick: (e: Event) => { e.stopPropagation(); void this.act(api.movePage(v.root, parent, id, 'down')); } }, '↓'),
-        h('button.nav-act', { type: 'button', 'aria-label': 'Remove from this tree', 'data-tip': placedExplicitly ? 'Remove from this tree (the page stays)' : 'Remove from this tree (the page stays; it won’t come back by itself)', onclick: (e: Event) => { e.stopPropagation(); void this.act(api.unplace(v.root, parent, id)); } }, '×')) : null;
-      const sub = canArrange ? h('button.nav-act', { type: 'button', 'aria-label': 'New subpage', 'data-tip': 'New subpage', onclick: (e: Event) => { e.stopPropagation(); void this.newSubpage(id); } }, '+') : null;
-      rows.push(h('div.nav-row', { class: current ? 'current' : '', style: `--d:${depth}`, role: 'treeitem', 'aria-level': String(depth + 1), onclick: () => this.deps.onOpen(id, v.root) },
-        tri, h('span.nav-name', { class: n?.section ? 'nameless' : '' }, n ? (n.section ? 'section' : n.title || 'Untitled') : id), h('span.nav-acts-wrap', null, sub, acts)));
-      if (!col) for (const p of kids.sort((a, b) => a.ord - b.ord)) if (p.child !== id) row(p.child, depth + 1, id, !p.derived);
+      const el = h('div.nav-row', {
+        class: `${current ? 'current' : ''}${parent === null ? ' root' : ''}`, style: `--d:${depth}`, role: 'treeitem', 'aria-level': String(depth + 1),
+        draggable: canArrange && parent !== null ? 'true' : undefined,
+        'data-id': id, 'data-parent': parent ?? '', 'data-index': String(index),
+        onclick: () => this.deps.onOpen(id, v.root),
+        oncontextmenu: (e: MouseEvent) => { e.preventDefault(); this.contextMenu(e, id, parent, index); },
+      },
+        tri, h('span.nav-name', { class: n?.section ? 'nameless' : '' }, n ? (n.section ? 'section' : n.title || 'Untitled') : id),
+        canArrange ? h('button.nav-act.nav-add', { type: 'button', 'aria-label': 'New subpage', 'data-tip': 'New subpage', onclick: (e: MouseEvent) => { e.stopPropagation(); void this.newSubpage(id); } }, '+') : null,
+        h('button.nav-act.nav-more', { type: 'button', 'aria-label': 'Page actions', 'aria-haspopup': 'menu', onclick: (e: MouseEvent) => { e.stopPropagation(); this.contextMenu(e, id, parent, index); } }, '⋯'));
+      if (canArrange) this.wireDrag(el, id, parent, index);
+      rows.push(el);
+      if (!col) kids.forEach((p, i) => { if (p.child !== id) row(p.child, depth + 1, id, i); });
     };
-    row(v.root, 0, null, false);
+    row(v.root, 0, null, 0);
     this.pagesEl.replaceChildren(h('div.nav-tree', { role: 'tree', 'aria-label': `Pages in ${v.title}` }, ...rows));
+  }
+
+  /** Drag a page onto another (nest it there) or between two (reorder). */
+  private wireDrag(el: HTMLElement, id: string, parent: string | null, index: number) {
+    if (parent !== null) {
+      el.addEventListener('dragstart', (e) => {
+        this.dragging = { child: id, from: parent };
+        e.dataTransfer?.setData('text/plain', id);
+        if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+        el.classList.add('dragging');
+      });
+      el.addEventListener('dragend', () => { this.dragging = null; el.classList.remove('dragging'); this.clearDropMarks(); });
+    }
+    el.addEventListener('dragover', (e) => {
+      if (!this.dragging || this.dragging.child === id) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+      const zone = this.zoneOf(e, el, parent === null);
+      this.clearDropMarks();
+      el.classList.add(`drop-${zone}`);
+    });
+    el.addEventListener('dragleave', () => el.classList.remove('drop-before', 'drop-after', 'drop-inside'));
+    el.addEventListener('drop', (e) => {
+      if (!this.dragging || this.dragging.child === id) return;
+      e.preventDefault();
+      const zone = this.zoneOf(e, el, parent === null);
+      const d = this.dragging;
+      this.dragging = null;
+      this.clearDropMarks();
+      let to: string, at: number | null;
+      if (zone === 'inside' || parent === null) { to = id; at = null; }
+      else { to = parent; at = zone === 'before' ? index : index + 1; if (d.from === to && this.indexOf(d.from, d.child) < at) at -= 1; }
+      void this.reparent(d.child, d.from, to, at);
+    });
+  }
+  private zoneOf(e: DragEvent, el: HTMLElement, rootRow: boolean): DropZone {
+    if (rootRow) return 'inside';
+    const r = el.getBoundingClientRect();
+    const y = (e.clientY - r.top) / Math.max(1, r.height);
+    return y < 0.3 ? 'before' : y > 0.7 ? 'after' : 'inside';
+  }
+  private clearDropMarks() { for (const x of this.pagesEl.querySelectorAll('.drop-before, .drop-after, .drop-inside')) x.classList.remove('drop-before', 'drop-after', 'drop-inside'); }
+  private indexOf(parent: string, child: string): number {
+    const v = this.view;
+    if (!v) return -1;
+    return v.placements.filter((p) => p.parent === parent).sort((a, b) => a.ord - b.ord).findIndex((p) => p.child === child);
+  }
+
+  private async reparent(child: string, from: string, to: string, index: number | null) {
+    const v = this.view;
+    if (!v) return;
+    try { await api.reparent(v.root, child, from, to, index); await this.refresh(); }
+    catch (e) { toast(errorMessage(e), { kind: 'error' }); }
+  }
+
+  /** Right-click (or ⋯) on a page. */
+  private contextMenu(e: MouseEvent, id: string, parent: string | null, index: number) {
+    const v = this.view;
+    if (!v) return;
+    const n = v.nodes.find((x) => x.id === id);
+    const canArrange = atLeast(v.role, 'editor');
+    const canEditPage = atLeast(n?.role ?? null, 'editor');
+    const siblings = parent ? v.placements.filter((p) => p.parent === parent).sort((a, b) => a.ord - b.ord) : [];
+    const items: MenuItem[] = [
+      { label: 'Open', icon: 'file', onSelect: () => this.deps.onOpen(id, v.root) },
+      { label: 'Open in new tab', icon: 'external', onSelect: () => window.open(`/d/${id}?tree=${encodeURIComponent(v.root)}`, '_blank', 'noopener') },
+      { label: 'Copy link', icon: 'link', onSelect: () => { const url = `${location.origin}/d/${id}?tree=${encodeURIComponent(v.root)}`; void navigator.clipboard.writeText(url).then(() => toast('Link copied', { kind: 'success', timeout: 2000 }), () => toast(url)); } },
+    ];
+    if (canArrange) {
+      items.push('separator', { label: 'New subpage…', icon: 'plus', onSelect: () => void this.newSubpage(id) });
+      if (parent) {
+        items.push(
+          { label: 'Move up', icon: 'arrowLeft', disabled: index === 0, onSelect: () => void this.act(api.movePage(v.root, parent, id, 'up')) },
+          { label: 'Move down', icon: 'arrowLeft', disabled: index >= siblings.length - 1, onSelect: () => void this.act(api.movePage(v.root, parent, id, 'down')) },
+          { label: 'Move to…', icon: 'columns', onSelect: () => void this.moveToDialog(id, parent) },
+          { label: 'Remove from this space', icon: 'x', onSelect: () => void this.act(api.unplace(v.root, parent, id)) });
+      }
+    }
+    if (canEditPage) items.push('separator', { label: 'Rename…', icon: 'pencil', onSelect: () => void this.rename(id, n?.title ?? '') });
+    if (n?.role === 'owner' && id !== v.root) items.push({ label: 'Delete page', icon: 'trash', danger: true, onSelect: () => void this.remove(id, n?.title ?? '') });
+    if (id === v.root && v.role === 'owner') items.push('separator', { label: 'Wiki settings…', icon: 'globe', onSelect: () => void this.publishDialog() }, { label: 'Stop being a space', icon: 'x', danger: true, onSelect: () => void this.dropTree() });
+    // A throwaway anchor at the pointer: the menu positions itself relative to it, and goes when the menu does.
+    const anchor = h('span', { style: `position:fixed;left:${e.clientX}px;top:${e.clientY}px;width:1px;height:1px;pointer-events:none` });
+    document.body.append(anchor);
+    openMenu(anchor, items, { align: 'start' });
+    const obs = new MutationObserver(() => { if (!document.querySelector('.menu')) { anchor.remove(); obs.disconnect(); } });
+    setTimeout(() => obs.observe(document.body, { childList: true, subtree: true }), 0);
+  }
+
+  private async moveToDialog(id: string, from: string) {
+    const v = this.view;
+    if (!v) return;
+    const byId = new Map(v.nodes.map((n) => [n.id, n]));
+    const options: { id: string; depth: number }[] = [{ id: v.root, depth: 0 }];
+    const walk = (parent: string, depth: number, seen: Set<string>) => {
+      for (const p of v.placements.filter((x) => x.parent === parent).sort((a, b) => a.ord - b.ord)) {
+        if (p.child === id || seen.has(p.child)) continue;
+        seen.add(p.child);
+        options.push({ id: p.child, depth });
+        walk(p.child, depth + 1, seen);
+      }
+    };
+    walk(v.root, 1, new Set([v.root, id]));
+    let chosen: string | null = null;
+    const list = h('div.pick-list', { role: 'listbox' }, ...options.map((o) => h('button.pick-row', { type: 'button', role: 'option', style: `padding-left:${8 + o.depth * 14}px`, onclick: () => { chosen = o.id; d.close(); } }, icon('file', 16), h('span', null, byId.get(o.id)?.title || 'Untitled'))));
+    const d = openDialog({ title: 'Move under…', size: 'sm', body: list, footer: [h('button.btn.ghost', { type: 'button', onclick: () => d.close() }, 'Cancel')], onClose: () => { if (chosen && chosen !== from) void this.reparent(id, from, chosen, null); } });
+  }
+
+  private async rename(id: string, title: string) {
+    const next = await promptDialog({ title: 'Rename page', label: 'Name', value: title, confirmLabel: 'Rename' });
+    if (next === null || next === title) return;
+    try { await api.patchDoc(id, { title: next }); await this.refresh(); } catch (e) { toast(errorMessage(e), { kind: 'error' }); }
+  }
+
+  private async remove(id: string, title: string) {
+    const ok = await confirmDialog({ title: 'Delete this page?', message: h('span', null, h('strong', null, `“${title || 'Untitled'}”`), ' will be deleted for everyone, with its comments and history.'), confirmLabel: 'Delete', danger: true });
+    if (!ok) return;
+    try { await api.deleteDoc(id); toast('Deleted', { kind: 'success', timeout: 2000 }); await this.refresh(); } catch (e) { toast(errorMessage(e), { kind: 'error' }); }
   }
 
   private renderOutline() {
@@ -228,7 +393,7 @@ export class NavPanel {
     const rows = L.mounts.map((m) => {
       const l = this.deps.label(m.child);
       return h('div.nav-row.outline-row', { style: `--d:${m.depth - 1}`, onclick: () => this.deps.onOpen(m.child, this.tree) },
-        h('span.nav-tri.leaf', null, m.collapsed ? '▸' : '·'), h('span.nav-name', { class: l?.section ? 'nameless' : '' }, l ? (l.section ? 'section' : l.title || 'Untitled') : '…'));
+        h('span.nav-tri.leaf', null, m.collapsed ? '▸' : '·'), h('span.nav-name', { class: l?.section ? 'nameless' : '' }, l ? (l.section ? 'section' : l.title || 'Untitled') : '…'), m.role === 'aside' ? h('span.meta', null, 'aside') : null);
     });
     this.outlineEl.replaceChildren(...rows);
   }
@@ -250,10 +415,10 @@ export class NavPanel {
     } catch (e) { toast(errorMessage(e), { kind: 'error' }); }
   }
 
-  /** Ask before dropping a tree (the owner of its root). */
+  /** Ask before dropping a space (the owner of its root). */
   async dropTree() {
     if (!this.tree) return;
-    const ok = await confirmDialog({ title: 'Remove this tree?', message: 'The pages stay; only the navigation goes.', confirmLabel: 'Remove tree', danger: true });
+    const ok = await confirmDialog({ title: 'Stop being a space?', message: 'The pages stay; only the navigation goes.', confirmLabel: 'Remove space', danger: true });
     if (!ok) return;
     try { await api.dropTree(this.tree); this.tree = null; await this.refresh(); } catch (e) { toast(errorMessage(e), { kind: 'error' }); }
   }
