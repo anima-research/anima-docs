@@ -3,7 +3,7 @@
 import MarkdownIt from 'markdown-it';
 import type { StateCore } from 'markdown-it';
 import DOMPurify from 'dompurify';
-import { galleryFence, imageSizes } from '../../src/mdext';
+import { galleryFence, imageSizes, tableWidths } from '../../src/mdext';
 
 type MD = InstanceType<typeof MarkdownIt>;
 
@@ -36,6 +36,7 @@ const docMd = new MarkdownIt({ html: false, linkify: true, typographer: true });
 docMd.use(taskLists);
 imageSizes(docMd);
 galleryFence(docMd);
+tableWidths(docMd);
 const commentMd = new MarkdownIt({ html: false, linkify: true, breaks: true });
 commentMd.use(taskLists);
 const inlineMd = new MarkdownIt({ html: false, linkify: true, typographer: true });

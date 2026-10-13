@@ -78,3 +78,57 @@ export function galleryFence(md: MD) {
     return `<div class="md-gallery">${items.map((it) => `<a class="md-gallery-item" href="${esc(it.src)}" data-caption="${esc(it.caption)}"><img src="${esc(it.src)}" alt="${esc(it.alt)}" loading="lazy" decoding="async">${it.caption ? `<span class="md-gallery-caption">${esc(it.caption)}</span>` : ''}</a>`).join('')}</div>\n`;
   };
 }
+
+// ------------------------------------------------------------------ table column widths
+//
+// GFM lets the separator row hold any number of dashes. A separator longer
+// than the column's content is a width hint in character units (`ch`):
+// `| ------------ | --- |` makes the first column ~12 characters wide. Shorter
+// separators are just padding and change nothing.
+
+/** Cells of a table row (pipes inside code spans and escaped pipes don't split). Returns trimmed texts. */
+export function rowCells(line: string): string[] {
+  const pipes: number[] = [];
+  let ticks = 0;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (c === '\\') { i++; continue; }
+    if (c === '`') { let n = 1; while (line[i + n] === '`') n++; ticks = ticks === 0 ? n : ticks === n ? 0 : ticks; i += n - 1; continue; }
+    if (c === '|' && ticks === 0) pipes.push(i);
+  }
+  const bounds = [-1, ...pipes, line.length];
+  const cells: string[] = [];
+  for (let k = 0; k < bounds.length - 1; k++) cells.push(line.slice(bounds[k] + 1, bounds[k + 1]).trim());
+  if (cells.length && !cells[0] && line.trimStart().startsWith('|')) cells.shift();
+  if (cells.length && !cells[cells.length - 1] && line.trimEnd().endsWith('|')) cells.pop();
+  return cells;
+}
+
+/** Width hints (ch) per column of a table's source lines, or null where the separator is just padding. */
+export function columnWidths(lines: string[]): (number | null)[] {
+  if (lines.length < 2) return [];
+  const sep = rowCells(lines[1]).map((c) => c.replace(/[^-]/g, '').length);
+  const content = rowCells(lines[0]).map((c) => [...c].length);
+  for (const l of lines.slice(2)) rowCells(l).forEach((c, i) => { content[i] = Math.max(content[i] ?? 0, [...c].length); });
+  return sep.map((d, i) => (d > Math.max(3, content[i] ?? 0) ? d : null));
+}
+
+export function tableWidths(md: MD) {
+  md.core.ruler.after('block', 'table-widths', (state: StateCore) => {
+    const lines = state.src.split('\n');
+    const tokens = state.tokens;
+    for (let i = 0; i < tokens.length; i++) {
+      const t = tokens[i];
+      if (t.type !== 'table_open' || !t.map) continue;
+      const widths = columnWidths(lines.slice(t.map[0], t.map[1]));
+      if (!widths.some((w) => w)) continue;
+      let col = 0;
+      for (let j = i + 1; j < tokens.length && tokens[j].type !== 'table_close'; j++) {
+        const u = tokens[j];
+        if (u.type === 'tr_open') col = 0;
+        else if (u.type === 'th_open' || u.type === 'td_open') { const w = widths[col++]; if (w) u.attrJoin('style', `width:${w}ch`); }
+      }
+    }
+    return false;
+  });
+}

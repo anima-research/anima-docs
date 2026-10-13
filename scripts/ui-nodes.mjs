@@ -453,6 +453,20 @@ try {
     await alice.locator('.cm-table-widget.editable', { hasText: 'Column 1' }).hover();
     await alice.locator('.cm-table-widget.editable', { hasText: 'Column 1' }).locator('.cm-table-bar button', { hasText: '+ col' }).click();
     await alice.waitForFunction(() => /\| Column 1\s+\|\s+\| Column 2/.test(window.__anima.view.state.doc.toString()), null, { timeout: 8000 });
+    // Drag the first column's edge: the separator grows into a width. (Let the rewritten widget settle first.)
+    await alice.waitForFunction(() => document.querySelectorAll('.cm-table-widget.editable')[0] && [...document.querySelectorAll('.cm-table-widget.editable')].some((w) => w.textContent.includes('Column 1') && w.querySelectorAll('th').length === 4), null, { timeout: 8000 });
+    await sleep(300);
+    const th = alice.locator('.cm-table-widget.editable', { hasText: 'Column 1' }).locator('th').first();
+    const grip = th.locator('.cm-col-grip');
+    const gb = await grip.boundingBox();
+    await alice.mouse.move(gb.x + gb.width / 2, gb.y + gb.height / 2);
+    await alice.mouse.down();
+    await alice.mouse.move(gb.x + gb.width / 2 + 120, gb.y + gb.height / 2, { steps: 6 });
+    await alice.mouse.up();
+    try {
+      await alice.waitForFunction(() => /\| -{20,} \|/.test(window.__anima.view.state.doc.toString()), null, { timeout: 8000 });
+    } catch (e) { throw new Error(`no width written; doc around the table: ${JSON.stringify((await viewText(alice)).match(/\| Column 1[\s\S]{0,400}/)?.[0])}`); }
+    await alice.waitForFunction(() => [...document.querySelectorAll('.cm-table-widget.editable th')].some((th) => /ch$/.test(th.style.width)), null, { timeout: 8000 });
     await alice.screenshot({ path: join(SHOTS, 'table.png') });
   });
 

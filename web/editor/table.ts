@@ -6,9 +6,10 @@
 
 import { WidgetType, type EditorView } from '@codemirror/view';
 import { renderInlineHtml } from '../lib/markdown';
+import { columnWidths } from '../../src/mdext';
 
 export type Align = '' | 'left' | 'center' | 'right';
-export interface TableModel { header: string[]; aligns: Align[]; rows: string[][] }
+export interface TableModel { header: string[]; aligns: Align[]; rows: string[][]; /** Width hints in ch (the separator's dash count), null = natural. */ widths: (number | null)[] }
 
 /** Cells of a table row, with where each starts (pipes inside code spans and escaped pipes don't split). */
 export function splitRow(line: string): { text: string; start: number }[] {
@@ -44,7 +45,9 @@ export function parseTable(source: string): TableModel {
   while (header.length < cols) header.push('');
   while (aligns.length < cols) aligns.push('');
   const rows = lines.slice(2).filter((l) => l.trim()).map((l) => { const cells = splitRow(l).map((c) => c.text); while (cells.length < cols) cells.push(''); return cells.slice(0, cols); });
-  return { header, aligns, rows };
+  const widths = columnWidths(lines);
+  while (widths.length < cols) widths.push(null);
+  return { header, aligns, rows, widths: widths.slice(0, cols) };
 }
 
 const cellWidth = (s: string) => [...s].length;
@@ -52,11 +55,24 @@ const cellWidth = (s: string) => [...s].length;
 /** Markdown for a model: columns padded so the source reads as a table too. */
 export function serializeTable(m: TableModel): string {
   const cols = m.header.length;
-  const widths = Array.from({ length: cols }, (_, c) => Math.max(3, cellWidth(m.header[c] ?? ''), ...m.rows.map((r) => cellWidth(r[c] ?? ''))));
+  const natural = Array.from({ length: cols }, (_, c) => Math.max(3, cellWidth(m.header[c] ?? ''), ...m.rows.map((r) => cellWidth(r[c] ?? ''))));
+  // A column with a width hint gets that many dashes (longer than its content, which is what marks it as a width).
+  const widths = natural.map((n, c) => { const w = m.widths?.[c]; return w && w > n ? w : n; });
   const pad = (s: string, c: number) => s + ' '.repeat(Math.max(0, widths[c] - cellWidth(s)));
   const row = (cells: string[]) => `| ${cells.map((s, c) => pad(s ?? '', c)).join(' | ')} |`;
   const sep = `| ${m.aligns.map((a, c) => { const w = widths[c]; return a === 'center' ? `:${'-'.repeat(w - 2)}:` : a === 'right' ? `${'-'.repeat(w - 1)}:` : a === 'left' ? `:${'-'.repeat(w - 1)}` : '-'.repeat(w); }).join(' | ')} |`;
   return [row(m.header), sep, ...m.rows.map(row)].join('\n');
+}
+
+/** Pixels per `ch` in this cell's font. */
+function measureCh(el: HTMLElement): number {
+  const probe = document.createElement('span');
+  probe.textContent = '0000000000';
+  probe.style.cssText = 'position:absolute;visibility:hidden;white-space:pre;font:inherit';
+  el.append(probe);
+  const w = probe.getBoundingClientRect().width / 10 || 8;
+  probe.remove();
+  return w;
 }
 
 const unescapeCell = (s: string) => s.replace(/\\\|/g, '|');
@@ -107,6 +123,7 @@ export class TableWidget extends WidgetType {
       setText(a.r, a.c, raw);
       if (!write(model, focus)) render(a.td, a.r, a.c);
     };
+    const flushCurrentCell = () => { if (active) { setText(active.r, active.c, escapeCell(active.input.value)); active = null; } };
     const focusCell = (r: number, c: number, atEnd = false) => {
       const td = cellsByPos.get(`${r},${c}`);
       if (!td || !this.editable) return;
@@ -148,10 +165,34 @@ export class TableWidget extends WidgetType {
     const mkCell = (tag: 'th' | 'td', r: number, c: number) => {
       const el = document.createElement(tag);
       if (model.aligns[c]) el.style.textAlign = model.aligns[c];
+      if (model.widths[c]) el.style.width = `${model.widths[c]}ch`;
       el.dataset.r = String(r); el.dataset.c = String(c);
       render(el, r, c);
       cellsByPos.set(`${r},${c}`, el);
       if (!this.editable) return el;
+      if (tag === 'th') {
+        // Drag the right edge of a header cell to set the column's width (written as dashes in the separator row).
+        const grip = document.createElement('span');
+        grip.className = 'cm-col-grip';
+        grip.title = 'Drag to resize the column (double-click to reset)';
+        grip.addEventListener('mousedown', (e) => {
+          e.preventDefault(); e.stopPropagation();
+          if (!wrap.isConnected) return; // a stale widget (the table was just rewritten)
+          const startX = e.clientX, startW = el.getBoundingClientRect().width;
+          const chPx = measureCh(el);
+          let w = startW;
+          const move = (ev: MouseEvent) => { w = Math.max(chPx * 3, startW + ev.clientX - startX); el.style.width = `${w}px`; };
+          const up = () => {
+            document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up);
+            flushCurrentCell();
+            model.widths[c] = Math.max(3, Math.round(w / chPx));
+            write(model, null);
+          };
+          document.addEventListener('mousemove', move); document.addEventListener('mouseup', up);
+        });
+        grip.addEventListener('dblclick', (e) => { e.preventDefault(); e.stopPropagation(); flushCurrentCell(); model.widths[c] = null; write(model, null); });
+        el.append(grip);
+      }
       el.addEventListener('mousedown', (e) => {
         if ((e.target as HTMLElement).closest('a, input')) return;
         e.preventDefault(); e.stopPropagation();
@@ -190,7 +231,7 @@ export class TableWidget extends WidgetType {
         bar.append(b);
         return b;
       };
-      const flushCurrent = () => { if (active) { setText(active.r, active.c, escapeCell(active.input.value)); active = null; } };
+      const flushCurrent = flushCurrentCell;
       btn('+ row', 'Add a row below', () => { flushCurrent(); const at = Math.max(0, current.r); model.rows.splice(at, 0, Array.from({ length: cols }, () => '')); write(model, { r: at + 1, c: current.c }); });
       btn('+ col', 'Add a column to the right', () => { flushCurrent(); const at = current.c + 1; model.header.splice(at, 0, ''); model.aligns.splice(at, 0, ''); for (const row of model.rows) row.splice(at, 0, ''); write(model, { r: current.r, c: at }); });
       btn('− row', 'Delete this row', () => { if (current.r === 0 || !model.rows.length) return; flushCurrent(); model.rows.splice(current.r - 1, 1); write(model, { r: Math.min(current.r, model.rows.length), c: current.c }); });

@@ -1276,3 +1276,7 @@ dialog.lightbox figcaption { color: #e6e8ec; font: 14px var(--font-ui); }
 .cm-table-widget.editable:hover .cm-table-bar, .cm-table-widget.editable.focused .cm-table-bar { display: inline-flex; }
 .cm-table-bar button { font: 12px var(--font-ui); color: var(--text-2); background: none; border: 0; border-radius: 6px; padding: 3px 8px; cursor: pointer; }
 .cm-table-bar button:hover { background: var(--hover); color: var(--text-strong); }
+.cm-table-widget.editable th { position: relative; }
+.cm-col-grip { position: absolute; top: 0; right: -4px; width: 8px; height: 100%; cursor: col-resize; z-index: 2; }
+.cm-col-grip:hover, .cm-col-grip:active { background: color-mix(in srgb, var(--accent) 40%, transparent); }
+.cm-table-widget table { table-layout: auto; }

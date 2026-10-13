@@ -12,7 +12,7 @@ import { Fault } from './auth.js';
 import { outline } from './markdown.js';
 import { scanMounts, MAX_DEPTH } from './nodes.js';
 import { slugify, type PublishSettings } from './trees.js';
-import { galleryFence, imageSizes } from './mdext.js';
+import { galleryFence, imageSizes, tableWidths } from './mdext.js';
 
 export interface WikiPage { id: string; title: string; slug: string; parent: string | null; depth: number }
 interface Assembled { body: string; asides: { id: string; title: string; body: string }[]; nodes: Set<string> }
@@ -26,6 +26,7 @@ export class Wiki {
     this.md = new MarkdownIt({ html: false, linkify: true, typographer: true });
     imageSizes(this.md);
     galleryFence(this.md);
+    tableWidths(this.md);
     this.md.core.ruler.after('inline', 'wiki-task-lists', (state: StateCore) => {
       const tokens = state.tokens;
       for (let i = 2; i < tokens.length; i++) {

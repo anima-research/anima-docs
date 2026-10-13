@@ -120,6 +120,18 @@ test('image sizes, galleries and custom CSS render in the wiki', async () => {
   assert.equal((await api(ann, 'PATCH', `/api/trees/${g.id}/publish`, { theme: { css: 'x'.repeat(60_000) } })).status, 413);
 });
 
+test('a separator longer than the content is a column width; padding is not', async () => {
+  const ann = await signIn('Ann');
+  const md = '# W\n\n| Name | Description |\n| ------------------------ | ----------- |\n| a | b |\n\n| X | Y |\n| --- | --- |\n| 1 | 2 |\n';
+  const d = (await api(ann, 'POST', '/api/docs', { title: 'W', content: md })).json;
+  await api(ann, 'POST', '/api/trees', { root: d.id });
+  await api(ann, 'PATCH', `/api/trees/${d.id}/publish`, { published: 'public', slug: 'widths' });
+  const page = await api(null, 'GET', '/w/widths/');
+  assert.ok(page.text.includes('<th style="width:24ch">Name</th>'), 'width from a long separator');
+  assert.ok(!page.text.includes('width:11ch'), 'a separator equal to the content is padding');
+  assert.ok(!/<th style="width:3ch">/.test(page.text), 'three dashes are nothing');
+});
+
 test('a layout template replaces the page structure; scripts are stripped; {{content}} is required; no duplicate page list', async () => {
   const ann = await signIn('Ann');
   const home = (await api(ann, 'POST', '/api/docs', { title: 'Templated', content: '# Templated\n\nBody text.\n\n## Part\n\nMore.\n' })).json;
