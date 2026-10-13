@@ -481,14 +481,15 @@ export const TOOLS: ToolDef[] = [
   // ------------------------------------------------------------------ docs.write
   {
     name: 'create_document', featureSet: 'docs.write', toolClass: 'notes',
-    description: 'Create a markdown document. You become its owner and start watching it (edits quiet, comments wake). Optionally share it at once.',
+    description: 'Create a document: markdown (default), or an HTML page (type "html": a whole page with its own styles and scripts, served as itself at /p/<id> in a sandbox — the way to publish an app, a visualisation or a report; keep it self-contained, inline CSS/JS, images as data: URIs or uploads; edit it later with edit_document, e.g. replace_all_content). You become its owner and start watching it (edits quiet, comments wake). Optionally share it at once; create_link gives an address anyone can open.',
     inputSchema: { type: 'object', required: ['title'], properties: {
-      title: S('Document title.'), content: S('Initial markdown.'),
+      title: S('Document title.'), content: S('Initial content: markdown, or the full HTML for an html page.'),
+      type: S('markdown (default), html, latex or text.', { enum: ['markdown', 'html', 'latex', 'text'] }),
       share_with: { type: 'array', items: { type: 'object', required: ['who', 'role'], properties: { who: S('@Name or principal id'), role: S('viewer, commenter or editor', { enum: ['viewer', 'commenter', 'editor'] }) } } },
       general_access: S('Access for everyone signed in: restricted (default), viewer, commenter, editor.', { enum: ['restricted', 'viewer', 'commenter', 'editor'] }),
     } },
     run(app, actor, a) {
-      const d = app.docs.create(actor, need(a, 'title'), typeof a.content === 'string' ? a.content : '');
+      const d = app.docs.create(actor, need(a, 'title'), typeof a.content === 'string' ? a.content : '', typeof a.type === 'string' ? a.type : 'markdown');
       const notes: string[] = [];
       for (const s of Array.isArray(a.share_with) ? a.share_with : []) {
         try { const p = app.principals.resolve(String(s.who)); app.docs.share(d.id, actor, p.sub, roleArg(s.role)); notes.push(`shared with ${p.name} as ${s.role}`); }
@@ -497,7 +498,7 @@ export const TOOLS: ToolDef[] = [
       if (a.general_access) { app.docs.setGeneralAccess(d.id, actor, a.general_access); notes.push(`general access: ${a.general_access}`); }
       app.attention.setWatch(actor.sub, d.id, {}, { preset: true });
       app.attention.markRead(actor.sub, d.id, { comments: true });
-      return text(`Created “${d.title}” (${d.id}).${notes.length ? ` ${notes.join('; ')}.` : ''}\nWeb: ${app.config.origin}/d/${d.id}`);
+      return text(`Created “${d.title}” (${d.id}).${notes.length ? ` ${notes.join('; ')}.` : ''}\nWeb: ${app.config.origin}/d/${d.id}${d.type === 'html' ? `\nPage: ${app.config.origin}/p/${d.id} (the rendered page; viewers need access to the document, or a link from create_link)` : ''}`);
     },
   },
   {
@@ -510,7 +511,7 @@ export const TOOLS: ToolDef[] = [
       '  {"replace_section": "Heading", "content": "..."}  replace a section body (keep_heading: false replaces the heading too)',
       '  {"append_to_section": "Heading", "text": "..."}',
       '  {"replace_all_content": "..."}  rewrite everything (applied as a minimal diff so comments on unchanged text survive)',
-      'Text is markdown: tables, images (![alt](url)), lists, code. Others see your edits live, attributed to you.',
+      'Text is markdown: tables, images (![alt](url)), lists, code — or HTML for an html page. Others see your edits live, attributed to you.',
       'If the document isn\'t yours to change (or its owner should review the change), use suggest_edit instead.',
     ].join('\n'),
     inputSchema: { type: 'object', required: ['document', 'edits'], properties: {

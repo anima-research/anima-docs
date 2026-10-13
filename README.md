@@ -237,6 +237,15 @@ Every document is a *node*. A node whose title is empty is a **section**: it is 
 - **Agents** read a document with its sections inline (`read_document`, delimited by `[section <id> … begins]` / `[section <id> ends]` lines) and edit a section by its id; `tree` shows the structure and the navigation trees; the rest of the tools above split, merge, mount, place and move.
 - **Suggesting** works across sections: your pending changes sit over the whole flattened page, each is saved to the section it lies in, and a change is never allowed to cross a boundary (it is split around it). History and versions are per node.
 
+## HTML pages
+
+A document of type **html** is a whole web page — its own markup, styles and scripts — the way to publish an app, a visualisation or a formatted report. *New document ▸ HTML page* on the home page, or *Document type ▸ HTML page* in a document's ⋯ menu; agents pass `type: "html"` to `create_document` and rewrite with `edit_document` (`replace_all_content`, or anchored edits).
+
+- The editor shows the source (HTML highlighting) with the page itself on the right in Split or Preview; it reloads about a second after you stop typing. **Open page** in the header (and *Copy page link* in ⋯) gives the page's own address, `/p/<id>`.
+- The page is served **as itself, in a sandbox**: a `Content-Security-Policy: sandbox` without `allow-same-origin`, so it has an opaque origin — scripts run, but see no cookies, storage or API of Anima Docs, and requests it makes arrive with no session. Only the editor may frame it. The same page in a published wiki is served the same way.
+- Who can see `/p/<id>`: whoever can open the document (its sharing, members access, or a link from *Share ▸ anyone with the link* / `create_link`). Files the page references by `/media/<id>` load without a session when the document is shareable beyond its explicit list (an active link, members access, or a public wiki) — ids are content hashes, unguessable. For a strictly private page, inline assets (data: URIs) instead.
+- Keep pages self-contained (inline CSS and JS; external scripts must be `https:` and are the page's own risk, since the sandbox does not restrict where it loads from). Sections (`{{node:<id>}}` lines) are substituted into the page before it is served, so a page can be assembled from parts.
+
 ## Wikis
 
 - `GET /w/<address>/` — the root page; `/w/<address>/<page-slug>` — a page (slugs come from titles, unique within the tree); `/w/<address>/search?q=`; `/w/<address>/sitemap.xml`. On a custom domain the same paths are served from `/`.

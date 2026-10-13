@@ -12,7 +12,7 @@ export interface Presence { name: string; kind: Kind; color: string }
 /** Guests: people who opened an "anyone with the link" share link without signing in. */
 export const isGuestMe = (me: Pick<Me, 'kind'> | null | undefined) => me?.kind === 'guest';
 
-export type NodeType = 'markdown' | 'latex' | 'text';
+export type NodeType = 'markdown' | 'html' | 'latex' | 'text';
 
 export interface DocSummary {
   id: string;
@@ -172,7 +172,7 @@ export const api = {
   logout: () => call<{ ok: true }>('POST', '/auth/logout', {}),
 
   docs: (opts: { q?: string; filter?: 'all' | 'owned' | 'shared' } = {}) => call<{ docs: DocSummary[] }>('GET', `/api/docs${q({ q: opts.q, filter: opts.filter })}`),
-  createDoc: (title: string, content?: string) => call<DocSummary>('POST', '/api/docs', { title, content }),
+  createDoc: (title: string, content?: string, type?: NodeType) => call<DocSummary>('POST', '/api/docs', { title, content, ...(type ? { type } : {}) }),
   doc: (id: string) => call<DocDetail>('GET', `/api/docs/${encodeURIComponent(id)}`),
   patchDoc: (id: string, patch: { title?: string; generalAccess?: GeneralAccess; type?: NodeType }) => call<DocSummary>('PATCH', `/api/docs/${encodeURIComponent(id)}`, patch),
   deleteDoc: (id: string) => call<{ ok: true }>('DELETE', `/api/docs/${encodeURIComponent(id)}`),

@@ -570,6 +570,35 @@ try {
     await alice.locator('.seg-btn[data-mode=edit]').click();
   });
 
+  await step('an HTML page: the source edits with HTML highlighting, the page renders in a sandboxed frame, scripts run', async () => {
+    const page = (await api(alice, 'POST', '/api/docs', { title: 'Widget', type: 'html', content: '<!doctype html><title>Widget</title><body><h1 id="h">Hello</h1><script>document.getElementById("h").textContent = "Hello from JS"</script></body>' })).json;
+    await openDoc(alice, page.id);
+    await alice.waitForFunction(() => document.querySelector('.doc-app')?.classList.contains('html-doc'), null, { timeout: 8000 });
+    assert(await alice.locator('.doc-header-right .open-page').isVisible(), 'no Open page link');
+    await alice.locator('.seg-btn[data-mode=split]').click();
+    const frame = alice.locator('.preview-pane iframe.page-frame');
+    await frame.waitFor({ timeout: 8000 });
+    assert((await frame.getAttribute('sandbox') ?? '').includes('allow-scripts') && !(await frame.getAttribute('sandbox') ?? '').includes('allow-same-origin'), 'frame sandbox');
+    // Playwright can look inside the (opaque-origin) frame: the page rendered and its script ran.
+    await alice.frameLocator('.preview-pane iframe.page-frame').locator('#h', { hasText: 'Hello from JS' }).waitFor({ timeout: 8000 });
+    // The page itself says what it is.
+    const served = await alice.evaluate(async (id) => { const r = await fetch(`/p/${id}`); return { status: r.status, csp: r.headers.get('content-security-policy'), text: await r.text() }; }, page.id);
+    assert(served.status === 200 && served.csp.startsWith('sandbox allow-scripts') && served.text.includes('Hello from JS'), `served: ${JSON.stringify(served).slice(0, 200)}`);
+    // A real browser runs it: open the page top-level in a fresh tab and read the DOM.
+    const tab = await alice.context().newPage();
+    await tab.goto(`${ORIGIN}/p/${page.id}`);
+    await tab.waitForFunction(() => document.getElementById('h')?.textContent === 'Hello from JS', null, { timeout: 8000 });
+    assert(await tab.evaluate(() => { try { return window.origin === 'null' && document.cookie === ''; } catch { return true; } }), 'page is not isolated');
+    await tab.close();
+    // Editing the source updates the page (after it settles).
+    await alice.locator('.editor-page .cm-content').click();
+    await alice.keyboard.press('Meta+a');
+    await alice.keyboard.type('<!doctype html><title>Widget</title><body><h1 id="h">Second</h1></body>');
+    await alice.waitForFunction((id) => fetch(`/p/${id}`).then((r) => r.text()).then((t) => t.includes('Second')), page.id, { timeout: 8000 });
+    await alice.frameLocator('.preview-pane iframe.page-frame').locator('#h', { hasText: 'Second' }).waitFor({ timeout: 8000 });
+    await alice.locator('.seg-btn[data-mode=edit]').click();
+  });
+
   await step('home lists the tree', async () => {
     await alice.goto(`${ORIGIN}/`);
     await alice.locator('.home-trees a.tree-card', { hasText: 'Paper' }).waitFor({ timeout: 8000 });

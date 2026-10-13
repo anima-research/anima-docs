@@ -6,7 +6,7 @@ import { gzipSync } from 'node:zlib';
 import { join, resolve } from 'node:path';
 import type { App } from './app.js';
 import { DEFAULT_TEMPLATE, TEMPLATE_SLOTS } from './wiki.js';
-import { timingSafeEqual } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 
 function timingSafeEqualStr(a: string, b: string): boolean {
   const x = Buffer.from(a), y = Buffer.from(b);
@@ -210,6 +210,8 @@ export function createHttp(app: App) {
     if (!/^[a-z0-9-]{0,80}$/.test(slug)) throw new Fault(404, 'No such page.');
     const page = app.wiki.pageBySlug(root, slug);
     if (!page) throw new Fault(404, 'No such page.');
+    const pageDoc = app.docs.get(page.id);
+    if (pageDoc?.type === 'html') { sendPage(req, res, app.wiki.assemble(page.id).body, pageDoc.rev); return; }
     const canEdit = !!actor && atLeast(app.docs.role(page.id, actor), 'editor');
     const out = app.wiki.pageHtml(root, page, base, { canEdit, scripts: scriptsOk });
     if (req.headers['if-none-match'] === out.etag) { res.writeHead(304, { ETag: out.etag }); res.end(); return; }
@@ -218,12 +220,38 @@ export function createHttp(app: App) {
 
   // ---------------------------------------------------------------- server
 
+  /**
+   * An HTML page (a document of type html) served as itself, in a sandbox: CSP `sandbox` without
+   * allow-same-origin gives it an opaque origin, so its scripts run but see no cookies, storage or
+   * API of this origin (requests from it arrive with Origin: null and no session). The editor
+   * frames it (frame-ancestors 'self'); nobody else may.
+   */
+  function sendPage(req: IncomingMessage, res: ServerResponse, body: string, rev: number) {
+    const etag = `"p${rev}-${createHash('sha1').update(body).digest('hex').slice(0, 16)}"`;
+    res.removeHeader('X-Frame-Options');
+    res.setHeader('Content-Security-Policy', "sandbox allow-scripts allow-forms allow-popups allow-modals allow-downloads allow-pointer-lock allow-presentation; frame-ancestors 'self'");
+    if (req.headers['if-none-match'] === etag) { res.writeHead(304, { ETag: etag }); res.end(); return; }
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'private, no-cache', ETag: etag, Vary: 'Cookie' });
+    res.end(req.method === 'HEAD' ? undefined : body);
+  }
+  /** Media readable without a session: its document is shareable beyond its explicit list (an active link, members access, a public wiki). Ids are content hashes: unguessable. */
+  function mediaOpen(mediaId: string): boolean {
+    const r = app.db.prepare('SELECT doc_id FROM media WHERE id = ?').get(mediaId) as { doc_id: string | null } | undefined;
+    if (!r?.doc_id) return false;
+    const d = app.docs.get(r.doc_id);
+    if (!d) return false;
+    if (d.generalAccess !== 'restricted') return true;
+    const links = (app.db.prepare('SELECT count(*) AS n FROM doc_links WHERE doc_id = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)').get(r.doc_id, Date.now()) as { n: number }).n;
+    if (links > 0) return true;
+    return app.wiki.mediaPublic(mediaId);
+  }
+
   const server = createServer(async (req, res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('X-Frame-Options', 'DENY');
     const wsOrigin = app.config.origin.replace(/^http/, 'ws');
-    res.setHeader('Content-Security-Policy', `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data: blob:; media-src 'self' https: blob:; frame-src https://www.youtube-nocookie.com https://player.vimeo.com; connect-src 'self' ${wsOrigin}; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`);
+    res.setHeader('Content-Security-Policy', `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data: blob:; media-src 'self' https: blob:; frame-src 'self' https://www.youtube-nocookie.com https://player.vimeo.com; connect-src 'self' ${wsOrigin}; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`);
     if (production) res.setHeader('Strict-Transport-Security', 'max-age=31536000');
     /** Who the response is for: guests get principal ids masked (they see people by name only). */
     let viewer: Actor | null = null;
@@ -446,10 +474,26 @@ export function createHttp(app: App) {
         return;
       }
 
+      // ------------------------------------------------ HTML pages, as themselves
+      const pm = /^\/p\/([A-Za-z0-9]+)\/?$/.exec(path);
+      if (pm && (method === 'GET' || method === 'HEAD')) {
+        const d = app.docs.get(pm[1]);
+        const role = d && actor ? app.docs.role(d.id, actor) : null;
+        if (!d || (actor && !role)) throw new Fault(404, 'No such page.');
+        if (!actor) {
+          res.removeHeader('X-Frame-Options');
+          send(401, `<!doctype html><meta charset="utf-8"><title>Sign in</title><body style="font:16px system-ui;padding:40px;max-width:560px;margin:auto"><h1>Sign in to view this page</h1><p><a href="/d/${d.id}">Open it in Anima Docs</a> to sign in (or use the link you were given).</p>`, 'text/html; charset=utf-8');
+          return;
+        }
+        if (d.type !== 'html') { res.writeHead(302, { Location: `/d/${d.id}` }); res.end(); return; }
+        sendPage(req, res, app.nodes.flatten(d.id, actor), d.rev);
+        return;
+      }
       // ------------------------------------------------ media
       if (path.startsWith('/media/') && (method === 'GET' || method === 'HEAD')) {
         const id = Media.idFrom(path);
-        if (!actor && !(id && app.wiki.mediaPublic(id))) throw new Fault(401, 'Sign in to view files.');
+        // Sandboxed pages (opaque origin) cannot send the session: media of shareable documents is open by id.
+        if (!actor && !(id && mediaOpen(id))) throw new Fault(401, 'Sign in to view files.');
         const f = id ? app.media.locate(id) : null;
         if (!f) throw new Fault(404, 'Not found.');
         // Images, audio, video and PDF are served as what they are; anything else is a download

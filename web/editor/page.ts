@@ -5,6 +5,7 @@ import { Compartment, EditorState, Prec } from '@codemirror/state';
 import { EditorView, drawSelection, dropCursor, highlightSpecialChars, keymap, placeholder, type ViewUpdate } from '@codemirror/view';
 import { defaultKeymap, history, historyKeymap, indentWithTab, redo as cmRedo, undo as cmUndo } from '@codemirror/commands';
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown';
+import { html as htmlLanguage } from '@codemirror/lang-html';
 import { HighlightStyle, syntaxHighlighting, syntaxTree } from '@codemirror/language';
 import { search, searchKeymap } from '@codemirror/search';
 import { tags as t } from '@lezer/highlight';
@@ -241,13 +242,15 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   const modeSwitch = h('div.seg.mode-switch', { role: 'radiogroup', 'aria-label': 'View mode' }, modeBtns);
   const shareBtn = h('button.btn.primary.share-btn', { type: 'button', onclick: () => openShareDialog({ docId, me, title, onChanged: (d) => applyDetail(d) }) }, icon('lock', 16, 'share-lock'), h('span.btn-label', null, 'Share'));
   const shareSlot = guest ? guestSignInButton() : shareBtn;
+  /** HTML pages: the rendered page in its own tab. */
+  const openPageLink = h('a.btn.ghost.sm.open-page', { href: `/p/${docId}`, target: '_blank', rel: 'noopener', hidden: true, 'data-tip': 'Open the rendered page in a new tab' }, icon('external', 16), h('span.tb-text', null, 'Open page'));
   const moreBtn: HTMLButtonElement = h('button.icon-btn', { type: 'button', 'aria-label': 'More document actions', 'aria-haspopup': 'menu', 'data-tip': 'More', onclick: () => openMenu(moreBtn, moreItems(), { align: 'end' }) }, icon('more', 20));
 
   const header = h('header.doc-header', null,
     h('a.doc-home', { href: '/', 'data-link': '', 'aria-label': 'All documents', 'data-tip': 'All documents' }, icon('file', 22)),
     navBtn,
     h('div.doc-titlebox', null, titleInput, h('div.doc-subline', null, crumbsEl, rolePill, ownerEl, statusEl)),
-    h('div.doc-header-right', null, presenceEl, guest ? null : pingBtn, commentsBtn, modeSwitch, shareSlot, moreBtn, userMenuButton(me, { compact: true })));
+    h('div.doc-header-right', null, presenceEl, guest ? null : pingBtn, commentsBtn, modeSwitch, openPageLink, shareSlot, moreBtn, userMenuButton(me, { compact: true })));
 
   // ------------------------------------------------------------------ toolbar
 
@@ -359,7 +362,10 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   const editPane = h('div.doc-scroll.edit-pane', { tabindex: '-1' }, canvas);
   const previewBody = h('article.prose.preview-body');
   const previewPage = h('div.page.preview-page', null, previewBody);
-  const previewPane = h('div.doc-scroll.preview-pane', { 'aria-label': 'Preview' }, h('div.doc-canvas', null, previewPage));
+  const previewCanvas = h('div.doc-canvas', null, previewPage);
+  // An HTML page previews as itself, in a sandboxed frame (opaque origin: its scripts cannot reach this app).
+  const pageFrame = h('iframe.page-frame', { title: 'Page preview', sandbox: 'allow-scripts allow-forms allow-popups allow-modals allow-downloads allow-pointer-lock allow-presentation', hidden: true });
+  const previewPane = h('div.doc-scroll.preview-pane', { 'aria-label': 'Preview' }, previewCanvas, pageFrame);
   const overlay = h('div.doc-overlay', { hidden: true });
   const syncVeil = h('div.sync-veil', null, spinner(24), h('span', null, 'Loading document…'));
   const body = h('div.doc-body', null, editPane, previewPane, overlay);
@@ -371,6 +377,9 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   // ------------------------------------------------------------------ editor
 
   const readOnlyC = new Compartment();
+  /** The language and the inline previews switch with the document's type (markdown vs an HTML page). */
+  const langC = new Compartment();
+  const liveC = new Compartment();
   const placeholderC = new Compartment();
   /** How edits reach the shared text: directly (editing) or as suggestions. */
   const syncC = new Compartment();
@@ -418,9 +427,9 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
         suggestionOverlays,
         // `[[` links to a document, `{{` mounts one inline.
         documentCompletions({ currentId: () => docId, canMount: () => canWrite() }),
-        markdown({ base: markdownLanguage, codeLanguages, addKeymap: true }),
+        langC.of(markdown({ base: markdownLanguage, codeLanguages, addKeymap: true })),
         syntaxHighlighting(docHighlight),
-        livePreview,
+        liveC.of(livePreview),
         commentHighlights,
         EditorView.lineWrapping,
         drawSelection(),
@@ -618,10 +627,10 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   function typeMenu(id: string, anchor: HTMLElement) {
     const cur = labelOf(id)?.type ?? 'markdown';
     const canChange = id === docId ? canEdit() : binding.opts.canEdit(id);
-    const kinds: [NodeType, string, string][] = [['markdown', 'Markdown', 'text with formatting'], ['latex', 'LaTeX (math)', 'each paragraph is a display formula'], ['text', 'Plain text', 'shown verbatim, monospace']];
+    const kinds: [NodeType, string, string][] = [['markdown', 'Markdown', 'text with formatting'], ['html', 'HTML page', 'a whole page with its own styles and scripts, shown in a sandbox'], ['latex', 'LaTeX (math)', 'each paragraph is a display formula'], ['text', 'Plain text', 'shown verbatim, monospace']];
     openMenu(anchor, [
       { heading: 'Node type' },
-      ...kinds.map(([t, label, hint]) => ({ label, hint, checked: cur === t, disabled: !canChange, onSelect: () => { void api.patchDoc(id, { type: t }).then(() => { toast(`Now ${label}.`, { kind: 'success', timeout: 2500 }); schedulePreview(); }).catch((e) => toast(errorMessage(e), { kind: 'error' })); } })),
+      ...kinds.map(([t, label, hint]) => ({ label, hint, checked: cur === t, disabled: !canChange, onSelect: () => { void api.patchDoc(id, { type: t }).then(() => { toast(`Now ${label}.`, { kind: 'success', timeout: 2500 }); if (id === docId) setTimeout(applyDocType, 50); else schedulePreview(); }).catch((e) => toast(errorMessage(e), { kind: 'error' })); } })),
     ], { align: 'start' });
   }
   async function nameSection(id: string) {
@@ -914,13 +923,35 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     }
     return wrapByType(text, typeOf(docId));
   }
+  let frameKey = '';
   const renderPreview = () => {
     if (mode === 'edit') return;
+    if (isHtml()) {
+      // The page is served from what is saved; edits sync within milliseconds, so a reload after a pause shows them.
+      const t = binding.current.text;
+      const key = `${t.length}:${t.slice(0, 2000)}:${t.slice(-2000)}`;
+      if (key !== frameKey) { frameKey = key; pageFrame.src = `/p/${docId}?v=${Date.now().toString(36)}`; }
+      return;
+    }
     const text = renderSource(binding.current);
     previewBody.replaceChildren(renderDocument(text));
     if (!text.length) previewBody.replaceChildren(h('p.preview-empty', null, 'This document is empty.'));
   };
-  const schedulePreview = debounce(renderPreview, 120);
+  const schedulePreviewMd = debounce(renderPreview, 120);
+  const schedulePreviewHtml = debounce(renderPreview, 900);
+  const schedulePreview = () => (isHtml() ? schedulePreviewHtml() : schedulePreviewMd());
+  const isHtml = () => (labelOf(docId)?.type ?? detail.type ?? 'markdown') === 'html';
+  /** Apply the document's type: language, inline previews, toolbar and preview surface. */
+  function applyDocType() {
+    const html = isHtml();
+    app.classList.toggle('html-doc', html);
+    view.dispatch({ effects: [langC.reconfigure(html ? htmlLanguage() : markdown({ base: markdownLanguage, codeLanguages, addKeymap: true })), liveC.reconfigure(html ? [] : livePreview)] });
+    pageFrame.hidden = !html;
+    previewCanvas.hidden = html;
+    openPageLink.hidden = !html;
+    frameKey = '';
+    if (mode !== 'edit') renderPreview();
+  }
 
   function setMode(m: Mode) {
     mode = m;
@@ -965,6 +996,8 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   // Everything the update listener touches exists now: start reconciling the view with the nodes.
   binding.attach(view);
   // For tests and debugging: the live editor objects of the open page.
+  applyDocType();
+  cleanups.push(nodes.onMeta((id) => { if (id === docId && app.classList.contains('html-doc') !== isHtml()) applyDocType(); }));
   (window as unknown as { __anima?: unknown }).__anima = { view, binding, nodes, nav: () => nav, docId };
   cleanups.push(() => { delete (window as unknown as { __anima?: unknown }).__anima; });
 
@@ -994,6 +1027,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
       { label: 'Download as Markdown (.md)', icon: 'download', onSelect: () => { const a = h('a', { href: api.exportUrl(docId), download: '' }); document.body.append(a); a.click(); a.remove(); } },
       // A guest's /d/ address opens only for them: there's nothing useful to copy.
       ...(guest ? [] : [{ label: 'Copy link', icon: 'link', onSelect: () => { void navigator.clipboard.writeText(`${location.origin}/d/${docId}`).then(() => toast('Link copied', { kind: 'success', timeout: 2000 }), () => toast(`${location.origin}/d/${docId}`)); } }]));
+    if (isHtml() && !guest) items.push({ label: 'Copy page link', icon: 'link', onSelect: () => { const url = `${location.origin}/p/${docId}`; void navigator.clipboard.writeText(url).then(() => toast('Page link copied', { kind: 'success', timeout: 2000 }), () => toast(url)); } });
     if (canEdit()) items.push({ label: `Document type: ${labelOf(docId)?.type ?? 'markdown'}…`, icon: 'file', onSelect: () => typeMenu(docId, moreBtn) });
     if (nav.tree === docId && atLeast(role, 'owner')) items.push({ label: 'Stop being a space', icon: 'x', onSelect: () => void nav.dropTree() });
     if (atLeast(role, 'owner')) items.push('separator', { label: 'Delete document', icon: 'trash', danger: true, onSelect: () => void deleteDoc() });

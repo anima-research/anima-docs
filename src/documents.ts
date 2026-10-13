@@ -61,7 +61,7 @@ export interface DocChange {
 
 type DocRow = { id: string; title: string; type: string; owner_sub: string; general_access: GeneralAccess; created_at: number; updated_at: number; rev: number; deleted_at: number | null };
 const meta = (r: DocRow): DocMeta => ({ id: r.id, title: r.title, type: r.type ?? 'markdown', ownerSub: r.owner_sub, generalAccess: r.general_access, createdAt: r.created_at, updatedAt: r.updated_at, rev: r.rev });
-export const NODE_TYPES = ['markdown', 'latex', 'text'];
+export const NODE_TYPES = ['markdown', 'html', 'latex', 'text'];
 /** How deep access may be derived through parents. */
 const DERIVE_DEPTH = 12;
 

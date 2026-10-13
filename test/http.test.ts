@@ -173,3 +173,37 @@ test('sessions: a 10-minute sign-in token gives a 30-day session; reads renew it
   assert.equal((await me.json()).you, null);
   assert.equal(me.headers.get('set-cookie'), null);
 });
+
+test('html pages: /p/<id> serves the document as itself in a sandbox; markdown redirects; media of shareable documents is open by id', async () => {
+  const ann = await signIn('Ann');
+  const page = await (await fetch(`${S.base}/api/docs`, { method: 'POST', headers: H({ Cookie: ann }), body: JSON.stringify({ title: 'App', type: 'html', content: '<!doctype html><title>App</title><h1>Hi</h1><script>document.title="ran"</script>' }) })).json();
+  assert.equal(page.type, 'html');
+  const r = await fetch(`${S.base}/p/${page.id}`, { headers: { Cookie: ann } });
+  assert.equal(r.status, 200);
+  assert.equal(r.headers.get('content-type'), 'text/html; charset=utf-8');
+  assert.match(r.headers.get('content-security-policy') ?? '', /^sandbox allow-scripts/);
+  assert.ok(!/allow-same-origin/.test(r.headers.get('content-security-policy') ?? ''), 'the page must not share the origin');
+  assert.match(r.headers.get('content-security-policy') ?? '', /frame-ancestors 'self'/);
+  assert.equal(r.headers.get('x-frame-options'), null, 'the editor frames the page');
+  const body = await r.text();
+  assert.ok(body.includes('<script>document.title="ran"</script>'), 'scripts kept verbatim');
+  const etag = r.headers.get('etag')!;
+  assert.equal((await fetch(`${S.base}/p/${page.id}`, { headers: { Cookie: ann, 'If-None-Match': etag } })).status, 304);
+  // Nobody signed in: a sign-in page, not the content.
+  const anon = await fetch(`${S.base}/p/${page.id}`);
+  assert.equal(anon.status, 401);
+  assert.ok(!(await anon.text()).includes('<h1>Hi</h1>'));
+  // Another member without access: nothing.
+  const bob = await signIn('Bob');
+  assert.equal((await fetch(`${S.base}/p/${page.id}`, { headers: { Cookie: bob } })).status, 404);
+  // A markdown document is not a page.
+  const md = await (await fetch(`${S.base}/api/docs`, { method: 'POST', headers: H({ Cookie: ann }), body: '{"title":"Notes"}' })).json();
+  const rd = await fetch(`${S.base}/p/${md.id}`, { headers: { Cookie: ann }, redirect: 'manual' });
+  assert.equal(rd.status, 302); assert.equal(rd.headers.get('location'), `/d/${md.id}`);
+  // Media: private document → session required; once the document has a link anyone can open, its media is open by (unguessable) id, so the sandboxed page can load it.
+  const up = await (await fetch(`${S.base}/api/media?doc=${page.id}`, { method: 'POST', headers: { Cookie: ann, Origin: S.base, 'Content-Type': 'image/png' }, body: png(2, 2) })).json();
+  assert.equal((await fetch(`${S.base}${up.url}`)).status, 401);
+  const link = await fetch(`${S.base}/api/docs/${page.id}/links`, { method: 'POST', headers: H({ Cookie: ann }), body: JSON.stringify({ role: 'viewer', who: 'anyone' }) });
+  assert.equal(link.status, 201, await link.text());
+  assert.equal((await fetch(`${S.base}${up.url}`)).status, 200);
+});
