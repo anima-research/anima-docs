@@ -14,7 +14,7 @@ import { scanMounts, MAX_DEPTH } from './nodes.js';
 import { sanitizeTemplate, slugify, type PublishSettings } from './trees.js';
 import sanitizeHtml from 'sanitize-html';
 import katex from 'katex';
-import { galleryFence, hasMathHtml, imageSizes, math, tableWidths, wrapByType } from './mdext.js';
+import { EMBED_FRAME_HOSTS, galleryFence, hasMathHtml, imageSizes, math, mediaEmbeds, tableWidths, wrapByType } from './mdext.js';
 
 export interface WikiPage { id: string; title: string; slug: string; parent: string | null; depth: number }
 interface Assembled { body: string; asides: { id: string; title: string; body: string }[]; nodes: Set<string> }
@@ -27,6 +27,7 @@ export class Wiki {
   constructor(private app: App) {
     // Raw HTML passes through markdown-it; pages are then sanitized unless the wiki allows scripts and is served off the app's origin.
     this.md = new MarkdownIt({ html: true, linkify: true, typographer: true });
+    mediaEmbeds(this.md);
     math(this.md, (tex, display) => katex.renderToString(tex, { displayMode: display, throwOnError: false, output: 'html' }));
     imageSizes(this.md);
     galleryFence(this.md);
@@ -305,11 +306,14 @@ export class Wiki {
 /** Rendered markdown for a wiki without scripts: HTML the author wrote is kept to what cannot run code. */
 function sanitizeRendered(html: string): string {
   return sanitizeHtml(html, {
-    allowedTags: sanitizeHtml.defaults.allowedTags.concat(['img', 'input', 'details', 'summary', 'figure', 'figcaption', 'svg', 'path', 'video', 'audio', 'source', 'span', 'section', 'dialog']),
-    allowedAttributes: { '*': ['class', 'id', 'style', 'aria-*', 'role', 'title', 'data-*', 'width', 'height', 'align', 'loading', 'decoding', 'open'], a: ['href', 'target', 'rel', 'name'], img: ['src', 'alt', 'width', 'height', 'loading', 'decoding'], input: ['type', 'checked', 'disabled'], video: ['src', 'controls', 'poster', 'width', 'height'], audio: ['src', 'controls'], source: ['src', 'type'], svg: ['viewBox', 'xmlns', 'width', 'height', 'fill', 'preserveAspectRatio'], path: ['d', 'fill', 'stroke', 'stroke-width'] },
+    allowedTags: sanitizeHtml.defaults.allowedTags.concat(['img', 'input', 'details', 'summary', 'figure', 'figcaption', 'svg', 'path', 'video', 'audio', 'source', 'track', 'iframe', 'span', 'section', 'dialog']),
+    allowedAttributes: { '*': ['class', 'id', 'style', 'aria-*', 'role', 'title', 'data-*', 'width', 'height', 'align', 'loading', 'decoding', 'open'], a: ['href', 'target', 'rel', 'name', 'download'], img: ['src', 'alt', 'width', 'height', 'loading', 'decoding'], input: ['type', 'checked', 'disabled'], video: ['src', 'controls', 'poster', 'width', 'height', 'preload', 'playsinline', 'loop', 'muted'], audio: ['src', 'controls', 'preload', 'loop'], source: ['src', 'type'], track: ['src', 'kind', 'srclang', 'label'], iframe: ['src', 'title', 'width', 'height', 'loading', 'allow', 'allowfullscreen', 'referrerpolicy', 'frameborder'], svg: ['viewBox', 'xmlns', 'width', 'height', 'fill', 'preserveAspectRatio'], path: ['d', 'fill', 'stroke', 'stroke-width'] },
     allowedSchemes: ['http', 'https', 'mailto'],
     allowedSchemesByTag: { img: ['http', 'https'], video: ['http', 'https'], audio: ['http', 'https'], source: ['http', 'https'] },
     allowProtocolRelative: false,
+    allowedIframeHostnames: EMBED_FRAME_HOSTS,
+    // sanitize-html strips a disallowed iframe's src and keeps the tag; an iframe without a src is nothing.
+    exclusiveFilter: (frame) => frame.tag === 'iframe' && !frame.attribs.src,
     disallowedTagsMode: 'discard',
     nonTextTags: ['script', 'style', 'textarea', 'option', 'noscript'],
     parseStyleAttributes: false,
@@ -420,6 +424,16 @@ a.wiki-private { color: var(--ink-3); text-decoration: underline dotted; }
 .prose code { font: 0.86em var(--mono); background: var(--panel); padding: 1px 5px; border-radius: 4px; }
 .prose pre { background: var(--panel); border: 1px solid var(--rule); border-radius: 8px; padding: 14px 16px; overflow: auto; font: 14px/1.5 var(--mono); }
 .prose pre code { background: none; padding: 0; font-size: inherit; }
+.prose .md-embed { display: block; margin: 0 0 1em; }
+.prose .md-video video { display: block; max-width: 100%; border-radius: 8px; background: #000; }
+.prose .md-audio audio { display: block; width: 100%; max-width: 520px; }
+.prose .md-frame { position: relative; }
+.prose .md-frame.wide { aspect-ratio: 16 / 9; max-width: 100%; }
+.prose .md-frame.wide iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; border-radius: 8px; }
+.prose .md-frame iframe { border: 0; border-radius: 8px; }
+.prose .md-embed-caption { display: block; font-size: 13px; color: var(--muted, #666); text-align: center; margin-top: 6px; }
+.prose a.md-file { display: inline-block; padding: 2px 10px 2px 8px; border: 1px solid var(--rule); border-radius: 999px; background: var(--panel); text-decoration: none; }
+.prose a.md-file::before { content: "⤓ "; }
 .prose .math-inline { white-space: nowrap; }
 .prose .math-block { margin: 0 0 1em; overflow-x: auto; overflow-y: hidden; padding: 2px 0; }
 .prose .math-display { display: block; text-align: center; margin: .6em 0; }

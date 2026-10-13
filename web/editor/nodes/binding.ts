@@ -85,6 +85,7 @@ export class Binding {
       bandDecorations,
       nodeHover,
       collapsedGutter,
+      nudgeField,
       subpagesDeco,
       EditorState.transactionFilter.of((tr) => this.filter(tr)),
       EditorView.updateListener.of((u) => {
@@ -431,7 +432,10 @@ class Subpages extends WidgetType {
   }
   ignoreEvent() { return true; }
 }
-const subpagesDeco = EditorView.decorations.compute([layoutField, 'doc', subpagesSource], (state): DecorationSet => {
+/** Tells the view that something outside the document (the navigation tree) changed: decorations that read it recompute. */
+export const nudge = StateEffect.define<null>();
+const nudgeField = StateField.define<number>({ create: () => 0, update: (v, tr) => (tr.effects.some((e) => e.is(nudge)) ? v + 1 : v) });
+const subpagesDeco = EditorView.decorations.compute([layoutField, 'doc', subpagesSource, nudgeField], (state): DecorationSet => {
   const items = state.facet(subpagesSource)();
   if (!items.length) return Decoration.none;
   return Decoration.set([Decoration.widget({ widget: new Subpages(items), block: true, side: 100 }).range(state.doc.length)]);

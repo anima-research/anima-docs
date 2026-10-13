@@ -4,7 +4,7 @@ import MarkdownIt from 'markdown-it';
 import type { StateCore } from 'markdown-it';
 import DOMPurify from 'dompurify';
 import katex from 'katex';
-import { galleryFence, hasMathHtml, imageSizes, math, tableWidths } from '../../src/mdext';
+import { EMBED_FRAME_HOSTS, galleryFence, hasMathHtml, imageSizes, math, mediaEmbeds, tableWidths } from '../../src/mdext';
 
 type MD = InstanceType<typeof MarkdownIt>;
 
@@ -38,6 +38,7 @@ docMd.use(taskLists);
 imageSizes(docMd);
 galleryFence(docMd);
 tableWidths(docMd);
+mediaEmbeds(docMd);
 math(docMd, (tex, display) => katex.renderToString(tex, { displayMode: display, throwOnError: false, output: 'html' }));
 const commentMd = new MarkdownIt({ html: false, linkify: true, breaks: true });
 commentMd.use(taskLists);
@@ -59,9 +60,21 @@ function purify(html: string): DocumentFragment {
         const src = node.getAttribute('src') ?? '';
         if (!isSafeImageSrc(src)) node.removeAttribute('src');
       }
+      if (node.tagName === 'VIDEO' || node.tagName === 'AUDIO' || node.tagName === 'SOURCE' || node.tagName === 'TRACK') {
+        const src = node.getAttribute('src') ?? '';
+        if (src && !isSafeImageSrc(src)) node.removeAttribute('src');
+        node.removeAttribute('autoplay');
+      }
+      if (node.tagName === 'IFRAME') {
+        // Only the video hosts embeds use (the CSP's frame-src says the same).
+        let ok = false;
+        try { const u = new URL(node.getAttribute('src') ?? '', location.origin); ok = u.protocol === 'https:' && EMBED_FRAME_HOSTS.includes(u.hostname); } catch { /* not a URL */ }
+        if (!ok) node.remove();
+        else node.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-popups allow-presentation');
+      }
     });
   }
-  return DOMPurify.sanitize(html, { RETURN_DOM_FRAGMENT: true, FORBID_TAGS: ['style', 'form'], ADD_ATTR: ['target'] }) as DocumentFragment;
+  return DOMPurify.sanitize(html, { RETURN_DOM_FRAGMENT: true, FORBID_TAGS: ['style', 'form'], ADD_TAGS: ['iframe'], ADD_ATTR: ['target', 'allow', 'allowfullscreen', 'loading', 'referrerpolicy', 'frameborder', 'preload', 'playsinline', 'controls', 'download'] }) as DocumentFragment;
 }
 
 /** Image sources the page may load (CSP allows self, https, data and blob). */

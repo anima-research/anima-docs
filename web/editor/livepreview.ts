@@ -13,6 +13,7 @@ import { StateEffect, StateField, type EditorState, type Range, type Transaction
 import { Decoration, EditorView, ViewPlugin, WidgetType, type DecorationSet, type ViewUpdate } from '@codemirror/view';
 import type { SyntaxNodeRef } from '@lezer/common';
 import { isSafeImageSrc } from '../lib/markdown';
+import { EMBED_FRAME_HOSTS, embedOf } from '../../src/mdext';
 import { TableWidget } from './table';
 import { parseAltSize, withAltSize } from '../../src/mdext';
 
@@ -123,6 +124,32 @@ class ImageWidget extends WidgetType {
       const fig = document.createElement('figure');
       fig.className = 'cm-image-figure';
       const size = parseAltSize(im.alt);
+      const embed = embedOf(im.src);
+      if (embed) {
+        // Not an image: a player or a video embed, as the preview shows it.
+        fig.classList.add('is-embed', `embed-${embed.kind}`);
+        let el: HTMLElement;
+        if (embed.kind === 'video' || embed.kind === 'audio') {
+          const m = document.createElement(embed.kind);
+          m.controls = true; m.preload = 'metadata'; m.src = embed.src; m.title = size.alt;
+          if (embed.kind === 'video' && size.width) m.style.width = `${size.width}px`;
+          el = m;
+        } else {
+          const f = document.createElement('iframe');
+          let ok = false;
+          try { ok = EMBED_FRAME_HOSTS.includes(new URL(embed.src).hostname); } catch { /* no */ }
+          f.src = ok ? embed.src : 'about:blank'; f.title = size.alt || 'Video'; f.loading = 'lazy'; f.allowFullscreen = true;
+          f.setAttribute('allow', 'accelerometer; encrypted-media; picture-in-picture; fullscreen');
+          f.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-popups allow-presentation');
+          if (size.width) f.style.width = `${size.width}px`;
+          el = f;
+        }
+        el.addEventListener('mousedown', (e) => e.stopPropagation());
+        fig.append(el);
+        if (size.alt && this.replacesLine) { const cap = document.createElement('figcaption'); cap.textContent = size.alt; fig.append(cap); }
+        wrap.append(fig);
+        continue;
+      }
       if (!isSafeImageSrc(im.src)) {
         fig.append(placeholder(im.src ? `Images must use https:// or be uploaded (${truncate(im.src, 48)})` : 'Image has no address'));
       } else {

@@ -32,6 +32,8 @@ export class NavPanel {
   private view: TreeView | null = null;
   private layout: Layout | null = null;
   private collapsed = new Set<string>();
+  /** Spaces the open document is in (a page can be placed in several). */
+  private inSpaces: string[] = [];
   tree: string | null;
   private destroyed = false;
   private dragging: { child: string; from: string } | null = null;
@@ -62,13 +64,13 @@ export class NavPanel {
       if (this.destroyed) return;
       this.roots = r.trees.sort((a, b) => (a.title || '').localeCompare(b.title || ''));
       if (this.tree && !this.roots.some((t) => t.root === this.tree)) this.tree = null;
+      const p = await api.paths(this.deps.docId).catch(() => null);
+      if (this.destroyed) return;
+      this.inSpaces = [...new Set([...(p?.root ? [this.deps.docId] : []), ...(p?.paths.map((x) => x.tree) ?? [])])];
       // A page in exactly one space is shown in it even without ?tree=.
       if (!this.tree) {
-        const p = await api.paths(this.deps.docId).catch(() => null);
-        if (this.destroyed) return;
-        const inTrees = p?.paths.map((x) => x.tree) ?? [];
         if (p?.root) this.tree = this.deps.docId;
-        else if (inTrees.length === 1) this.tree = inTrees[0];
+        else if (this.inSpaces.length === 1) this.tree = this.inSpaces[0];
         this.loadCollapsed();
       }
       this.view = this.tree ? await api.treeView(this.tree) : null;
@@ -127,9 +129,17 @@ export class NavPanel {
       icon('columns', 16), h('span.nav-space-name', null, cur ? (cur.title || 'Untitled') : this.roots.length ? 'Choose a space' : 'No spaces yet'), icon('chevronDown', 14));
     const actions = h('span.nav-space-acts', null,
       canEdit && !this.roots.some((t) => t.root === this.deps.docId)
-        ? h('button.nav-act', { type: 'button', 'aria-label': 'Make this document a space', 'data-tip': 'Make this document the root of a space', onclick: () => void this.makeSpace() }, '+')
+        ? h('button.nav-act.make-space', { type: 'button', 'aria-label': 'Make this document a space', 'data-tip': 'Make this document the root of a space', onclick: () => void this.makeSpace() }, '+')
+        : null,
+      cur && this.view
+        ? h('button.nav-act.space-more', { type: 'button', 'aria-label': 'Space actions', 'aria-haspopup': 'menu', 'data-tip': 'Space actions', onclick: (e: MouseEvent) => this.spaceActions(e.currentTarget as HTMLElement) }, '⋯')
         : null);
-    this.spaceEl.replaceChildren(h('div.nav-space-row', null, btn, actions));
+    // A page in several spaces says so, with a switch to each of the others.
+    const others = this.inSpaces.filter((t) => t !== this.tree).map((t) => this.roots.find((r) => r.root === t)).filter((r): r is TreeRoot => !!r);
+    const also = others.length
+      ? h('div.nav-space-also', null, h('span.meta', null, this.tree ? 'Also in ' : 'In '), ...others.flatMap((r, i) => [i ? h('span.meta', null, ' · ') : null, h('button.link-btn', { type: 'button', onclick: () => { this.tree = r.root; this.loadCollapsed(); void this.refresh(); this.deps.onOpen(this.deps.docId, r.root); } }, r.title || 'Untitled')]))
+      : null;
+    this.spaceEl.replaceChildren(h('div.nav-space-row', null, btn, actions), ...(also ? [also] : []));
   }
 
   private spaceMenu(anchor: HTMLElement) {
@@ -156,7 +166,23 @@ export class NavPanel {
     input.focus();
   }
 
+  /** The current space's own actions (also in the root row's context menu). */
+  private spaceActions(anchor: HTMLElement) {
+    const v = this.view;
+    if (!v) return;
+    const items: MenuItem[] = [{ label: 'Open the space’s root page', icon: 'file', onSelect: () => this.deps.onOpen(v.root, v.root) }];
+    if (atLeast(v.role, 'editor')) items.push({ label: 'New page in this space…', icon: 'plus', onSelect: () => void this.newSubpage(v.root) });
+    if (v.role === 'owner') items.push('separator', { label: 'Wiki settings…', icon: 'globe', onSelect: () => void this.publishDialog() }, { label: 'Stop being a space', icon: 'x', danger: true, onSelect: () => void this.dropTree() });
+    openMenu(anchor, items, { align: 'end' });
+  }
+
   private async makeSpace() {
+    const ok = await confirmDialog({
+      title: 'Make this document a space?',
+      message: h('span', null, 'Its subpages show in the left panel, Notion-style: documents mounted inside it become pages, and you can place or drag other pages under it. ', h('strong', null, 'This can be undone'), ' with “Stop being a space” (⋯ next to the space name): the pages stay, only the navigation goes.'),
+      confirmLabel: 'Make it a space',
+    });
+    if (!ok) return;
     try {
       await api.createTree(this.deps.docId);
       this.tree = this.deps.docId;

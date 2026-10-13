@@ -73,8 +73,25 @@ test('web API: create, share by @name, roles, rename, export', async () => {
 test('media: upload validates type, serves to signed-in users only, agents can insert and view', async () => {
   const ann = await signIn('Ann');
   const d = await (await fetch(`${S.base}/api/docs`, { method: 'POST', headers: H({ Cookie: ann }), body: '{"title":"Pics"}' })).json();
-  const bad = await fetch(`${S.base}/api/media?doc=${d.id}`, { method: 'POST', headers: { Cookie: ann, Origin: S.base }, body: '<svg/>' });
-  assert.equal(bad.status, 415);
+  // Anything can be uploaded; what the browser could run (SVG, HTML) is only ever a download, under its own name.
+  const svg = await fetch(`${S.base}/api/media?doc=${d.id}&name=${encodeURIComponent('evil "x".svg')}`, { method: 'POST', headers: { Cookie: ann, Origin: S.base }, body: '<svg/>' });
+  assert.equal(svg.status, 201);
+  const svgInfo = await svg.json();
+  assert.equal(svgInfo.kind, 'file'); assert.match(svgInfo.id, /\.svg$/);
+  const svgGet = await fetch(`${S.base}${svgInfo.url}`, { headers: { Cookie: ann } });
+  assert.equal(svgGet.headers.get('content-type'), 'application/octet-stream');
+  assert.match(svgGet.headers.get('content-disposition') ?? '', /^attachment; filename="evil x.svg"/);
+  assert.equal(svgGet.headers.get('x-content-type-options'), 'nosniff');
+  // Audio is sniffed (the declared type is ignored) and served with Range support for players.
+  const mp3 = Buffer.concat([Buffer.from('ID3'), Buffer.alloc(2000, 7)]);
+  const au = await (await fetch(`${S.base}/api/media?doc=${d.id}&name=talk.mp3`, { method: 'POST', headers: { Cookie: ann, Origin: S.base, 'Content-Type': 'image/png' }, body: mp3 })).json();
+  assert.equal(au.mime, 'audio/mpeg'); assert.equal(au.kind, 'audio'); assert.equal(au.name, 'talk.mp3');
+  const part = await fetch(`${S.base}${au.url}`, { headers: { Cookie: ann, Range: 'bytes=10-19' } });
+  assert.equal(part.status, 206);
+  assert.equal(part.headers.get('content-range'), `bytes 10-19/${mp3.length}`);
+  assert.equal((await part.arrayBuffer()).byteLength, 10);
+  assert.equal((await fetch(`${S.base}${au.url}`, { headers: { Cookie: ann, Range: 'bytes=99999-' } })).status, 416);
+
   const up = await fetch(`${S.base}/api/media?doc=${d.id}`, { method: 'POST', headers: { Cookie: ann, Origin: S.base, 'Content-Type': 'image/png' }, body: png(3, 2) });
   assert.equal(up.status, 201);
   const info = await up.json();

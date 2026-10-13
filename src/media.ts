@@ -1,7 +1,10 @@
-// Image storage: content-addressed files under <data>/media, metadata in SQLite.
+// Media storage: content-addressed files under <data>/media (images, audio,
+// video, any file), metadata in SQLite. Types are sniffed, never trusted from
+// the client; only images, audio, video and PDF are served inline, everything
+// else is a download.
 
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { lookup } from 'node:dns';
 import { isIP } from 'node:net';
@@ -11,17 +14,45 @@ import { Fault } from './auth.js';
 
 export const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
 
-export interface MediaInfo { id: string; mime: string; size: number; width: number | null; height: number | null; url: string }
+export interface MediaInfo { id: string; mime: string; size: number; width: number | null; height: number | null; url: string; /** Original file name (uploads since v8). */ name: string | null; /** image | audio | video | file */ kind: MediaKind }
+export type MediaKind = 'image' | 'audio' | 'video' | 'file';
 
+export function kindOf(mime: string): MediaKind {
+  return mime.startsWith('image/') ? 'image' : mime.startsWith('audio/') ? 'audio' : mime.startsWith('video/') ? 'video' : 'file';
+}
+/** Served with its own Content-Type (inline); other types are downloads. */
+export const inlineMime = (mime: string) => kindOf(mime) !== 'file' || mime === 'application/pdf';
+const ID_RE = /^[0-9a-f]{32}\.[a-z0-9]{1,8}$/;
+
+const ascii = (b: Buffer, from: number, to: number) => (b.length >= to ? b.toString('ascii', from, to) : '');
+const ftyp = (b: Buffer) => (ascii(b, 4, 8) === 'ftyp' ? ascii(b, 8, 12) : null);
 const TYPES: { mime: string; ext: string; test: (b: Buffer) => boolean }[] = [
   { mime: 'image/png', ext: 'png', test: (b) => b.length > 24 && b.readUInt32BE(0) === 0x89504e47 },
   { mime: 'image/jpeg', ext: 'jpg', test: (b) => b.length > 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff },
-  { mime: 'image/gif', ext: 'gif', test: (b) => b.length > 10 && b.toString('ascii', 0, 4) === 'GIF8' },
-  { mime: 'image/webp', ext: 'webp', test: (b) => b.length > 30 && b.toString('ascii', 0, 4) === 'RIFF' && b.toString('ascii', 8, 12) === 'WEBP' },
+  { mime: 'image/gif', ext: 'gif', test: (b) => b.length > 10 && ascii(b, 0, 4) === 'GIF8' },
+  { mime: 'image/webp', ext: 'webp', test: (b) => b.length > 30 && ascii(b, 0, 4) === 'RIFF' && ascii(b, 8, 12) === 'WEBP' },
+  { mime: 'audio/wav', ext: 'wav', test: (b) => b.length > 12 && ascii(b, 0, 4) === 'RIFF' && ascii(b, 8, 12) === 'WAVE' },
+  { mime: 'audio/mpeg', ext: 'mp3', test: (b) => b.length > 3 && (ascii(b, 0, 3) === 'ID3' || (b[0] === 0xff && (b[1] & 0xe6) === 0xe2)) },
+  { mime: 'audio/flac', ext: 'flac', test: (b) => ascii(b, 0, 4) === 'fLaC' },
+  { mime: 'audio/ogg', ext: 'ogg', test: (b) => ascii(b, 0, 4) === 'OggS' },
+  { mime: 'audio/mp4', ext: 'm4a', test: (b) => ftyp(b) === 'M4A ' },
+  { mime: 'video/quicktime', ext: 'mov', test: (b) => ftyp(b) === 'qt  ' },
+  { mime: 'video/mp4', ext: 'mp4', test: (b) => ftyp(b) !== null },
+  { mime: 'video/webm', ext: 'webm', test: (b) => b.length > 4 && b.readUInt32BE(0) === 0x1a45dfa3 && b.subarray(0, 64).toString('latin1').includes('webm') },
+  { mime: 'video/x-matroska', ext: 'mkv', test: (b) => b.length > 4 && b.readUInt32BE(0) === 0x1a45dfa3 },
+  { mime: 'application/pdf', ext: 'pdf', test: (b) => ascii(b, 0, 4) === '%PDF' },
+  { mime: 'application/zip', ext: 'zip', test: (b) => b.length > 4 && ascii(b, 0, 2) === 'PK' && b[2] === 3 && b[3] === 4 },
 ];
 
 export function sniff(b: Buffer) {
   return TYPES.find((t) => t.test(b)) ?? null;
+}
+export const IMAGE_MIMES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+
+/** A file name safe to store and echo back: no paths, no control characters, bounded. */
+export function cleanName(name: string | null | undefined): string | null {
+  const n = String(name ?? '').replace(/[\\/]+/g, ' ').replace(/[\x00-\x1f\x7f"]/g, '').trim().slice(0, 200);
+  return n || null;
 }
 
 export function dimensions(b: Buffer, mime: string): { width: number; height: number } | null {
@@ -55,41 +86,61 @@ export class Media {
     mkdirSync(this.dir, { recursive: true });
   }
 
-  put(bytes: Buffer, uploader: string, docId: string | null): MediaInfo {
-    if (bytes.length === 0) throw new Fault(400, 'Empty image.');
-    if (bytes.length > MAX_IMAGE_BYTES) throw new Fault(413, `Image too large (max ${MAX_IMAGE_BYTES / 1024 / 1024} MB).`);
+  /**
+   * Store an upload. `imagesOnly` is the image paths (toolbar, agents' insert_image): anything
+   * else is refused there. Otherwise any file is kept: a sniffed type when known, or a plain
+   * download named after the original file.
+   */
+  put(bytes: Buffer, uploader: string, docId: string | null, opts: { name?: string | null; imagesOnly?: boolean; maxBytes?: number } = {}): MediaInfo {
+    if (bytes.length === 0) throw new Fault(400, 'Empty file.');
     const type = sniff(bytes);
-    if (!type) throw new Fault(415, 'Only PNG, JPEG, GIF and WebP images are accepted.');
-    const id = `${createHash('sha256').update(bytes).digest('hex').slice(0, 32)}.${type.ext}`;
+    const name = cleanName(opts.name);
+    if (opts.imagesOnly !== false) {
+      if (!type || !IMAGE_MIMES.has(type.mime)) throw new Fault(415, 'Only PNG, JPEG, GIF and WebP images are accepted.');
+      if (bytes.length > MAX_IMAGE_BYTES) throw new Fault(413, `Image too large (max ${MAX_IMAGE_BYTES / 1024 / 1024} MB).`);
+    } else {
+      const max = type && IMAGE_MIMES.has(type.mime) ? MAX_IMAGE_BYTES : (opts.maxBytes ?? MAX_IMAGE_BYTES);
+      if (bytes.length > max) throw new Fault(413, `File too large (max ${Math.round(max / 1024 / 1024)} MB).`);
+    }
+    const ext = type ? type.ext : (/\.([a-z0-9]{1,8})$/i.exec(name ?? '')?.[1]?.toLowerCase() ?? 'bin');
+    const mime = type ? type.mime : 'application/octet-stream';
+    const id = `${createHash('sha256').update(bytes).digest('hex').slice(0, 32)}.${ext}`;
     const file = join(this.dir, id);
     if (!existsSync(file)) writeFileSync(file, bytes);
-    const dim = dimensions(bytes, type.mime);
-    this.db.prepare(`INSERT OR IGNORE INTO media (id, mime, size, width, height, uploader_sub, doc_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(id, type.mime, bytes.length, dim?.width ?? null, dim?.height ?? null, uploader, docId, Date.now());
+    const dim = IMAGE_MIMES.has(mime) ? dimensions(bytes, mime) : null;
+    this.db.prepare(`INSERT OR IGNORE INTO media (id, mime, size, width, height, uploader_sub, doc_id, created_at, name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(id, mime, bytes.length, dim?.width ?? null, dim?.height ?? null, uploader, docId, Date.now(), name);
     return this.info(id)!;
   }
 
   info(id: string): MediaInfo | null {
     const r = this.db.prepare('SELECT * FROM media WHERE id = ?').get(id) as any;
-    return r ? { id: r.id, mime: r.mime, size: r.size, width: r.width, height: r.height, url: `/media/${r.id}` } : null;
+    return r ? { id: r.id, mime: r.mime, size: r.size, width: r.width, height: r.height, url: `/media/${r.id}`, name: r.name ?? null, kind: kindOf(r.mime) } : null;
   }
 
   read(id: string): { info: MediaInfo; bytes: Buffer } | null {
-    if (!/^[0-9a-f]{32}\.(png|jpg|gif|webp)$/.test(id)) return null;
+    const f = this.locate(id);
+    return f ? { info: f.info, bytes: readFileSync(f.file) } : null;
+  }
+
+  /** Where a stored file is (for streaming, with Range requests). */
+  locate(id: string): { info: MediaInfo; file: string; size: number } | null {
+    if (!ID_RE.test(id)) return null;
     const info = this.info(id);
     if (!info) return null;
-    return { info, bytes: readFileSync(join(this.dir, id)) };
+    const file = join(this.dir, id);
+    if (!existsSync(file)) return null;
+    return { info, file, size: statSync(file).size };
   }
 
   /** Media id from a URL or path referring to this service ("/media/<id>", "https://host/media/<id>", or a bare id). */
   static idFrom(ref: string): string | null {
     const s = String(ref ?? '').trim();
     if (!s || s.length > 2048) return null;
-    const ID = /^[0-9a-f]{32}\.(?:png|jpg|gif|webp)$/;
-    if (ID.test(s)) return s;
+    if (ID_RE.test(s)) return s;
     let path: string;
     try { path = new URL(s, 'http://x').pathname; } catch { return null; }
-    const m = /^\/media\/([0-9a-f]{32}\.(?:png|jpg|gif|webp))$/.exec(path);
+    const m = /^\/media\/([0-9a-f]{32}\.[a-z0-9]{1,8})$/.exec(path);
     return m ? m[1] : null;
   }
 }

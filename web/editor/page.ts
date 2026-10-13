@@ -14,7 +14,7 @@ import { debounce, h, modKey, altKey, rafThrottle, isMac } from '../lib/dom';
 import { icon } from '../lib/icons';
 import { splitLabel } from '../lib/format';
 import { renderDocument } from '../lib/markdown';
-import { wrapByType } from '../../src/mdext';
+import { embedOf, wrapByType } from '../../src/mdext';
 import { searchPeople } from '../lib/people';
 import { avatar, confirmDialog, emptyState, errorMessage, openDialog, openMenu, promptDialog, spinner, toast, type MenuItem } from '../lib/ui';
 import { navigate } from '../router';
@@ -31,7 +31,7 @@ import { SidePanel } from './panels';
 import { formatKeymap, insertBlock, insertLink, insertRule, insertTable, lineKindAt, selectedText, setLineKind, toggleCodeBlock, toggleInline, type LineKind } from './commands';
 import { SuggestSession, sharedCoords, suggestionOverlays, type Coords } from './suggest';
 import { openPingDialog } from './ping';
-import { Binding, nodeInfo, subpagesSource, viewMap, type NodeLabel } from './nodes/binding';
+import { Binding, nodeInfo, subpagesSource, viewMap, type NodeLabel, nudge } from './nodes/binding';
 import { NodeStore } from './nodes/store';
 import { nodePos, virtualPos, type Layout, type Mount } from './nodes/layout';
 import { NavPanel } from './nav';
@@ -39,6 +39,9 @@ import { documentCompletions, forgetDocuments } from './complete';
 
 type Mode = 'edit' | 'split' | 'preview';
 const MAX_IMAGE = 15 * 1024 * 1024;
+/** Other files (audio, video, documents); the server's DOCS_UPLOAD_MAX_MB is the real limit. */
+const MAX_FILE = 100 * 1024 * 1024;
+const isImageFile = (f: File) => /^image\/(png|jpeg|gif|webp)$/.test(f.type);
 
 const docHighlight = HighlightStyle.define([
   { tag: t.heading, class: 'tok-heading' },
@@ -251,6 +254,10 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   const toolbar = h('div.doc-toolbar', { role: 'toolbar', 'aria-label': 'Formatting' });
   const fileInput = h('input', { type: 'file', accept: 'image/png,image/jpeg,image/gif,image/webp', multiple: true, hidden: true, 'aria-hidden': 'true', class: 'image-file-input' });
   const galleryInput = h('input', { type: 'file', accept: 'image/png,image/jpeg,image/gif,image/webp', multiple: true, hidden: true, 'aria-hidden': 'true', class: 'gallery-file-input' });
+  const anyFileInput = h('input', { type: 'file', multiple: true, hidden: true, 'aria-hidden': 'true', class: 'any-file-input' });
+  const avInput = h('input', { type: 'file', accept: 'audio/*,video/*,.mp3,.m4a,.wav,.ogg,.flac,.mp4,.webm,.mov,.m4v', multiple: true, hidden: true, 'aria-hidden': 'true', class: 'av-file-input' });
+  anyFileInput.addEventListener('change', () => { const files = [...(anyFileInput.files ?? [])]; anyFileInput.value = ''; if (files.length) void uploadFiles(files, view.state.selection.main.head); });
+  avInput.addEventListener('change', () => { const files = [...(avInput.files ?? [])]; avInput.value = ''; if (files.length) void uploadFiles(files, view.state.selection.main.head); });
   galleryInput.addEventListener('change', () => {
     const files = [...(galleryInput.files ?? [])];
     galleryInput.value = '';
@@ -262,6 +269,10 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     onclick: () => openMenu(insertBtn, [
       { label: 'Gallery from images…', icon: 'image', onSelect: () => (guest ? needSignInForImages() : galleryInput.click()) },
       { label: 'Empty gallery block', icon: 'image', onSelect: () => { insertBlock(view, '```gallery\n\n```', { select: [11, 11] }); view.focus(); } },
+      'separator',
+      { label: 'Audio or video file…', icon: 'play', onSelect: () => (guest ? needSignInForImages() : avInput.click()) },
+      { label: 'YouTube or Vimeo video…', icon: 'play', onSelect: () => void embedVideoDialog() },
+      { label: 'Any file…', icon: 'download', onSelect: () => (guest ? needSignInForImages() : anyFileInput.click()) },
       'separator',
       { label: 'Math, inline: $…$', icon: 'sparkle', hint: '$x$', onSelect: () => { toggleInline(view, '$'); view.focus(); } },
       { label: 'Math block: $$ … $$', icon: 'sparkle', onSelect: () => { insertBlock(view, '$$\n\n$$', { select: [3, 3] }); view.focus(); } },
@@ -427,23 +438,23 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
         EditorView.contentAttributes.of({ 'aria-label': 'Document text', spellcheck: 'true', autocapitalize: 'sentences', 'aria-multiline': 'true' }),
         EditorView.domEventHandlers({
           paste: (e) => {
-            const files = [...(e.clipboardData?.files ?? [])].filter((f) => f.type.startsWith('image/'));
+            const files = [...(e.clipboardData?.files ?? [])];
             if (!files.length || !canWrite()) return false;
             e.preventDefault();
-            if (suggesting()) { toast(canEdit() ? 'Switch to Editing to add images.' : 'Images can’t be suggested yet; describe the image in a comment.', { kind: 'info' }); return true; }
+            if (suggesting()) { toast(canEdit() ? 'Switch to Editing to add files.' : 'Files can’t be suggested yet; describe them in a comment.', { kind: 'info' }); return true; }
             if (guest) { needSignInForImages(); return true; }
-            void uploadImages(files, view.state.selection.main.head);
+            void uploadFiles(files, view.state.selection.main.head);
             return true;
           },
           drop: (e, v) => {
-            const files = [...(e.dataTransfer?.files ?? [])].filter((f) => f.type.startsWith('image/'));
+            const files = [...(e.dataTransfer?.files ?? [])];
             if (!files.length) return false;
             e.preventDefault();
-            if (!canEdit()) { toast('You need edit access to add images.', { kind: 'error' }); return true; }
-            if (suggesting()) { toast('Switch to Editing to add images.', { kind: 'info' }); return true; }
+            if (!canEdit()) { toast('You need edit access to add files.', { kind: 'error' }); return true; }
+            if (suggesting()) { toast('Switch to Editing to add files.', { kind: 'info' }); return true; }
             if (guest) { needSignInForImages(); return true; }
             const pos = v.posAtCoords({ x: e.clientX, y: e.clientY }) ?? v.state.selection.main.head;
-            void uploadImages(files, pos);
+            void uploadFiles(files, pos);
             return true;
           },
           click: (e) => {
@@ -480,7 +491,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     crumbsEl.replaceChildren(...parts);
   }
   /** The Subpages footer reads a facet: nudge the view when the tree changes. */
-  function refreshFooter() { if (view && !session) view.dispatch({}); }
+  function refreshFooter() { if (view && !session) view.dispatch({ effects: nudge.of(null) }); }
   provider.on('tree', () => void nav.refresh());
 
   /** Where the cursor is, as (node, offset). */
@@ -497,6 +508,37 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
       toast(h('span', null, 'Split: the rest is a section now. ', h('button.link-btn', { type: 'button', onclick: () => void nameSection(d.id) }, 'Name it')), { kind: 'success', timeout: 6000 });
     } catch (e) { toast(errorMessage(e), { kind: 'error' }); }
   }
+  /** A YouTube or Vimeo address becomes an embed line: `![title](url)`. */
+  async function embedVideoDialog() {
+    if (!canWrite()) return;
+    const url = await promptDialog({ title: 'Embed a video', label: 'YouTube or Vimeo address', placeholder: 'https://www.youtube.com/watch?v=…', confirmLabel: 'Embed' });
+    if (!url) return;
+    const e = embedOf(url.trim());
+    if (!e || (e.kind !== 'youtube' && e.kind !== 'vimeo')) { toast('That is not a YouTube or Vimeo video address.', { kind: 'error' }); return; }
+    insertBlock(view, `![](${url.trim()})`);
+    view.focus();
+  }
+
+  /** Upload files of any kind at the cursor: images as images, audio and video as players, the rest as file links. */
+  async function uploadFiles(files: File[], at: number) {
+    const images = files.filter(isImageFile), others = files.filter((f) => !isImageFile(f));
+    if (images.length) await uploadImages(images, at);
+    if (!others.length || !canEdit() || guest || suggesting()) return;
+    for (const f of others) {
+      if (f.size > MAX_FILE) { toast(`${f.name} is larger than ${MAX_FILE / 1024 / 1024} MB.`, { kind: 'error' }); continue; }
+      const close = toast(h('span.uploading', null, spinner(14), `Uploading ${f.name}…`), { timeout: 0 });
+      try {
+        const info = await api.upload(docId, f, f.name);
+        const label = (f.name.replace(/[[\]\\]/g, ' ').trim() || 'file').slice(0, 120);
+        const md = info.kind === 'audio' || info.kind === 'video' ? `![${label.replace(/\.[a-z0-9]+$/i, '')}](${info.url})` : `[${label}](${info.url})`;
+        insertBlock(view, md, { at: Math.min(view.state.selection.main.head, view.state.doc.length) });
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 429) { toast(`${errorMessage(e)} Files can be added again tomorrow.`, { kind: 'error' }); close(); break; }
+        toast(`${f.name}: ${errorMessage(e)}`, { kind: 'error' });
+      } finally { close(); }
+    }
+  }
+
   /** Upload images and insert them as one gallery block at the cursor. */
   async function insertGallery(files: File[]) {
     if (!canWrite() || guest) return;
@@ -953,6 +995,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
       // A guest's /d/ address opens only for them: there's nothing useful to copy.
       ...(guest ? [] : [{ label: 'Copy link', icon: 'link', onSelect: () => { void navigator.clipboard.writeText(`${location.origin}/d/${docId}`).then(() => toast('Link copied', { kind: 'success', timeout: 2000 }), () => toast(`${location.origin}/d/${docId}`)); } }]));
     if (canEdit()) items.push({ label: `Document type: ${labelOf(docId)?.type ?? 'markdown'}…`, icon: 'file', onSelect: () => typeMenu(docId, moreBtn) });
+    if (nav.tree === docId && atLeast(role, 'owner')) items.push({ label: 'Stop being a space', icon: 'x', onSelect: () => void nav.dropTree() });
     if (atLeast(role, 'owner')) items.push('separator', { label: 'Delete document', icon: 'trash', danger: true, onSelect: () => void deleteDoc() });
     return items;
   }

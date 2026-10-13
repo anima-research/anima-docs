@@ -18,7 +18,8 @@ import { attachMcpl } from './mcpl.js';
 import { Realtime, maskFor, publicActor, type WebSession } from './realtime.js';
 import { TOOLS, runTool } from './tools.js';
 import { atLeast } from './documents.js';
-import { MAX_IMAGE_BYTES, Media } from './media.js';
+import { Media, inlineMime } from './media.js';
+import { createReadStream } from 'node:fs';
 
 const PUBLIC_DIR = resolve(new URL('.', import.meta.url).pathname, '..', 'public');
 
@@ -27,7 +28,6 @@ const cookies = (req: IncomingMessage): Record<string, string> => Object.fromEnt
   const i = c.indexOf('=');
   return i < 0 ? [c.trim(), ''] : [c.slice(0, i).trim(), safeDecode(c.slice(i + 1).trim())];
 }));
-const UPLOAD_QUOTA_BYTES = 500 * 1024 * 1024; // per principal per day
 const GUEST_SESSION_MS = 30 * 86400_000;
 
 /** Sliding-window caps on new guest identities: per client network, per link, and overall. */
@@ -223,7 +223,7 @@ export function createHttp(app: App) {
     res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('X-Frame-Options', 'DENY');
     const wsOrigin = app.config.origin.replace(/^http/, 'ws');
-    res.setHeader('Content-Security-Policy', `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data: blob:; connect-src 'self' ${wsOrigin}; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`);
+    res.setHeader('Content-Security-Policy', `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data: blob:; media-src 'self' https: blob:; frame-src https://www.youtube-nocookie.com https://player.vimeo.com; connect-src 'self' ${wsOrigin}; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`);
     if (production) res.setHeader('Strict-Transport-Security', 'max-age=31536000');
     /** Who the response is for: guests get principal ids masked (they see people by name only). */
     let viewer: Actor | null = null;
@@ -449,21 +449,44 @@ export function createHttp(app: App) {
       // ------------------------------------------------ media
       if (path.startsWith('/media/') && (method === 'GET' || method === 'HEAD')) {
         const id = Media.idFrom(path);
-        if (!actor && !(id && app.wiki.mediaPublic(id))) throw new Fault(401, 'Sign in to view images.');
-        const f = id ? app.media.read(id) : null;
+        if (!actor && !(id && app.wiki.mediaPublic(id))) throw new Fault(401, 'Sign in to view files.');
+        const f = id ? app.media.locate(id) : null;
         if (!f) throw new Fault(404, 'Not found.');
-        res.writeHead(200, { 'Content-Type': f.info.mime, 'Content-Length': f.info.size, 'Cache-Control': 'private, max-age=31536000, immutable' });
-        res.end(method === 'HEAD' ? undefined : f.bytes);
+        // Images, audio, video and PDF are served as what they are; anything else is a download
+        // under its original name (never rendered by the browser: no HTML/SVG/script on this origin).
+        const inline = inlineMime(f.info.mime);
+        const name = (f.info.name ?? f.info.id).replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_');
+        const headers: Record<string, string | number> = {
+          'Content-Type': inline ? f.info.mime : 'application/octet-stream',
+          'Cache-Control': 'private, max-age=31536000, immutable',
+          'Accept-Ranges': 'bytes',
+          'X-Content-Type-Options': 'nosniff',
+          ...(inline ? {} : { 'Content-Disposition': `attachment; filename="${name}"; filename*=UTF-8''${encodeURIComponent(f.info.name ?? f.info.id)}` }),
+        };
+        // Range requests: audio and video players seek, and Safari will not play without them.
+        const range = /^bytes=(\d*)-(\d*)$/.exec(String(req.headers.range ?? ''));
+        let start = 0, end = f.size - 1, status = 200;
+        if (range && (range[1] || range[2])) {
+          if (range[1]) { start = Number(range[1]); end = range[2] ? Math.min(Number(range[2]), f.size - 1) : f.size - 1; }
+          else { start = Math.max(0, f.size - Number(range[2])); }
+          if (start > end || start >= f.size) { res.writeHead(416, { 'Content-Range': `bytes */${f.size}` }); res.end(); return; }
+          status = 206;
+          headers['Content-Range'] = `bytes ${start}-${end}/${f.size}`;
+        }
+        headers['Content-Length'] = end - start + 1;
+        res.writeHead(status, headers);
+        if (method === 'HEAD') { res.end(); return; }
+        createReadStream(f.file, { start, end }).pipe(res);
         return;
       }
       if (path === '/api/media' && method === 'POST') {
         if (!actor) throw new Fault(401, 'Sign in to upload.');
         const docId = url.searchParams.get('doc') ?? '';
-        app.docs.require(docId, actor, 'editor'); // images belong to a document you can edit
+        app.docs.require(docId, actor, 'editor'); // files belong to a document you can edit
         const used = (app.db.prepare('SELECT coalesce(sum(size), 0) AS n FROM media WHERE uploader_sub = ? AND created_at > ?').get(actor.sub, Date.now() - 86400_000) as { n: number }).n;
-        if (used > UPLOAD_QUOTA_BYTES) throw new Fault(429, 'Daily upload limit reached.');
-        const bytes = await readBody(req, MAX_IMAGE_BYTES + 1024);
-        send(201, app.media.put(bytes, actor.sub, docId));
+        if (used > app.config.uploadQuotaBytes) throw new Fault(429, 'Daily upload limit reached.');
+        const bytes = await readBody(req, app.config.uploadMaxBytes + 1024);
+        send(201, app.media.put(bytes, actor.sub, docId, { name: url.searchParams.get('name'), imagesOnly: false, maxBytes: app.config.uploadMaxBytes }));
         return;
       }
 

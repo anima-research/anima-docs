@@ -6,7 +6,7 @@ import { dirname } from 'node:path';
 
 export type DB = Database.Database;
 
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 
 export function openDatabase(file: string): DB {
   if (file !== ':memory:') mkdirSync(dirname(file), { recursive: true });
@@ -143,7 +143,8 @@ export function openDatabase(file: string): DB {
         height        INTEGER,
         uploader_sub  TEXT NOT NULL,
         doc_id        TEXT,
-        created_at    INTEGER NOT NULL
+        created_at    INTEGER NOT NULL,
+        name          TEXT                    -- original file name (v8)
       );
 
       -- Agent attention: per-agent wake gates (doc_id '*' = defaults for every document).
@@ -385,6 +386,14 @@ export function openDatabase(file: string): DB {
       db.exec('CREATE UNIQUE INDEX IF NOT EXISTS trees_slug ON trees(slug); CREATE UNIQUE INDEX IF NOT EXISTS trees_domain ON trees(domain);');
       const m = new Set((db.pragma('table_info(mounts)') as { name: string }[]).map((c) => c.name));
       if (!m.has('role')) db.exec("ALTER TABLE mounts ADD COLUMN role TEXT NOT NULL DEFAULT 'inline'");
+      db.pragma('user_version = 7');
+    })();
+  }
+  if ((db.pragma('user_version', { simple: true }) as number) < 8) {
+    // v8: any file can be uploaded (audio, video, documents…): media keeps the original file name.
+    db.transaction(() => {
+      const m = new Set((db.pragma('table_info(media)') as { name: string }[]).map((c) => c.name));
+      if (m.size && !m.has('name')) db.exec('ALTER TABLE media ADD COLUMN name TEXT');
       db.pragma(`user_version = ${SCHEMA_VERSION}`);
     })();
   }

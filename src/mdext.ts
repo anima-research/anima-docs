@@ -234,3 +234,78 @@ export function wrapByType(text: string, type: string | undefined): string {
   }
   return text;
 }
+
+// ------------------------------------------------------------------ media embeds
+//
+// Image syntax carries every embed, so the markdown stays plain and portable:
+//   ![caption](/media/<id>.mp4)      a video player (also .webm .mov .m4v .ogv, or any https URL with one of those)
+//   ![caption](/media/<id>.mp3)      an audio player (.mp3 .m4a .ogg .oga .wav .flac .aac)
+//   ![title](https://youtu.be/<id>)  a YouTube embed (youtube-nocookie); also watch?v=, /shorts/, /embed/, and Vimeo
+// A plain link to an uploaded file ([name](/media/<id>.pdf)) is a file link.
+
+export type EmbedKind = 'video' | 'audio' | 'youtube' | 'vimeo';
+export interface Embed { kind: EmbedKind; src: string }
+const VIDEO_EXT = /\.(mp4|webm|mov|m4v|ogv|mkv)(?:[?#].*)?$/i;
+const AUDIO_EXT = /\.(mp3|m4a|ogg|oga|wav|flac|aac)(?:[?#].*)?$/i;
+
+/** What an image-syntax URL embeds, if not an image. */
+export function embedOf(src: string): Embed | null {
+  const s = src.trim();
+  let u: URL | null = null;
+  try { u = new URL(s); } catch { /* relative */ }
+  if (u && /^(www\.)?(youtube\.com|youtube-nocookie\.com|m\.youtube\.com)$/i.test(u.hostname)) {
+    const id = u.searchParams.get('v') ?? /^\/(?:shorts|embed|live|v)\/([A-Za-z0-9_-]{6,20})/.exec(u.pathname)?.[1] ?? null;
+    if (id && /^[A-Za-z0-9_-]{6,20}$/.test(id)) { const t = u.searchParams.get('t') ?? u.searchParams.get('start'); return { kind: 'youtube', src: `https://www.youtube-nocookie.com/embed/${id}${t && /^\d+s?$/.test(t) ? `?start=${parseInt(t, 10)}` : ''}` }; }
+    return null;
+  }
+  if (u && /^youtu\.be$/i.test(u.hostname)) {
+    const id = u.pathname.slice(1);
+    if (/^[A-Za-z0-9_-]{6,20}$/.test(id)) { const t = u.searchParams.get('t'); return { kind: 'youtube', src: `https://www.youtube-nocookie.com/embed/${id}${t && /^\d+s?$/.test(t) ? `?start=${parseInt(t, 10)}` : ''}` }; }
+    return null;
+  }
+  if (u && /^(www\.)?(vimeo\.com|player\.vimeo\.com)$/i.test(u.hostname)) {
+    const id = /^\/(?:video\/)?(\d{5,12})(?:\/|$)/.exec(u.pathname)?.[1];
+    return id ? { kind: 'vimeo', src: `https://player.vimeo.com/video/${id}` } : null;
+  }
+  if (!safeSrc(s)) return null;
+  if (VIDEO_EXT.test(s)) return { kind: 'video', src: s };
+  if (AUDIO_EXT.test(s)) return { kind: 'audio', src: s };
+  return null;
+}
+
+/** Iframe hosts embeds may point at (the sanitizers and the CSP agree with this list). */
+export const EMBED_FRAME_HOSTS = ['www.youtube-nocookie.com', 'player.vimeo.com'];
+
+export function embedHtml(e: Embed, alt: string): string {
+  const { alt: caption, width } = parseAltSize(alt);
+  const cap = caption ? `<span class="md-embed-caption">${esc(caption)}</span>` : '';
+  const w = width ? ` width="${width}"` : '';
+  if (e.kind === 'video') return `<span class="md-embed md-video"><video controls preload="metadata" playsinline src="${esc(e.src)}"${w} title="${esc(caption)}"></video>${cap}</span>`;
+  if (e.kind === 'audio') return `<span class="md-embed md-audio">${cap}<audio controls preload="metadata" src="${esc(e.src)}" title="${esc(caption)}"></audio></span>`;
+  return `<span class="md-embed md-frame${width ? '' : ' wide'}"><iframe src="${esc(e.src)}" title="${esc(caption || (e.kind === 'youtube' ? 'YouTube video' : 'Vimeo video'))}"${w} loading="lazy" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen" allowfullscreen referrerpolicy="strict-origin-when-cross-origin"></iframe>${cap}</span>`;
+}
+
+export function mediaEmbeds(md: MD) {
+  md.core.ruler.after('inline', 'media-embeds', (state: StateCore) => {
+    for (const t of state.tokens) {
+      if (t.type !== 'inline' || !t.children) continue;
+      const kids = t.children;
+      for (let i = 0; i < kids.length; i++) {
+        const c = kids[i];
+        if (c.type === 'image') {
+          const e = embedOf(String(c.attrGet('src') ?? ''));
+          if (!e) continue;
+          // image-sizes may already have moved `|480` from the alt text into a width attribute.
+          const w = c.attrGet('width');
+          const html = new state.Token('html_inline', '', 0);
+          html.content = embedHtml(e, w && !SIZE_RE.test(c.content) ? `${c.content}|${w}` : c.content);
+          kids[i] = html;
+        } else if (c.type === 'link_open') {
+          const href = String(c.attrGet('href') ?? '');
+          if (/^\/media\/[0-9a-f]{32}\.[a-z0-9]{1,8}$/.test(href) && !/\.(png|jpg|gif|webp)$/.test(href)) c.attrJoin('class', 'md-file');
+        }
+      }
+    }
+    return false;
+  });
+}

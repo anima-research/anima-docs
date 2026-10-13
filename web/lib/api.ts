@@ -123,7 +123,7 @@ export interface ShareLink {
 export interface LinkPeek { active: boolean; audience?: LinkWho; role?: LinkRole; title?: string; signedIn: boolean; guest: boolean }
 export interface Redeemed { docId: string; title: string; role: Role; guest: boolean; you: Me }
 
-export interface MediaInfo { id: string; mime: string; size: number; width: number | null; height: number | null; url: string }
+export interface MediaInfo { id: string; mime: string; size: number; width: number | null; height: number | null; url: string; name: string | null; kind: 'image' | 'audio' | 'video' | 'file' }
 
 export class ApiError extends Error {
   constructor(readonly status: number, message: string) { super(message); }
@@ -226,7 +226,7 @@ export const api = {
   adminPrincipals: (opts: { guests?: boolean } = {}) => call<{ principals: AdminPrincipal[] }>('GET', `/api/admin/principals${q({ guests: opts.guests ? '1' : undefined })}`),
   setPrincipalRole: (sub: string, role: 'member' | 'admin' | 'blocked') => call<Person>('POST', `/api/admin/principals/${encodeURIComponent(sub)}`, { role }),
 
-  upload: (docId: string, file: Blob) => call<MediaInfo>('POST', `/api/media?doc=${encodeURIComponent(docId)}`, file, { headers: { 'Content-Type': file.type || 'application/octet-stream' } }),
+  upload: (docId: string, file: Blob, name?: string) => call<MediaInfo>('POST', `/api/media?doc=${encodeURIComponent(docId)}${name ? `&name=${encodeURIComponent(name)}` : ''}`, file, { headers: { 'Content-Type': file.type || 'application/octet-stream' } }),
 };
 
 export const ROLE_LABEL: Record<Role, string> = { viewer: 'Viewer', commenter: 'Commenter', editor: 'Editor', owner: 'Owner' };

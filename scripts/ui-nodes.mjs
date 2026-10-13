@@ -34,6 +34,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const assert = (c, m) => { if (!c) throw new Error(m); };
 
 async function startServer() {
+  try { if ((await fetch(`${ORIGIN}/health`)).ok) throw new Error(`something is already listening on ${ORIGIN}; kill it first (lsof -ti :${PORT})`); } catch (e) { if (!(e instanceof TypeError)) throw e; }
   const proc = spawn(process.execPath, ['--import', 'tsx', 'src/index.ts'], {
     cwd: root, env: { ...process.env, PORT: String(PORT), DOCS_ORIGIN: ORIGIN, DOCS_DATA_DIR: DATA, DOCS_DEV_ISSUER: 'dev.local', DOCS_ISSUERS: '' }, stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -181,7 +182,8 @@ try {
 
   await step('a navigation tree: the paper becomes a root, Method is its subpage by itself; a placed-only subpage shows in the footer', async () => {
     if (!(await alice.evaluate(() => document.querySelector('.doc-app').classList.contains('nav-open')))) await alice.locator('.nav-btn').click();
-    await alice.locator('.doc-nav .nav-space-acts .nav-act').click();
+    await alice.locator('.doc-nav .nav-space-acts .nav-act.make-space').click();
+    await alice.locator('.dialog button.btn.primary', { hasText: 'Make it a space' }).click();
     await alice.locator('.doc-nav .nav-row', { hasText: 'Method' }).waitFor({ timeout: 8000 });
     // + subpage on the root: a placed page that is not mounted inline.
     await alice.locator('.doc-nav .nav-row').first().hover();
@@ -526,6 +528,35 @@ try {
     assert((await alice.locator('.editor-page .node-band-end').count()) === 0, '"end of" bands are back');
     await alice.locator('.seg-btn[data-mode=split]').click();
     await alice.locator('.preview-body .math-inline .katex').first().waitFor({ timeout: 8000 });
+    await alice.locator('.seg-btn[data-mode=edit]').click();
+  });
+
+  await step('media: a YouTube address embeds a frame; an uploaded audio file becomes a player; a PDF becomes a file link', async () => {
+    await alice.locator('.seg-btn[data-mode=edit]').click();
+    await alice.keyboard.press('Enter'); await alice.keyboard.press('Enter');
+    await alice.locator('.insert-btn').click();
+    await alice.getByRole('menuitem', { name: 'YouTube or Vimeo video…' }).click();
+    const inp = alice.locator('dialog.dialog input.input');
+    await inp.waitFor(); await inp.fill('https://youtu.be/dQw4w9WgXcQ');
+    await alice.locator('dialog.dialog button.btn.primary').click();
+    await waitText(alice, '![](https://youtu.be/dQw4w9WgXcQ)');
+    await alice.locator('.editor-page .cm-image-figure.embed-youtube iframe').waitFor({ timeout: 8000 });
+    // Audio and a PDF through the Insert menu's file choosers.
+    const mp3 = Buffer.concat([Buffer.from('ID3'), Buffer.alloc(500, 1)]);
+    await alice.locator('.insert-btn').click();
+    let chooser = alice.waitForEvent('filechooser');
+    await alice.getByRole('menuitem', { name: 'Audio or video file…' }).click();
+    await (await chooser).setFiles([{ name: 'talk.mp3', mimeType: 'audio/mpeg', buffer: mp3 }]);
+    await alice.waitForFunction(() => /!\[talk\]\(\/media\/[0-9a-f]{32}\.mp3\)/.test(window.__anima.view.state.doc.toString()), null, { timeout: 15000 });
+    await alice.locator('.insert-btn').click();
+    chooser = alice.waitForEvent('filechooser');
+    await alice.getByRole('menuitem', { name: 'Any file…' }).click();
+    await (await chooser).setFiles([{ name: 'paper.pdf', mimeType: 'application/pdf', buffer: Buffer.from('%PDF-1.4 x') }]);
+    await alice.waitForFunction(() => /\[paper\.pdf\]\(\/media\/[0-9a-f]{32}\.pdf\)/.test(window.__anima.view.state.doc.toString()), null, { timeout: 15000 });
+    await alice.locator('.seg-btn[data-mode=split]').click();
+    await alice.locator('.preview-body .md-frame iframe[src^="https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ"]').waitFor({ timeout: 8000 });
+    await alice.locator('.preview-body .md-audio audio').waitFor({ timeout: 8000 });
+    await alice.locator('.preview-body a.md-file', { hasText: 'paper.pdf' }).waitFor({ timeout: 8000 });
     await alice.locator('.seg-btn[data-mode=edit]').click();
   });
 

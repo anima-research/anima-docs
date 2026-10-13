@@ -34,6 +34,10 @@ export interface Config {
   /** A client-address header the proxy sets and overwrites (Railway: x-real-ip); preferred over X-Forwarded-For. */
   clientIpHeader: string | null;
   importKey: string | null;
+  /** Largest non-image upload (images stay at 15 MB). DOCS_UPLOAD_MAX_MB. */
+  uploadMaxBytes: number;
+  /** Per principal per day. DOCS_UPLOAD_QUOTA_MB. */
+  uploadQuotaBytes: number;
   wikiHost: string | null;
   exportKey: string | null;
   /** How often open sockets' roles are re-derived (link expiry has no event). */
@@ -91,6 +95,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     clientIpHeader: env.DOCS_CLIENT_IP_HEADER?.trim() || null,
     // Staging only: a shared key that lets a database copy be uploaded (POST /api/admin/import) or downloaded (GET /api/admin/export).
     importKey: env.DOCS_IMPORT_KEY?.trim() || null,
+    uploadMaxBytes: Math.max(1, Number(env.DOCS_UPLOAD_MAX_MB ?? 100) || 100) * 1024 * 1024,
+    uploadQuotaBytes: Math.max(1, Number(env.DOCS_UPLOAD_QUOTA_MB ?? 2048) || 2048) * 1024 * 1024,
     // A host (not the app's origin) that serves public wikis at /<slug>/, so wikis that allow scripts never run them on the editor's origin.
     wikiHost: env.DOCS_WIKI_HOST?.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/$/, '') || null,
     exportKey: env.DOCS_EXPORT_KEY?.trim() || null,

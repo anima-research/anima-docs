@@ -252,3 +252,26 @@ test('math renders with KaTeX; latex and text nodes are wrapped by type; the sty
   assert.equal(other.status, 200);
   assert.ok(!other.text.includes('katex.min.css'), 'no stylesheet without math');
 });
+
+test('media embeds: uploaded video and audio become players, YouTube and Vimeo addresses become frames, other files are file links', async () => {
+  const ann = await signIn('Ann');
+  const holder = (await api(ann, 'POST', '/api/docs', { title: 'Uploads', content: '' })).json;
+  const up = async (name: string, body: Buffer) => (await (await fetch(`${S.base}/api/media?doc=${holder.id}&name=${name}`, { method: 'POST', headers: { Cookie: ann, Origin: S.base }, body })).json());
+  const mp4 = await up('clip.mp4', Buffer.concat([Buffer.from([0, 0, 0, 0x18]), Buffer.from('ftypisom'), Buffer.alloc(200)]));
+  const mp3 = await up('talk.mp3', Buffer.concat([Buffer.from('ID3'), Buffer.alloc(100)]));
+  const pdf = await up('paper.pdf', Buffer.from('%PDF-1.4 hello'));
+  assert.equal(mp4.kind, 'video'); assert.equal(mp3.kind, 'audio'); assert.equal(pdf.mime, 'application/pdf');
+  const page = (await api(ann, 'POST', '/api/docs', { title: 'Media', content: `# Media\n\n![Clip|480](${mp4.url})\n\n![Talk](${mp3.url})\n\n![Keynote](https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=42s)\n\n![](https://vimeo.com/123456789)\n\n[The paper](${pdf.url})\n\n![evil](https://evil.example/embed/x)\n` })).json;
+  await api(ann, 'POST', '/api/trees', { root: page.id });
+  await api(ann, 'POST', `/api/trees/${page.id}/place`, { parent: page.id, child: holder.id }); // the uploads' document is in the wiki, so they are public
+  await api(ann, 'PATCH', `/api/trees/${page.id}/publish`, { published: 'public', slug: 'media' });
+  const home = await api(null, 'GET', '/w/media/');
+  assert.equal(home.status, 200, home.text);
+  assert.ok(home.text.includes(`<video controls preload="metadata" playsinline src="${mp4.url}" width="480"`), 'video player');
+  assert.ok(home.text.includes(`<audio controls preload="metadata" src="${mp3.url}"`), 'audio player');
+  assert.ok(home.text.includes('src="https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ?start=42"'), 'youtube frame');
+  assert.ok(home.text.includes('src="https://player.vimeo.com/video/123456789"'), 'vimeo frame');
+  assert.ok(home.text.includes(`<a href="${pdf.url}" class="md-file"`), 'file link chip');
+  assert.ok(!/<iframe[^>]*evil\.example/.test(home.text) && home.text.includes('<img src="https://evil.example/embed/x"'), 'an unknown host is not framed (it stays an image)');
+  assert.equal((await fetch(`${S.base}${mp4.url}`)).status, 200, 'media of a public wiki is public');
+});
