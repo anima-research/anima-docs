@@ -198,8 +198,9 @@ test('the one who deletes hears it as their own act, and the earlier notice is s
   const c = S.app.comments.create(d.id, ada, { body: '@Linnish one more thing' });
   await until(() => delivered(c.comment.id), 'mention');
   // That mention came after the deletion, so a notice about it would be here by now.
-  assert.equal(h.pushes.slice(before).some((p) => p.coalesce?.key === `comment:${qid}`), false,
-    'a deleter who was not addressed gets no notice');
+  const mention = h.pushes.findIndex((p, i) => i >= before && p.coalesce?.key === `comment:${c.comment.id}`);
+  assert.deepEqual(h.pushes.slice(before, mention).map((p) => p.coalesce?.key ?? p.eventId), [],
+    'a deleter who was not addressed gets no push at all');
   S.app.comments.remove(c.comment.id, ada);
   await until(() => !!retraction(c.comment.id), 'third retraction');
   assert.equal(retraction(c.comment.id).payload.content[0].text,
@@ -256,7 +257,7 @@ test("a deleter's own decided suggestion is deleted, not withdrawn; a reply dele
   assert.equal(retractions(reply.comment.id)[0].payload.content[0].text,
     `You deleted your suggestion ${sid} on “Shore”, and Ada’s reply ${reply.comment.id} in it, which was addressed to you, went with it.`);
 
-  // An open one with two replies: Ada deletes the first, then she withdraws the suggestion.
+  // An open one with two replies: Ada deletes the first, then Wren withdraws the suggestion.
   const s2 = await h.tool('suggest_edit', { document: d.id, edits: [{ old_text: 'tide', new_text: 'sea' }] });
   const sid2 = /\[(c\w+)\]/.exec(s2.text)![1];
   const first = S.app.comments.reply(sid2, ada, 'Hmm.');
@@ -272,7 +273,7 @@ test("a deleter's own decided suggestion is deleted, not withdrawn; a reply dele
   h.close();
 });
 
-test('a thread assigned to its own author: her edit sends her nothing, and her deletion says "your"', async () => {
+test('a thread assigned to its own author: her edit replaces the notice she holds, and her deletion says "your"', async () => {
   const ada = human('Ada');
   const h = await rawHost(url(S.token('Tern')));
   const d = S.app.docs.create(ada, 'Gulls', 'A gull on the post.\n');
@@ -283,10 +284,15 @@ test('a thread assigned to its own author: her edit sends her nothing, and her d
   S.app.comments.assign(tid, ada, 'agent:tern@test.local');
   await until(() => keyed(tid).length === 1, 'the assignment reaches her');
   await h.tool('edit_comment', { comment: tid, text: 'Is it a herring gull, or a common gull?' });
+  // The replacement updates the notice she holds under the same key, so it shows what she wrote now.
+  await until(() => keyed(tid).length === 2, 'the replacement of her edit');
+  assert.equal(keyed(tid)[1].coalesce.retract, undefined);
+  assert.ok(keyed(tid)[1].tags.includes('chat:edited'));
+  assert.match(keyed(tid)[1].payload.content[0].text, /Is it a herring gull, or a common gull\?/);
   await h.tool('delete_comment', { comment: tid });
   await until(() => keyed(tid).some((p) => p.coalesce.retract), 'retraction');
-  assert.equal(keyed(tid).length, 2, 'no replacement of her own edit came before it');
-  assert.equal(keyed(tid)[1].payload.content[0].text,
+  assert.equal(keyed(tid).length, 3);
+  assert.equal(keyed(tid)[2].payload.content[0].text,
     `You deleted your comment ${tid} (thread ${tid}) on “Gulls”, which was addressed to you.`);
 
   // Her suggestions, assigned to her: an open one is withdrawn, a decided one deleted, and each is named a suggestion.
@@ -341,7 +347,7 @@ test("an owner deleting others' comments: a reply alone, and a whole thread", as
   h.close();
 });
 
-test("a digest says an owner deleted another's suggestion, not that they withdrew it", async () => {
+test("a digest says an author withdrew only her own open suggestion: an owner, or a decided one, deletes it", async () => {
   const ada = human('Ada');
   const owner = await rawHost(url(S.token('Steward')));
   const made = await owner.tool('create_document', { title: 'Hall', content: 'The lamps were lit.\n' });
@@ -361,29 +367,87 @@ test("a digest says an owner deleted another's suggestion, not that they withdre
     const rendered = await w.render(digests()[1].coalesce.key);
     assert.match(rendered, new RegExp(`• Steward deleted Ada's suggestion ${sg.id}`));
     assert.doesNotMatch(rendered, /withdrew suggestion/);
+
+    // Another commenter's own open suggestion, deleted by her, is withdrawn.
+    const bea = human('Bea');
+    S.app.docs.share(id, me, bea.sub, 'commenter');
+    const { comment: open } = S.app.comments.suggest(id, bea, { anchor: S.app.comments.anchorFromQuote(id, 'lamps'), text: 'candles' });
+    await until(() => digests().length === 3, 'the second suggestion digest');
+    S.app.comments.remove(open.id, bea);
+    await until(() => digests().length === 4, 'its withdrawal digest');
+    assert.match(await w.render(digests()[3].coalesce.key), new RegExp(`• Bea withdrew suggestion ${open.id}`));
+
+    // Her own decided one, deleted by her, is deleted, since its decision stands.
+    const { comment: decided } = S.app.comments.suggest(id, bea, { anchor: S.app.comments.anchorFromQuote(id, 'were'), text: 'are' });
+    await until(() => digests().length === 5, 'the third suggestion digest');
+    await owner.tool('reject_suggestion', { suggestions: [decided.id] });
+    await until(() => digests().length === 6, 'its rejection digest');
+    S.app.comments.remove(decided.id, bea);
+    await until(() => digests().length === 7, 'its deletion digest');
+    const last = await w.render(digests()[6].coalesce.key);
+    assert.match(last, new RegExp(`• Bea deleted their suggestion ${decided.id}`));
+    assert.doesNotMatch(last, /withdrew suggestion/);
   } finally { owner.close(); w.close(); }
 });
 
+/** Her sessions, as the server sees them: a retraction queues only once none is live. */
+const offline = (sub: string) => (S.app.attention as any).live(sub).length === 0;
+/** What waits in her outbox for a subject, if anything. */
+const queued = (sub: string, subject: string) =>
+  (S.app.db.prepare('SELECT event FROM outbox WHERE sub = ? AND subject = ?').get(sub, subject) as { event: string } | undefined)?.event;
+
 test('a retraction queued while its recipient is offline survives the thread being deleted', async () => {
-  const ada = human('Ada');
+  const cy = human('Cy');
+  const sub = 'agent:drift@test.local';
   const first = await rawHost(url(S.token('Drift')));
-  const d = S.app.docs.create(ada, 'Ledger', 'Hello there.\n');
-  S.app.docs.share(d.id, ada, 'agent:drift@test.local', 'commenter');
-  const root = S.app.comments.create(d.id, ada, { body: 'A thread.' });
-  const reply = S.app.comments.reply(root.comment.id, ada, '@Drift what do you think?');
+  const d = S.app.docs.create(cy, 'Ledger', 'Hello there.\n');
+  S.app.docs.share(d.id, cy, sub, 'commenter');
+  const root = S.app.comments.create(d.id, cy, { body: 'A thread.' });
+  const reply = S.app.comments.reply(root.comment.id, cy, '@Drift what do you think?');
+  const key = `comment:${reply.comment.id}`;
+  const retractions = (h: typeof first) => h.pushes.filter((p) => p.coalesce?.key === key && p.coalesce.retract);
+  await until(() => first.pushes.some((p) => p.coalesce?.key === key && !p.coalesce.retract), 'the mention reaches her');
+  first.close();
+  await until(() => offline(sub), 'her session gone');
+  S.app.comments.remove(reply.comment.id, cy); // she's offline: the retraction waits in the outbox
+  await until(() => !!queued(sub, key), 'the retraction queued');
+  const firstQueued = queued(sub, key);
+  S.app.comments.remove(root.comment.id, cy); // then the whole thread goes
+  await until(() => !!queued(sub, key) && queued(sub, key) !== firstQueued, "the thread's retraction in its place");
+  const h = await rawHost(url(S.token('Drift')));
+  try {
+    await until(() => retractions(h).length > 0, 'the retraction once she reconnects');
+    // A later mention is the sync point: a second retraction would be here before it.
+    const later = S.app.comments.create(d.id, cy, { body: '@Drift one more thing' });
+    await until(() => h.pushes.some((p) => p.coalesce?.key === `comment:${later.comment.id}`), 'the later mention');
+    assert.equal(retractions(h).length, 1, 'exactly one');
+    assert.equal(retractions(h)[0].payload.content[0].text,
+      `Cy deleted the comment ${reply.comment.id} (thread ${root.comment.id}) on “Ledger” that was addressed to you.`);
+  } finally { h.close(); }
+});
+
+test('a retraction delivered when its recipient reconnects is not sent again when its thread goes', async () => {
+  const dee = human('Dee');
+  const sub = 'agent:ebb@test.local';
+  const first = await rawHost(url(S.token('Ebb')));
+  const d = S.app.docs.create(dee, 'Tides', 'High water at noon.\n');
+  S.app.docs.share(d.id, dee, sub, 'commenter');
+  const root = S.app.comments.create(d.id, dee, { body: 'A thread.' });
+  const reply = S.app.comments.reply(root.comment.id, dee, '@Ebb is noon right?');
   const key = `comment:${reply.comment.id}`;
   await until(() => first.pushes.some((p) => p.coalesce?.key === key && !p.coalesce.retract), 'the mention reaches her');
   first.close();
-  await sleep(50);
-  S.app.comments.remove(reply.comment.id, ada); // she's offline: the retraction waits in the outbox
-  await sleep(50);
-  S.app.comments.remove(root.comment.id, ada); // then the whole thread goes
-  await sleep(50);
-  const h = await rawHost(url(S.token('Drift')));
+  await until(() => offline(sub), 'her session gone');
+  S.app.comments.remove(reply.comment.id, dee);
+  await until(() => !!queued(sub, key), 'the retraction queued');
+  const h = await rawHost(url(S.token('Ebb')));
   try {
-    await until(() => h.pushes.some((p) => p.coalesce?.key === key && p.coalesce.retract), 'the retraction once she reconnects');
-    await sleep(100);
-    assert.equal(h.pushes.filter((p) => p.coalesce?.key === key && p.coalesce.retract).length, 1, 'exactly one');
+    const retractions = () => h.pushes.filter((p) => p.coalesce?.key === key && p.coalesce.retract);
+    await until(() => retractions().length === 1 && !queued(sub, key), 'the retraction delivered on reconnect');
+    S.app.comments.remove(root.comment.id, dee);
+    const later = S.app.comments.create(d.id, dee, { body: '@Ebb and the evening tide?' });
+    await until(() => h.pushes.some((p) => p.coalesce?.key === `comment:${later.comment.id}`), 'a later mention, the sync point');
+    assert.equal(retractions().length, 1, 'the reply is retracted once, not again with its thread');
   } finally { h.close(); }
 });
 

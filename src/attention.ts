@@ -490,8 +490,9 @@ export class Attention {
         { sub: string; comment_id: string; reason: 'mention' | 'assigned' | 'reply'; level: string }[];
       for (const r of rows) {
         if (e.kind === 'edited') {
-          // The editor has her own new text; an owner can assign her own root to her.
-          if (r.sub === e.actor || handled.has(r.sub) || !this.access(r.sub, e.docId)) continue;
+          // The editor too: a replacement updates the version she holds, or
+          // one still queued for her, rather than announcing her own act.
+          if (handled.has(r.sub) || !this.access(r.sub, e.docId)) continue;
           handled.add(r.sub);
           this.bg(this.deliverAddressed(r.sub, e, r.reason, { replacement: true, level: r.level }));
         } else {
@@ -860,8 +861,9 @@ export class Attention {
   private async retractAddressed(sub: string, commentId: string, e: CommentEvent) {
     // A version still waiting in the outbox is simply withdrawn.
     this.db.prepare('DELETE FROM outbox WHERE sub = ? AND subject = ?').run(sub, SUBJECT_COMMENT(commentId));
-    // If no version ever reached a host there is nothing to retract; otherwise
-    // the host decides (the agent may have read it — RFC-006 §6).
+    // Nothing is at the host to retract when no version reached it, or when
+    // its retraction already did (delivered is 0 either way); otherwise the
+    // host decides (the agent may have read it — RFC-006 §6).
     const row = this.db.prepare('SELECT delivered FROM addressed WHERE sub = ? AND comment_id = ?').get(sub, commentId) as { delivered: number } | undefined;
     if (!row?.delivered) return;
     const visible = !!this.access(sub, e.docId);
