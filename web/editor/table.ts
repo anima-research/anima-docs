@@ -80,6 +80,8 @@ const escapeCell = (s: string) => s.replace(/\r?\n/g, ' ').replace(/\|/g, '\\|')
 
 /** Which cell to focus in the table widget rebuilt after an edit (keyed by the table's position). */
 let pendingFocus: { start: number; r: number; c: number; atEnd?: boolean } | null = null;
+/** The cell last focused, so a rebuild that pulls the DOM out from under it (another transaction landing between an edit and its hand-off) can put the focus back. */
+let lastFocus: { start: number; r: number; c: number; atEnd?: boolean; at: number } | null = null;
 
 export class TableWidget extends WidgetType {
   constructor(readonly source: string, readonly editable: boolean) { super(); }
@@ -138,6 +140,7 @@ export class TableWidget extends WidgetType {
       td.replaceChildren(input);
       active = { r, c, input, td };
       current = { r, c };
+      lastFocus = { start: start(), r, c, atEnd, at: Date.now() };
       wrap.classList.add('focused');
       input.addEventListener('keydown', (e) => {
         e.stopPropagation();
@@ -250,14 +253,21 @@ export class TableWidget extends WidgetType {
       toSource(cell ? this.offsetOf(Number(cell.dataset.r), Number(cell.dataset.c)) : 0);
     });
 
-    // An edit rebuilt the widget: continue in the cell the person was heading for.
-    if (this.editable && pendingFocus) {
-      const want = pendingFocus;
+    // An edit rebuilt the widget: continue in the cell the person was heading for. The LIVE widget
+    // takes whatever is pending when its frame runs (a newer edit may have replaced the wish since
+    // this DOM was built); and if a rebuild just took the DOM out from under a focused cell with
+    // nothing pending, the focus goes back where it was.
+    if (this.editable && (pendingFocus || lastFocus)) {
       requestAnimationFrame(() => {
-        if (pendingFocus !== want || !wrap.isConnected) return;
-        if (start() !== want.start) return;
-        pendingFocus = null;
-        focusCell(want.r, want.c, want.atEnd);
+        if (!wrap.isConnected) return;
+        const s = start();
+        let want: { r: number; c: number; atEnd?: boolean } | null = null;
+        if (pendingFocus && pendingFocus.start === s) { want = pendingFocus; pendingFocus = null; }
+        else if (!pendingFocus && lastFocus && lastFocus.start === s && Date.now() - lastFocus.at < 1500) {
+          const a = document.activeElement;
+          if (!a || a === document.body) want = lastFocus;
+        }
+        if (want) focusCell(want.r, want.c, want.atEnd);
       });
     }
     return wrap;

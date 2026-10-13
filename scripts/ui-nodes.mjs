@@ -475,9 +475,19 @@ try {
     await alice.keyboard.type('Rewritten');
     await alice.keyboard.press('Tab');
     await alice.waitForFunction(() => /\| Rewritten\s+\| Cell/.test(window.__anima.view.state.doc.toString()), null, { timeout: 8000 });
+    // The rebuilt widget takes the focus back a frame later: wait for the caret before counting Tabs.
+    await alice.waitForFunction(() => !!(document.activeElement && document.activeElement.closest && document.activeElement.closest('.cm-table-widget td')), null, { timeout: 5000 });
     // The focus moved on to the next cell in the rebuilt widget; Tab through to the end adds a row.
-    for (let i = 0; i < 5; i++) { await alice.keyboard.press('Tab'); await sleep(120); }
-    await alice.waitForFunction(() => (window.__anima.view.state.doc.toString().match(/^\| .* \|$/gm) ?? []).length >= 5, null, { timeout: 8000 });
+    // Each Tab rebuilds the widget: wait for the focus to land in another cell before the next one.
+    // (No string evaluation here: the app's CSP has no unsafe-eval.)
+    const cellAt = () => { const a = document.activeElement; const td = a && a.closest ? a.closest('td,th') : null; if (!td) return null; const tr = td.parentElement; const rows = [...td.closest('table').querySelectorAll('tr')]; return `${rows.indexOf(tr)}:${[...tr.children].indexOf(td)}`; };
+    for (let i = 0; i < 5; i++) {
+      const before = await alice.evaluate(cellAt);
+      await alice.keyboard.press('Tab');
+      await alice.waitForFunction((b) => { const a = document.activeElement; const td = a && a.closest ? a.closest('td,th') : null; if (!td) return false; const tr = td.parentElement; const rows = [...td.closest('table').querySelectorAll('tr')]; return `${rows.indexOf(tr)}:${[...tr.children].indexOf(td)}` !== b; }, before, { timeout: 5000 });
+    }
+    // This table (not the aside ones) has three body rows now.
+    await alice.waitForFunction(() => /\| Column 1[^\n]*\n\|[-| :]+\n(?:\|[^\n]*\n){3}/.test(window.__anima.view.state.doc.toString() + '\n'), null, { timeout: 8000 });
     // Toolbar: a column.
     await alice.locator('.cm-table-widget.editable', { hasText: 'Column 1' }).hover();
     await alice.locator('.cm-table-widget.editable', { hasText: 'Column 1' }).locator('.cm-table-bar button', { hasText: '+ col' }).click();
