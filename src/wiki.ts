@@ -11,7 +11,8 @@ import type { App } from './app.js';
 import { Fault } from './auth.js';
 import { outline } from './markdown.js';
 import { scanMounts, MAX_DEPTH } from './nodes.js';
-import { slugify, type PublishSettings } from './trees.js';
+import { sanitizeTemplate, slugify, type PublishSettings } from './trees.js';
+import sanitizeHtml from 'sanitize-html';
 import { galleryFence, imageSizes, tableWidths } from './mdext.js';
 
 export interface WikiPage { id: string; title: string; slug: string; parent: string | null; depth: number }
@@ -23,7 +24,8 @@ export class Wiki {
   private md: MD;
 
   constructor(private app: App) {
-    this.md = new MarkdownIt({ html: false, linkify: true, typographer: true });
+    // Raw HTML passes through markdown-it; pages are then sanitized unless the wiki allows scripts and is served off the app's origin.
+    this.md = new MarkdownIt({ html: true, linkify: true, typographer: true });
     imageSizes(this.md);
     galleryFence(this.md);
     tableWidths(this.md);
@@ -127,7 +129,7 @@ export class Wiki {
   }
 
   /** Markdown → HTML with heading ids, document links rewritten to wiki paths, images pointing at this host. */
-  render(markdown: string, ctx: { base: string; pages: WikiPage[]; headings?: { id: string; text: string; level: number }[] }): string {
+  render(markdown: string, ctx: { base: string; pages: WikiPage[]; headings?: { id: string; text: string; level: number }[]; /** Leave HTML and scripts as written. */ raw?: boolean }): string {
     const byId = new Map(ctx.pages.map((p) => [p.id, p]));
     const usedIds = new Set<string>();
     const env = {};
@@ -160,22 +162,23 @@ export class Wiki {
       };
       if (t.children) walk(t.children);
     }
-    return this.md.renderer.render(tokens, this.md.options, env);
+    const html = this.md.renderer.render(tokens, this.md.options, env);
+    return ctx.raw ? html : sanitizeRendered(html);
   }
 
   // ------------------------------------------------------------------ pages
 
-  etag(root: string, page: WikiPage, nodes: Set<string>): string {
+  etag(root: string, page: WikiPage, nodes: Set<string>, scripts = false): string {
     const h = createHash('sha256');
     const ps = this.app.trees.publishSettings(root);
-    h.update(JSON.stringify(ps)).update('\0');
+    h.update(JSON.stringify(ps)).update(scripts ? 'raw' : 'safe').update('\0');
     for (const id of [...nodes].sort()) h.update(`${id}:${this.app.docs.get(id)?.rev ?? 0}:${this.app.docs.get(id)?.title ?? ''}\0`);
     for (const p of this.pages(root)) h.update(`${p.id}=${p.slug}:${p.title}\0`);
     h.update(page.id);
     return `"${h.digest('base64url').slice(0, 24)}"`;
   }
 
-  pageHtml(root: string, page: WikiPage, base: string, opts: { canEdit: boolean }): { html: string; etag: string } {
+  pageHtml(root: string, page: WikiPage, base: string, opts: { canEdit: boolean; /** Scripts may run here (not the app's origin) and the wiki allows them. */ scripts?: boolean }): { html: string; etag: string } {
     const pages = this.pages(root);
     const ps = this.app.trees.publishSettings(root)!;
     const theme = ps.theme;
@@ -187,9 +190,10 @@ export class Wiki {
     let body = a.body;
     const first = outline(body)[0];
     if (first && first.level === 1 && first.line === 1 && first.text.trim() === page.title.trim()) body = body.split('\n').slice(1).join('\n');
-    const article = this.render(body, { base, pages, headings });
-    const asides = a.asides.map((x) => ({ ...x, html: this.render(x.body, { base, pages }) }));
-    const etag = this.etag(root, page, a.nodes);
+    const raw = !!opts.scripts && ps.scripts;
+    const article = this.render(body, { base, pages, headings, raw });
+    const asides = a.asides.map((x) => ({ ...x, html: this.render(x.body, { base, pages, raw }) }));
+    const etag = this.etag(root, page, a.nodes, raw);
     const byId = new Map(pages.map((p) => [p.id, p]));
     const href = (p: WikiPage) => (p.depth === 0 ? `${base}/` : `${base}/${p.slug}`);
 
@@ -240,7 +244,10 @@ export class Wiki {
       base: esc(base),
     };
     slots.asides = `${slots.infoboxes}${slots.contents}${slots.related}`;
-    const html = fillTemplate(theme.template || DEFAULT_TEMPLATE, slots);
+    const template = theme.template ? (raw ? theme.template : sanitizeTemplate(theme.template)) : DEFAULT_TEMPLATE;
+    const notice = ps.scripts && !raw ? `<div class="scripts-note">This wiki allows scripts, but they only run on its own host${this.app.config.wikiHost ? ` (<a href="https://${esc(this.app.config.wikiHost)}/${esc(ps.slug ?? '')}/">open it there</a>)` : ''}; here they are stripped.</div>` : '';
+    slots.content = notice + slots.content;
+    const html = fillTemplate(template, slots);
     return { html, etag };
   }
 
@@ -276,11 +283,12 @@ export class Wiki {
     return `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${pages.map((p) => `<url><loc>${esc(p.depth === 0 ? `${absoluteBase}/` : `${absoluteBase}/${p.slug}`)}</loc><lastmod>${new Date(this.app.docs.get(p.id)?.updatedAt ?? Date.now()).toISOString().slice(0, 10)}</lastmod></url>`).join('')}</urlset>`;
   }
 
-  /** Where a tree's wiki lives, for links from the editor. */
+  /** Where a tree's wiki lives, for links from the editor: its domain, the wiki host, or the app's /w/ path. */
   url(root: string): string | null {
     const ps = this.app.trees.publishSettings(root);
     if (!ps || !ps.slug) return null;
     if (ps.domain && ps.published === 'public') return `https://${ps.domain}/`;
+    if (this.app.config.wikiHost && ps.published === 'public') return `https://${this.app.config.wikiHost}/${ps.slug}/`;
     return `${this.app.config.origin}/w/${ps.slug}/`;
   }
 
@@ -292,13 +300,27 @@ export class Wiki {
   }
 }
 
+/** Rendered markdown for a wiki without scripts: HTML the author wrote is kept to what cannot run code. */
+function sanitizeRendered(html: string): string {
+  return sanitizeHtml(html, {
+    allowedTags: sanitizeHtml.defaults.allowedTags.concat(['img', 'input', 'details', 'summary', 'figure', 'figcaption', 'svg', 'path', 'video', 'audio', 'source', 'span', 'section', 'dialog']),
+    allowedAttributes: { '*': ['class', 'id', 'style', 'aria-*', 'role', 'title', 'data-*', 'width', 'height', 'align', 'loading', 'decoding', 'open'], a: ['href', 'target', 'rel', 'name'], img: ['src', 'alt', 'width', 'height', 'loading', 'decoding'], input: ['type', 'checked', 'disabled'], video: ['src', 'controls', 'poster', 'width', 'height'], audio: ['src', 'controls'], source: ['src', 'type'], svg: ['viewBox', 'xmlns', 'width', 'height', 'fill'], path: ['d', 'fill', 'stroke', 'stroke-width'] },
+    allowedSchemes: ['http', 'https', 'mailto'],
+    allowedSchemesByTag: { img: ['http', 'https'], video: ['http', 'https'], audio: ['http', 'https'], source: ['http', 'https'] },
+    allowProtocolRelative: false,
+    disallowedTagsMode: 'discard',
+    nonTextTags: ['script', 'style', 'textarea', 'option', 'noscript'],
+    parseStyleAttributes: false,
+  });
+}
+
 function isAncestor(a: string, of: string, byId: Map<string, WikiPage>): boolean {
   for (let p = byId.get(of); p && p.parent; p = byId.get(p.parent)) if (p.parent === a) return true;
   return false;
 }
 
 function excerpt(md: string): string {
-  return md.replace(/^#.*$/gm, '').replace(/[*_`>#[\]()!-]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200);
+  return md.replace(/<(script|style)[\s\S]*?<\/\1>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/^#.*$/gm, '').replace(/[*_`>#[\]()!-]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200);
 }
 
 export class WikiFault extends Fault {}
@@ -437,6 +459,7 @@ dialog.lightbox figure { margin: 0; display: flex; flex-direction: column; align
 dialog.lightbox img { max-width: 94vw; max-height: 86vh; object-fit: contain; border-radius: 6px; }
 dialog.lightbox figcaption { color: #e6e8ec; font: 14px var(--sans); }
 .lightbox-close { position: fixed; top: 14px; right: 18px; font: 28px/1 var(--sans); color: #fff; background: none; border: 0; cursor: pointer; }
+.scripts-note { font: 13px var(--sans); color: var(--ink-2); background: var(--panel); border: 1px dashed var(--rule); border-radius: 8px; padding: 8px 12px; margin: 0 0 14px; }
 .results li { margin: 0 0 14px; }
 .results p { margin: 2px 0 0; color: var(--ink-2); font-size: 14px; }
 .site-foot { display: flex; justify-content: center; gap: 18px; padding: 18px; font: 12.5px var(--sans); color: var(--ink-3); }

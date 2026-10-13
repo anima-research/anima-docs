@@ -22,8 +22,8 @@ import type { Actor } from './principals.js';
 export interface Placement { tree: string; parent: string; child: string; ord: number; derived: boolean }
 
 export type Published = 'off' | 'public' | 'members';
-export interface Theme { name?: string; emoji?: string; accent?: string; footer?: string; tagline?: string; /** Extra CSS appended to the wiki's stylesheet. */ css?: string; /** A page layout with {{slot}} placeholders (see wiki.ts DEFAULT_TEMPLATE); sanitized. */ template?: string }
-export interface PublishSettings { published: Published; slug: string | null; domain: string | null; theme: Theme }
+export interface Theme { name?: string; emoji?: string; accent?: string; footer?: string; tagline?: string; /** Extra CSS appended to the wiki's stylesheet. */ css?: string; /** A page layout with {{slot}} placeholders (see wiki.ts DEFAULT_TEMPLATE); sanitized at render unless scripts are allowed. */ template?: string; /** Raw HTML and <script> in pages and the template, on a non-app origin only. */ scripts?: boolean }
+export interface PublishSettings { published: Published; slug: string | null; domain: string | null; theme: Theme; /** Raw HTML and scripts allowed (served only off the app's origin). */ scripts: boolean }
 const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 const DOMAIN_RE = /^(?=.{4,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/;
 /**
@@ -76,7 +76,8 @@ export class Trees extends EventEmitter {
     if (!r) return null;
     let theme: Theme = {};
     try { theme = JSON.parse(r.theme || '{}'); } catch { theme = {}; }
-    return { published: r.published ?? 'off', slug: r.slug, domain: r.domain, theme };
+    const scripts = theme.scripts === true;
+    return { published: r.published ?? 'off', slug: r.slug, domain: r.domain, theme, scripts };
   }
 
   /** Change how a tree is published (the root's owner). */
@@ -101,6 +102,10 @@ export class Trees extends EventEmitter {
       if (domain && this.db.prepare('SELECT root_id FROM trees WHERE domain = ? AND root_id != ?').get(domain, root)) throw new Fault(409, 'That domain is used by another tree.');
       next.domain = domain;
     }
+    if (p.scripts !== undefined) {
+      if (!cur.theme.scripts && p.scripts && cur.published === 'members') throw new Fault(400, 'Scripts are for public wikis served on their own host; a members-only wiki lives on the editor’s origin.');
+      next.theme = { ...next.theme, scripts: !!p.scripts };
+    }
     if (p.theme !== undefined) {
       const t = p.theme ?? {};
       const clean: Theme = {};
@@ -111,18 +116,23 @@ export class Trees extends EventEmitter {
       const template = (t as Record<string, unknown>).template;
       if (typeof template === 'string' && template.trim()) {
         if (template.length > 100_000) throw new Fault(413, 'A layout template is limited to 100,000 characters.');
-        clean.template = sanitizeTemplate(template);
-        if (!clean.template.includes('{{content}}')) throw new Fault(400, 'The layout template must contain {{content}} (the article).');
+        if (!template.includes('{{content}}')) throw new Fault(400, 'The layout template must contain {{content}} (the article).');
+        clean.template = template; // kept as written; sanitized when rendered without scripts
       }
+      if ((t as Record<string, unknown>).scripts === true) clean.scripts = true;
       const css = (t as Record<string, unknown>).css;
       if (typeof css === 'string' && css.trim()) {
         if (css.length > 50_000) throw new Fault(413, 'Custom CSS is limited to 50,000 characters.');
         clean.css = css.replace(/<\/style/gi, '<\\/style').replace(/\u0000/g, '');
       }
       if (clean.accent && !/^#[0-9a-f]{6}$/i.test(clean.accent)) throw new Fault(400, 'accent must be a hex colour like #2459e0.');
+      if (p.scripts === undefined && next.theme.scripts) clean.scripts = true;
+      else if (p.scripts !== undefined) clean.scripts = !!p.scripts;
       next.theme = clean;
     }
     if (next.published !== 'off' && !next.slug) next.slug = this.freeSlug(slugify(this.docs.get(root)?.title ?? root), root);
+    if (next.published === 'members' && next.theme.scripts) throw new Fault(400, 'A members-only wiki cannot allow scripts (it is served on the editor’s origin). Make it public, or turn scripts off.');
+    next.scripts = next.theme.scripts === true;
     this.db.prepare('UPDATE trees SET published = ?, slug = ?, domain = ?, theme = ? WHERE root_id = ?').run(next.published, next.slug, next.domain, JSON.stringify(next.theme), root);
     this.changed(root);
     this.docs.emit('share', { docId: root, sub: null, role: `wiki:${next.published}`, by: actor.sub });

@@ -32,7 +32,7 @@ function taskLists(md: MD) {
   });
 }
 
-const docMd = new MarkdownIt({ html: false, linkify: true, typographer: true });
+const docMd = new MarkdownIt({ html: true, linkify: true, typographer: true }); // raw HTML shows in previews; DOMPurify keeps it inert
 docMd.use(taskLists);
 imageSizes(docMd);
 galleryFence(docMd);

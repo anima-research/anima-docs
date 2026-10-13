@@ -181,9 +181,16 @@ export function createHttp(app: App) {
 
   // ---------------------------------------------------------------- wiki pages (public, server-rendered)
 
-  async function serveWiki(req: IncomingMessage, res: ServerResponse, root: string, base: string, rest: string, url: URL, absoluteBase: string) {
+  async function serveWiki(req: IncomingMessage, res: ServerResponse, root: string, base: string, rest: string, url: URL, absoluteBase: string, scriptsOk = false) {
     const ps = app.trees.publishSettings(root);
     if (!ps || !app.trees.isRoot(root)) throw new Fault(404, 'No such wiki.');
+    // A wiki that allows scripts lives on its own host; from the app's origin, send people there.
+    if (ps.scripts && !scriptsOk && ps.published === 'public' && (ps.domain || app.config.wikiHost)) {
+      const target = ps.domain ? `https://${ps.domain}` : `https://${app.config.wikiHost}/${ps.slug}`;
+      res.writeHead(302, { Location: `${target}${rest || '/'}${url.search}`, 'Cache-Control': 'no-store' });
+      res.end();
+      return;
+    }
     const session = webSession(req);
     const actor = session?.actor ?? null;
     const access = app.wiki.access(root, actor, ps);
@@ -204,7 +211,7 @@ export function createHttp(app: App) {
     const page = app.wiki.pageBySlug(root, slug);
     if (!page) throw new Fault(404, 'No such page.');
     const canEdit = !!actor && atLeast(app.docs.role(page.id, actor), 'editor');
-    const out = app.wiki.pageHtml(root, page, base, { canEdit });
+    const out = app.wiki.pageHtml(root, page, base, { canEdit, scripts: scriptsOk });
     if (req.headers['if-none-match'] === out.etag) { res.writeHead(304, { ETag: out.etag }); res.end(); return; }
     html(200, out.html, { ETag: out.etag, Vary: 'Cookie' });
   }
@@ -269,10 +276,20 @@ export function createHttp(app: App) {
       // A published wiki on its own domain is served here, as that domain.
       const wikiDomainRoot = canonicalHost && reqHost !== canonicalHost ? app.trees.rootByDomain(reqHost) : null;
       if (wikiDomainRoot && (method === 'GET' || method === 'HEAD') && !path.startsWith('/media/')) {
-        await serveWiki(req, res, wikiDomainRoot, '', path, url, `https://${reqHost}`);
+        await serveWiki(req, res, wikiDomainRoot, '', path, url, `https://${reqHost}`, true);
         return;
       }
-      if (canonicalHost && (method === 'GET' || method === 'HEAD') && String(req.headers.host ?? '').toLowerCase() !== canonicalHost && !path.startsWith('/debug/') && !wikiDomainRoot) {
+      // The shared wiki host: /<slug>/... for every public wiki; scripts may run here (it is not the app's origin).
+      const onWikiHost = !!app.config.wikiHost && reqHost === app.config.wikiHost && reqHost !== (canonicalHost ?? new URL(app.config.origin).host.toLowerCase());
+      if (onWikiHost && (method === 'GET' || method === 'HEAD') && !path.startsWith('/media/')) {
+        const hm = /^\/([a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?)(\/.*)?$/.exec(path);
+        const root = hm ? app.trees.rootBySlug(hm[1]) : null;
+        if (!root) throw new Fault(404, 'No such wiki.');
+        if (app.trees.publishSettings(root)?.published !== 'public') throw new Fault(404, 'No such wiki.');
+        await serveWiki(req, res, root, `/${hm![1]}`, hm![2] ?? '/', url, `https://${reqHost}/${hm![1]}`, true);
+        return;
+      }
+      if (canonicalHost && (method === 'GET' || method === 'HEAD') && String(req.headers.host ?? '').toLowerCase() !== canonicalHost && !path.startsWith('/debug/') && !wikiDomainRoot && !onWikiHost) {
         res.writeHead(301, { Location: `${app.config.origin}${req.url ?? '/'}`, 'Cache-Control': 'no-store' });
         res.end();
         return;
@@ -484,7 +501,7 @@ export function createHttp(app: App) {
           if (rest === '' && method === 'DELETE') { app.trees.drop(root, a); send(200, { ok: true }); return; }
           if (rest === '/publish' && method === 'PATCH') {
             const b = await json(req);
-            const ps = app.trees.setPublish(root, a, { published: b.published, slug: b.slug, domain: b.domain, theme: b.theme });
+            const ps = app.trees.setPublish(root, a, { published: b.published, slug: b.slug, domain: b.domain, theme: b.theme, scripts: typeof b.scripts === 'boolean' ? b.scripts : undefined });
             send(200, { ...ps, url: app.wiki.url(root) });
             return;
           }

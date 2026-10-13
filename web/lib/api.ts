@@ -45,7 +45,7 @@ export interface TreeRoot { root: string; title: string; role: Role }
 export interface Placement { tree: string; parent: string; child: string; ord: number; derived: boolean }
 export type Published = 'off' | 'public' | 'members';
 export interface Theme { name?: string; emoji?: string; accent?: string; footer?: string; tagline?: string; css?: string; template?: string }
-export interface PublishSettings { published: Published; slug: string | null; domain: string | null; theme: Theme; url?: string | null }
+export interface PublishSettings { published: Published; slug: string | null; domain: string | null; theme: Theme; scripts?: boolean; url?: string | null }
 export interface TreeView {
   root: string; title: string; role: Role;
   publish?: PublishSettings;

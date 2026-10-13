@@ -34,6 +34,7 @@ export interface Config {
   /** A client-address header the proxy sets and overwrites (Railway: x-real-ip); preferred over X-Forwarded-For. */
   clientIpHeader: string | null;
   importKey: string | null;
+  wikiHost: string | null;
   exportKey: string | null;
   /** How often open sockets' roles are re-derived (link expiry has no event). */
   roleSweepMs: number;
@@ -90,6 +91,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     clientIpHeader: env.DOCS_CLIENT_IP_HEADER?.trim() || null,
     // Staging only: a shared key that lets a database copy be uploaded (POST /api/admin/import) or downloaded (GET /api/admin/export).
     importKey: env.DOCS_IMPORT_KEY?.trim() || null,
+    // A host (not the app's origin) that serves public wikis at /<slug>/, so wikis that allow scripts never run them on the editor's origin.
+    wikiHost: env.DOCS_WIKI_HOST?.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/$/, '') || null,
     exportKey: env.DOCS_EXPORT_KEY?.trim() || null,
     trustedProxyHops: env.DOCS_TRUSTED_PROXY_HOPS !== undefined ? Math.max(0, Number(env.DOCS_TRUSTED_PROXY_HOPS) || 0) : origin.startsWith('https:') ? 1 : 0,
   };

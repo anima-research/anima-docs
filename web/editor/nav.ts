@@ -156,6 +156,8 @@ export class NavPanel {
     css.value = ps.theme.css ?? '';
     const template = h('textarea.input.code', { rows: 10, spellcheck: 'false', placeholder: 'Leave empty for the standard layout. HTML with {{slots}}: {{head}} {{brand}} {{tagline}} {{search}} {{edit}} {{nav}} {{crumbs}} {{title}} {{content}} {{infoboxes}} {{contents}} {{related}} {{asides}} {{subpages}} {{pagefoot}} {{footer}} {{lightbox}}. Scripts are removed.' });
     template.value = ps.theme.template ?? '';
+    const scripts = h('input', { type: 'checkbox', checked: !!ps.scripts });
+    const scriptsRow = h('label.radio', null, scripts, h('span', null, h('strong', null, 'Allow HTML and scripts'), ' ', h('span.meta', null, 'raw HTML and <script> in pages and the template. Runs only on the wiki’s own host (its domain or the shared wiki host), never here. Anyone who can edit a page can then run code in visitors’ browsers.')));
     const loadDefault = h('button.btn.ghost.sm', { type: 'button', onclick: async () => { try { const r = await api.wikiTemplate(); template.value = r.template; template.focus(); } catch (e) { toast(errorMessage(e), { kind: 'error' }); } } }, 'Start from the standard layout');
     const err = h('div.field-error', { role: 'alert' });
     const urlLine = h('p.meta', null, v.url ? h('span', null, 'Live at ', h('a', { href: v.url, target: '_blank', rel: 'noopener' }, v.url)) : 'Published trees get an address under /w/<address>/; a custom domain serves the wiki at its root.');
@@ -172,12 +174,13 @@ export class NavPanel {
       field('Custom CSS', css, 'Appended after the wiki’s own stylesheet.'),
       field('Layout template', template, 'For changes CSS cannot make: the structure of the page.'),
       h('div.row-gap', null, loadDefault),
+      scriptsRow,
       urlLine, err);
     const save = async () => {
       const published = (body.querySelector('input[name=pub]:checked') as HTMLInputElement).value as PublishSettings['published'];
       try {
         const r = await api.publishTree(v.root, {
-          published, slug: slug.value.trim() || null, domain: domain.value.trim() || null,
+          published, slug: slug.value.trim() || null, domain: domain.value.trim() || null, scripts: scripts.checked,
           theme: { name: name.value, emoji: emoji.value, tagline: tagline.value, accent: accent.value, footer: footer.value, css: css.value, template: template.value },
         });
         d.close();

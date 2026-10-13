@@ -158,6 +158,57 @@ test('a layout template replaces the page structure; scripts are stripped; {{con
   assert.ok(!std.text.includes('In this section'));
 });
 
+test('raw HTML is sanitized unless scripts are allowed, and scripts only run on the wiki host', async () => {
+  const ann = await signIn('Ann');
+  const md = '# Scripty\n\n<b>bold html</b> <span style="color:red" onclick="x()">span</span>\n\n<script>window.ran = 1</script>\n\n<iframe src="https://example.org"></iframe>\n';
+  const d = (await api(ann, 'POST', '/api/docs', { title: 'Scripty', content: md })).json;
+  await api(ann, 'POST', '/api/trees', { root: d.id });
+  await api(ann, 'PATCH', `/api/trees/${d.id}/publish`, { published: 'public', slug: 'scripty' });
+  const safe = await api(null, 'GET', '/w/scripty/');
+  assert.ok(safe.text.includes('<b>bold html</b>'), 'harmless HTML kept');
+  assert.ok(safe.text.includes('<span style="color:red">span</span>'), 'style kept, handler dropped');
+  assert.ok(!safe.text.includes('window.ran') && !safe.text.includes('<iframe'), 'script and frame removed');
+  // Members-only wikis cannot allow scripts.
+  await api(ann, 'PATCH', `/api/trees/${d.id}/publish`, { published: 'members' });
+  assert.equal((await api(ann, 'PATCH', `/api/trees/${d.id}/publish`, { scripts: true })).status, 400);
+  await api(ann, 'PATCH', `/api/trees/${d.id}/publish`, { published: 'public' });
+  const r = await api(ann, 'PATCH', `/api/trees/${d.id}/publish`, { scripts: true, theme: { template: '<!doctype html><html><body><script>window.tpl = 1</script>{{content}}</body></html>' } });
+  assert.equal(r.status, 200, r.text);
+  assert.equal(r.json.scripts, true);
+  // On the app's origin (no wiki host configured here): still stripped, with a note.
+  const here = await api(null, 'GET', '/w/scripty/');
+  assert.ok(!here.text.includes('window.ran') && !here.text.includes('window.tpl'), 'no scripts on the app origin');
+  assert.ok(here.text.includes('scripts-note'), 'the page says where scripts run');
+  // A second server with a wiki host: requests to that host get everything raw; /w/ on the origin redirects there.
+  const S2 = await startServer({ DOCS_WIKI_HOST: 'wiki.test' });
+  try {
+    const token = S2.iss.mint('Ann', 'human');
+    const ex = await fetch(`${S2.base}/auth/exchange`, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: S2.base, Cookie: 'docs_login=x' }, body: JSON.stringify({ token }) });
+    const cookie = `docs_session=${/docs_session=([^;]+)/.exec(ex.headers.get('set-cookie') ?? '')![1]}`;
+    const H2 = { 'Content-Type': 'application/json', Origin: S2.base, Cookie: cookie };
+    const d2 = await (await fetch(`${S2.base}/api/docs`, { method: 'POST', headers: H2, body: JSON.stringify({ title: 'Scripty', content: md }) })).json();
+    await fetch(`${S2.base}/api/trees`, { method: 'POST', headers: H2, body: JSON.stringify({ root: d2.id }) });
+    const pub = await (await fetch(`${S2.base}/api/trees/${d2.id}/publish`, { method: 'PATCH', headers: H2, body: JSON.stringify({ published: 'public', slug: 'scripty', scripts: true, theme: { template: '<!doctype html><html><body><script>window.tpl = 1</script>{{content}}</body></html>' } }) })).json();
+    assert.equal(pub.url, 'https://wiki.test/scripty/');
+    const { request } = await import('node:http');
+    const get = (path: string, host: string) => new Promise<{ status: number; body: string; location: string | undefined }>((resolve, reject) => {
+      const u = new URL(S2.base);
+      const rq = request({ host: u.hostname, port: u.port, path, method: 'GET', headers: { Host: host } }, (res) => { let body = ''; res.on('data', (c) => { body += c; }); res.on('end', () => resolve({ status: res.statusCode ?? 0, body, location: res.headers.location })); });
+      rq.on('error', reject); rq.end();
+    });
+    const onHost = await get('/scripty/', 'wiki.test');
+    assert.equal(onHost.status, 200, onHost.body.slice(0, 200));
+    assert.ok(onHost.body.includes('<script>window.ran = 1</script>') && onHost.body.includes('window.tpl = 1'), 'scripts intact on the wiki host');
+    assert.ok(onHost.body.includes('<iframe src="https://example.org"></iframe>'), 'frames intact too');
+    const onOrigin = await get('/w/scripty/', new URL(S2.base).host);
+    assert.equal(onOrigin.status, 302);
+    assert.equal(onOrigin.location, 'https://wiki.test/scripty/');
+    // The wiki host never hands out the app (no sessions there): an API call on that host is not the app's API.
+    const unknown = await get('/nope/', 'wiki.test');
+    assert.equal(unknown.status, 404);
+  } finally { await S2.close(); }
+});
+
 test('a custom domain serves the wiki at the root of that host; media of public pages is readable without signing in', async () => {
   const ann = await signIn('Ann');
   const home = (await api(ann, 'POST', '/api/docs', { title: 'Handbook', content: '# Handbook\n\nWelcome.\n' })).json;
