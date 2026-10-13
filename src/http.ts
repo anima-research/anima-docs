@@ -476,7 +476,10 @@ export function createHttp(app: App) {
         headers['Content-Length'] = end - start + 1;
         res.writeHead(status, headers);
         if (method === 'HEAD') { res.end(); return; }
-        createReadStream(f.file, { start, end }).pipe(res);
+        const stream = createReadStream(f.file, { start, end });
+        stream.on('error', (e) => { console.error('[media] read failed', f.info.id, e); res.destroy(); });
+        res.on('close', () => stream.destroy());
+        stream.pipe(res);
         return;
       }
       if (path === '/api/media' && method === 'POST') {
