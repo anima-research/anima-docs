@@ -4,7 +4,9 @@
 // else is a download.
 
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { createWriteStream, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { once } from 'node:events';
 import { join } from 'node:path';
 import { lookup } from 'node:dns';
 import { isIP } from 'node:net';
@@ -110,6 +112,49 @@ export class Media {
     const dim = IMAGE_MIMES.has(mime) ? dimensions(bytes, mime) : null;
     this.db.prepare(`INSERT OR IGNORE INTO media (id, mime, size, width, height, uploader_sub, doc_id, created_at, name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(id, mime, bytes.length, dim?.width ?? null, dim?.height ?? null, uploader, docId, Date.now(), name);
+    return this.info(id)!;
+  }
+
+  /**
+   * Store an upload from a stream without holding it in memory: bytes go to a temporary
+   * file while being hashed; the type is sniffed from the head. Over `maxBytes` the
+   * upload is dropped and refused.
+   */
+  async putStream(body: AsyncIterable<Uint8Array>, uploader: string, docId: string | null, opts: { name?: string | null; maxBytes: number }): Promise<MediaInfo> {
+    const tmp = join(this.dir, `tmp-${randomBytes(8).toString('hex')}`);
+    const out = createWriteStream(tmp, { flags: 'wx' });
+    const hash = createHash('sha256');
+    const headParts: Buffer[] = [];
+    let headLen = 0, size = 0;
+    try {
+      for await (const chunk of body) {
+        const c = Buffer.from(chunk);
+        size += c.length;
+        if (size > opts.maxBytes) throw new Fault(413, `File too large (max ${Math.round(opts.maxBytes / 1024 / 1024)} MB).`);
+        hash.update(c);
+        if (headLen < 1024 * 1024) { headParts.push(c); headLen += c.length; }
+        if (!out.write(c)) await once(out, 'drain');
+      }
+      out.end();
+      await once(out, 'finish');
+    } catch (e) {
+      out.destroy();
+      rmSync(tmp, { force: true });
+      throw e;
+    }
+    if (size === 0) { rmSync(tmp, { force: true }); throw new Fault(400, 'Empty file.'); }
+    const head = Buffer.concat(headParts);
+    const type = sniff(head);
+    const name = cleanName(opts.name);
+    if (type && IMAGE_MIMES.has(type.mime) && size > MAX_IMAGE_BYTES) { rmSync(tmp, { force: true }); throw new Fault(413, `Image too large (max ${MAX_IMAGE_BYTES / 1024 / 1024} MB).`); }
+    const ext = type ? type.ext : (/\.([a-z0-9]{1,8})$/i.exec(name ?? '')?.[1]?.toLowerCase() ?? 'bin');
+    const mime = type ? type.mime : 'application/octet-stream';
+    const id = `${hash.digest('hex').slice(0, 32)}.${ext}`;
+    const file = join(this.dir, id);
+    if (existsSync(file)) rmSync(tmp, { force: true }); else renameSync(tmp, file);
+    const dim = IMAGE_MIMES.has(mime) ? dimensions(head, mime) : null;
+    this.db.prepare(`INSERT OR IGNORE INTO media (id, mime, size, width, height, uploader_sub, doc_id, created_at, name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(id, mime, size, dim?.width ?? null, dim?.height ?? null, uploader, docId, Date.now(), name);
     return this.info(id)!;
   }
 

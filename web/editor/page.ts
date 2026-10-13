@@ -40,7 +40,7 @@ import { documentCompletions, forgetDocuments } from './complete';
 type Mode = 'edit' | 'split' | 'preview';
 const MAX_IMAGE = 15 * 1024 * 1024;
 /** Other files (audio, video, documents); the server's DOCS_UPLOAD_MAX_MB is the real limit. */
-const MAX_FILE = 100 * 1024 * 1024;
+const MAX_FILE = 300 * 1024 * 1024;
 const isImageFile = (f: File) => /^image\/(png|jpeg|gif|webp)$/.test(f.type);
 
 const docHighlight = HighlightStyle.define([

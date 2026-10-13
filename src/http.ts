@@ -488,8 +488,8 @@ export function createHttp(app: App) {
         app.docs.require(docId, actor, 'editor'); // files belong to a document you can edit
         const used = (app.db.prepare('SELECT coalesce(sum(size), 0) AS n FROM media WHERE uploader_sub = ? AND created_at > ?').get(actor.sub, Date.now() - 86400_000) as { n: number }).n;
         if (used > app.config.uploadQuotaBytes) throw new Fault(429, 'Daily upload limit reached.');
-        const bytes = await readBody(req, app.config.uploadMaxBytes + 1024);
-        send(201, app.media.put(bytes, actor.sub, docId, { name: url.searchParams.get('name'), imagesOnly: false, maxBytes: app.config.uploadMaxBytes }));
+        // Streamed to disk: a 300 MB video must not sit in memory.
+        send(201, await app.media.putStream(req, actor.sub, docId, { name: url.searchParams.get('name'), maxBytes: app.config.uploadMaxBytes }));
         return;
       }
 
