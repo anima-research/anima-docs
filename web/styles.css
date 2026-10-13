@@ -1203,22 +1203,25 @@ dialog.busy .dialog-body { opacity: 0.75; }
 .editor-page .node-line.depth-4, .editor-page .node-band.depth-4, .editor-page .node-band-end.depth-4 { background-image: linear-gradient(90deg, transparent 2px, var(--g1) 2px 4px, transparent 4px 20px, var(--g2) 20px 22px, transparent 22px 38px, var(--g3) 38px 40px, transparent 40px 56px, var(--g4) 56px 58px, transparent 58px); }
 .editor-page .node-line.depth-5, .editor-page .node-band.depth-5, .editor-page .node-band-end.depth-5 { background-image: linear-gradient(90deg, transparent 2px, var(--g1) 2px 4px, transparent 4px 20px, var(--g2) 20px 22px, transparent 22px 38px, var(--g3) 38px 40px, transparent 40px 56px, var(--g4) 56px 58px, transparent 58px 74px, var(--g5) 74px 76px, transparent 76px); }
 .editor-page .node-line.depth-6, .editor-page .node-band.depth-6, .editor-page .node-band-end.depth-6 { background-image: linear-gradient(90deg, transparent 2px, var(--g1) 2px 4px, transparent 4px 20px, var(--g2) 20px 22px, transparent 22px 38px, var(--g3) 38px 40px, transparent 40px 56px, var(--g4) 56px 58px, transparent 58px 74px, var(--g5) 74px 76px, transparent 76px 92px, var(--g6) 92px 94px, transparent 94px); }
-.editor-page .node-band { display: flex; align-items: center; gap: 6px; font: 11.5px/1.2 var(--font-ui); color: var(--text-2); margin-top: 8px; padding-top: 3px; padding-bottom: 2px; border-top: 1px solid var(--border); user-select: none; min-height: 22px; }
+/* Block widgets and lines must not have vertical MARGINS: CodeMirror measures heights without them and
+   clicks then land on the wrong line (one line per band, deeper sections worse). Spacing is padding; the rule is a pseudo-element. */
+.editor-page .node-band { display: flex; align-items: center; gap: 6px; font: 11.5px/1.2 var(--font-ui); color: var(--text-2); margin: 0; padding-top: 11px; padding-bottom: 2px; position: relative; background-position: 0 8px; user-select: none; min-height: 30px; box-sizing: border-box; }
+.editor-page .node-band::after { content: ""; position: absolute; left: 0; right: 0; top: 8px; height: 1px; background: var(--border); pointer-events: none; }
 /* Details and actions show when the pointer is on the band or anywhere in its section. */
 .editor-page .node-band .band-crumbs, .editor-page .node-band .band-meta, .editor-page .node-band .band-act { opacity: 0; transition: opacity .12s; }
 .editor-page .node-band:hover .band-crumbs, .editor-page .node-band.node-hover .band-crumbs, .editor-page .node-band:hover .band-meta, .editor-page .node-band.node-hover .band-meta, .editor-page .node-band:hover .band-act, .editor-page .node-band.node-hover .band-act, .editor-page .node-band .band-act:focus-visible, .editor-page .node-band .band-type.on { opacity: 1; }
 .editor-page .node-band.is-aside .band-meta { opacity: 1; }
-.editor-page .cm-line.node-line.node-last { padding-bottom: 6px; margin-bottom: 4px; border-bottom: 1px solid var(--border); }
+.editor-page .cm-line.node-line.node-last { padding-bottom: 8px; border-bottom: 1px solid var(--border); }
 .editor-page .cm-line.node-line.node-hover.depth-1 { background-color: color-mix(in srgb, var(--g1) 5%, transparent); }
 .editor-page .cm-line.node-line.node-hover.depth-2 { background-color: color-mix(in srgb, var(--g2) 5%, transparent); }
 .editor-page .cm-line.node-line.node-hover.depth-3 { background-color: color-mix(in srgb, var(--g3) 5%, transparent); }
 .editor-page .cm-line.node-line.node-hover.depth-4 { background-color: color-mix(in srgb, var(--g4) 5%, transparent); }
 .editor-page .node-band .band-type { font-family: var(--font-mono); font-size: 10.5px; text-transform: lowercase; }
 .editor-page .node-band .band-type.on { border-color: var(--accent); color: var(--accent); }
-.editor-page .node-band.depth-1 { border-top-color: color-mix(in srgb, var(--g1) 45%, transparent); }
-.editor-page .node-band.depth-2 { border-top-color: color-mix(in srgb, var(--g2) 45%, transparent); }
-.editor-page .node-band.depth-3 { border-top-color: color-mix(in srgb, var(--g3) 45%, transparent); }
-.editor-page .node-band.depth-4 { border-top-color: color-mix(in srgb, var(--g4) 45%, transparent); }
+.editor-page .node-band.depth-1::after { background: color-mix(in srgb, var(--g1) 45%, transparent); }
+.editor-page .node-band.depth-2::after { background: color-mix(in srgb, var(--g2) 45%, transparent); }
+.editor-page .node-band.depth-3::after { background: color-mix(in srgb, var(--g3) 45%, transparent); }
+.editor-page .node-band.depth-4::after { background: color-mix(in srgb, var(--g4) 45%, transparent); }
 .editor-page .node-band .band-tri { font: inherit; font-size: 11px; width: 18px; height: 18px; border: 0; border-radius: 4px; background: none; color: var(--text-3); cursor: pointer; padding: 0; }
 .editor-page .node-band .band-tri:hover { background: var(--active); color: var(--text-strong); }
 .editor-page .node-band .band-crumbs { color: var(--text-3); }
@@ -1252,7 +1255,7 @@ dialog.busy .dialog-body { opacity: 0.75; }
 .cm-tooltip.cm-tooltip-autocomplete .cm-completionMatchedText { text-decoration: none; color: var(--accent); font-weight: 700; }
 .cm-tooltip.cm-completionInfo { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font: 12.5px var(--font-ui); color: var(--text-2); }
 
-.editor-page .node-band.is-aside { border-top-style: dashed; }
+.editor-page .node-band.is-aside::after { background: repeating-linear-gradient(90deg, var(--border) 0 4px, transparent 4px 8px); }
 .editor-page .node-band.is-aside .band-meta::before { content: "▣ "; }
 
 .nav-wiki { padding: 0 6px 8px; }
