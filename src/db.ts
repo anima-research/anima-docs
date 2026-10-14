@@ -6,7 +6,7 @@ import { dirname } from 'node:path';
 
 export type DB = Database.Database;
 
-const SCHEMA_VERSION = 8;
+const SCHEMA_VERSION = 9;
 
 export function openDatabase(file: string): DB {
   if (file !== ':memory:') mkdirSync(dirname(file), { recursive: true });
@@ -394,6 +394,22 @@ export function openDatabase(file: string): DB {
     db.transaction(() => {
       const m = new Set((db.pragma('table_info(media)') as { name: string }[]).map((c) => c.name));
       if (m.size && !m.has('name')) db.exec('ALTER TABLE media ADD COLUMN name TEXT');
+      db.pragma('user_version = 8');
+    })();
+  }
+  if ((db.pragma('user_version', { simple: true }) as number) < 9) {
+    // v9: files attached to a document (an HTML page's data, scripts, styles; a markdown companion), by path.
+    db.transaction(() => {
+      db.exec(`CREATE TABLE IF NOT EXISTS doc_files (
+        doc_id      TEXT NOT NULL,
+        path        TEXT NOT NULL,
+        media_id    TEXT NOT NULL,
+        mime        TEXT NOT NULL,
+        size        INTEGER NOT NULL,
+        updated_at  INTEGER NOT NULL,
+        updated_by  TEXT NOT NULL,
+        PRIMARY KEY (doc_id, path)
+      )`);
       db.pragma(`user_version = ${SCHEMA_VERSION}`);
     })();
   }

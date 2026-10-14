@@ -626,6 +626,28 @@ try {
     await bob.frameLocator('.preview-pane iframe.page-frame').locator('#h', { hasText: 'Numbers' }).waitFor({ timeout: 8000 });
   });
 
+  await step('attached files: uploaded in the Files dialog, loaded by the page through its signed path, listed for agents', async () => {
+    const page = (await api(alice, 'POST', '/api/docs', { title: 'Chart', type: 'html', content: '<!doctype html><title>Chart</title><body><p id="out">loading</p><script>fetch("data/sim.json").then((r) => r.json()).then((d) => { document.getElementById("out").textContent = "n=" + d.n; }).catch((e) => { document.getElementById("out").textContent = "failed: " + e; });</script></body>' })).json;
+    // The data file over the API first (so the page never asks for a file that is not there), then the page reads it through its signed path.
+    const put = await alice.evaluate(async (id) => (await fetch(`/api/docs/${id}/files/data/sim.json`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ n: 42 }) })).status, page.id);
+    assert(put === 201, `put ${put}`);
+    await openDoc(alice, page.id);
+    await alice.frameLocator('.preview-pane iframe.page-frame').locator('#out', { hasText: 'n=42' }).waitFor({ timeout: 10000 });
+    // A second file through the dialog.
+    await alice.locator('.doc-header-right .icon-btn[aria-label="More document actions"]').click();
+    await alice.getByRole('menuitem', { name: 'Attached files…' }).click();
+    const dlg = alice.locator('dialog.dialog', { hasText: 'Attached files' });
+    await dlg.waitFor();
+    await dlg.locator('.file-row .file-path', { hasText: 'data/sim.json' }).waitFor({ timeout: 8000 });
+    const chooser = alice.waitForEvent('filechooser');
+    await dlg.locator('button', { hasText: 'Upload files…' }).click();
+    await (await chooser).setFiles([{ name: 'index.md', mimeType: 'text/markdown', buffer: Buffer.from('# Chart\n\nReads data/sim.json.') }]);
+    await dlg.locator('.file-row .file-path', { hasText: 'index.md' }).waitFor({ timeout: 8000 });
+    await dlg.locator('button', { hasText: 'Close' }).click();
+    const files = (await api(alice, 'GET', `/api/docs/${page.id}/files`)).json.files.map((f) => f.path);
+    assert(files.join() === 'data/sim.json,index.md', files.join());
+  });
+
   await step('home lists the tree', async () => {
     await alice.goto(`${ORIGIN}/`);
     await alice.locator('.home-trees a.tree-card', { hasText: 'Paper' }).waitFor({ timeout: 8000 });

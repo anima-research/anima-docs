@@ -1344,3 +1344,11 @@ dialog.lightbox figcaption { color: #e6e8ec; font: 14px var(--font-ui); }
 /* The open document is not in the space shown: offer to place it. */
 .nav-add-here { margin: 4px 6px 8px; padding: 8px 10px; border: 1px dashed var(--border-strong); border-radius: 8px; font: 12.5px/1.4 var(--font-ui); color: var(--text-2); display: flex; flex-direction: column; gap: 6px; }
 .nav-add-here .btn { align-self: flex-start; }
+
+/* Attached files dialog */
+.files-list { display: flex; flex-direction: column; gap: 2px; max-height: 50vh; overflow: auto; }
+.file-row { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border-radius: 6px; font-size: 13.5px; }
+.file-row:hover { background: var(--hover); }
+.file-row .file-path { font-family: var(--font-mono); font-size: 12.5px; flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.file-row .file-acts { display: flex; gap: 10px; flex: none; }
+.file-row .link-btn.danger { color: var(--danger); }

@@ -16,6 +16,7 @@ import { icon } from '../lib/icons';
 import { splitLabel } from '../lib/format';
 import { renderDocument } from '../lib/markdown';
 import { embedOf, wrapByType } from '../../src/mdext';
+import { openFilesDialog } from './files';
 import { searchPeople } from '../lib/people';
 import { avatar, confirmDialog, emptyState, errorMessage, openDialog, openMenu, promptDialog, spinner, toast, type MenuItem } from '../lib/ui';
 import { navigate } from '../router';
@@ -1053,6 +1054,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
       { label: 'Download as Markdown (.md)', icon: 'download', onSelect: () => { const a = h('a', { href: api.exportUrl(docId), download: '' }); document.body.append(a); a.click(); a.remove(); } },
       // A guest's /d/ address opens only for them: there's nothing useful to copy.
       ...(guest ? [] : [{ label: 'Copy link', icon: 'link', onSelect: () => { void navigator.clipboard.writeText(`${location.origin}/d/${docId}`).then(() => toast('Link copied', { kind: 'success', timeout: 2000 }), () => toast(`${location.origin}/d/${docId}`)); } }]));
+    if (!guest) items.push({ label: 'Attached files…', icon: 'file', onSelect: () => openFilesDialog(docId, canEdit(), isHtml()) });
     if (isHtml() && !guest) items.push({ label: 'Copy page link', icon: 'link', onSelect: () => { const url = `${location.origin}/p/${docId}`; void navigator.clipboard.writeText(url).then(() => toast('Page link copied', { kind: 'success', timeout: 2000 }), () => toast(url)); } });
     if (canEdit() && !guest && !detail.section) items.push({ label: 'Add to a space…', icon: 'columns', onSelect: () => void addToSpace() });
     if (canEdit()) items.push({ label: `Document type: ${labelOf(docId)?.type ?? 'markdown'}…`, icon: 'file', onSelect: () => typeMenu(docId, moreBtn) });

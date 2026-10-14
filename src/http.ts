@@ -19,6 +19,7 @@ import { Realtime, maskFor, publicActor, type WebSession } from './realtime.js';
 import { TOOLS, runTool } from './tools.js';
 import { atLeast } from './documents.js';
 import { Media, inlineMime } from './media.js';
+import { COMPANION, isTextMime } from './files.js';
 import { createReadStream } from 'node:fs';
 
 const PUBLIC_DIR = resolve(new URL('.', import.meta.url).pathname, '..', 'public');
@@ -73,7 +74,7 @@ function guestAllowed(method: string, path: string): boolean {
   const m = /^\/api\/docs\/[A-Za-z0-9]+(\/.*)?$/.exec(path);
   if (!m) return false;
   const rest = m[1] ?? '';
-  if (method === 'GET') return rest === '' || rest === '/versions' || /^\/versions\/[a-z0-9]+$/.test(rest) || rest === '/activity' || rest === '/history' || rest === '/history/compare' || rest === '/export.md';
+  if (method === 'GET') return rest === '' || rest === '/files' || rest.startsWith('/files/') || rest === '/versions' || /^\/versions\/[a-z0-9]+$/.test(rest) || rest === '/activity' || rest === '/history' || rest === '/history/compare' || rest === '/export.md';
   // Editors through a link may rename, name versions and restore them, as any editor can.
   return (method === 'PATCH' && rest === '') || (method === 'POST' && (rest === '/versions' || /^\/versions\/[a-z0-9]+\/restore$/.test(rest) || /^\/history\/\d+\/(restore|undo)$/.test(rest)));
 }
@@ -89,7 +90,7 @@ async function readBody(req: IncomingMessage, limit = 1024 * 1024): Promise<Buff
   return Buffer.concat(chunks);
 }
 async function json(req: IncomingMessage): Promise<any> {
-  const b = await readBody(req);
+  const b = await readBody(req, 8 * 1024 * 1024); // documents hold up to 2M characters; the JSON around them is small
   try { return JSON.parse(b.toString('utf8') || '{}'); } catch { throw new Fault(400, 'Invalid JSON.'); }
 }
 
@@ -211,7 +212,7 @@ export function createHttp(app: App) {
     const page = app.wiki.pageBySlug(root, slug);
     if (!page) throw new Fault(404, 'No such page.');
     const pageDoc = app.docs.get(page.id);
-    if (pageDoc?.type === 'html') { sendPage(req, res, app.wiki.assemble(page.id).body, pageDoc.rev); return; }
+    if (pageDoc?.type === 'html') { res.writeHead(302, { Location: `/p/${pageDoc.id}/t/${app.pageKeys.mint(pageDoc.id)}/`, 'Cache-Control': 'no-store' }); res.end(); return; }
     const canEdit = !!actor && atLeast(app.docs.role(page.id, actor), 'editor');
     const out = app.wiki.pageHtml(root, page, base, { canEdit, scripts: scriptsOk });
     if (req.headers['if-none-match'] === out.etag) { res.writeHead(304, { ETag: out.etag }); res.end(); return; }
@@ -226,13 +227,25 @@ export function createHttp(app: App) {
    * API of this origin (requests from it arrive with Origin: null and no session). The editor
    * frames it (frame-ancestors 'self'); nobody else may.
    */
-  function sendPage(req: IncomingMessage, res: ServerResponse, body: string, rev: number) {
-    const etag = `"p${rev}-${createHash('sha1').update(body).digest('hex').slice(0, 16)}"`;
+  const SANDBOX = "sandbox allow-scripts allow-forms allow-popups allow-modals allow-downloads allow-pointer-lock allow-presentation; frame-ancestors 'self'";
+  function sendSandboxed(req: IncomingMessage, res: ServerResponse, body: Buffer | string, etag: string, type: string, cache = 'private, no-cache') {
     res.removeHeader('X-Frame-Options');
-    res.setHeader('Content-Security-Policy', "sandbox allow-scripts allow-forms allow-popups allow-modals allow-downloads allow-pointer-lock allow-presentation; frame-ancestors 'self'");
+    res.setHeader('Content-Security-Policy', SANDBOX);
+    // The page's own scripts fetch its files from an opaque origin: the token in the path is the capability, so CORS may be open.
+    res.setHeader('Access-Control-Allow-Origin', '*');
     if (req.headers['if-none-match'] === etag) { res.writeHead(304, { ETag: etag }); res.end(); return; }
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'private, no-cache', ETag: etag, Vary: 'Cookie' });
-    res.end(req.method === 'HEAD' ? undefined : body);
+    const buf = Buffer.isBuffer(body) ? body : Buffer.from(body);
+    res.writeHead(200, { 'Content-Type': type, 'Content-Length': buf.length, 'Cache-Control': cache, ETag: etag, Vary: 'Cookie' });
+    res.end(req.method === 'HEAD' ? undefined : buf);
+  }
+  function sendPage(req: IncomingMessage, res: ServerResponse, body: string, rev: number) {
+    sendSandboxed(req, res, body, `"p${rev}-${createHash('sha1').update(body).digest('hex').slice(0, 16)}"`, 'text/html; charset=utf-8');
+  }
+  /** An attached file of a page, served next to it. */
+  function sendDocFile(req: IncomingMessage, res: ServerResponse, docId: string, filePath: string) {
+    const f = app.files.read(docId, filePath);
+    if (!f) throw new Fault(404, 'No such file.');
+    sendSandboxed(req, res, f.bytes, `"f${f.file.mediaId}"`, f.file.mime, 'private, max-age=60');
   }
   /** Media readable without a session: its document is shareable beyond its explicit list (an active link, members access, a public wiki). Ids are content hashes: unguessable. */
   function mediaOpen(mediaId: string): boolean {
@@ -474,19 +487,40 @@ export function createHttp(app: App) {
         return;
       }
 
-      // ------------------------------------------------ HTML pages, as themselves
-      const pm = /^\/p\/([A-Za-z0-9]+)\/?$/.exec(path);
+      // ------------------------------------------------ HTML pages, as themselves (with their files)
+      const pm = /^\/p\/([A-Za-z0-9]+)(?:\/(.*))?$/.exec(path);
       if (pm && (method === 'GET' || method === 'HEAD')) {
         const d = app.docs.get(pm[1]);
-        const role = d && actor ? app.docs.role(d.id, actor) : null;
-        if (!d || (actor && !role)) throw new Fault(404, 'No such page.');
+        if (!d) throw new Fault(404, 'No such page.');
+        const rest = pm[2]; // undefined: "/p/<id>"; "": "/p/<id>/"; otherwise a sub-path
+        // Signed path: the page or one of its files, no session needed (the token is the capability).
+        const tm = rest !== undefined ? /^t\/([0-9a-z]+\.[A-Za-z0-9_-]{22})(?:\/(.*))?$/.exec(rest) : null;
+        if (tm) {
+          res.setHeader('Access-Control-Allow-Origin', '*'); // errors too: the page's scripts see a 404, not a CORS failure
+          if (!app.pageKeys.verify(d.id, tm[1])) throw new Fault(404, 'This page address has expired; open the page again.');
+          const sub = tm[2] ?? '';
+          if (sub === '') { if (d.type !== 'html') throw new Fault(404, 'Not an HTML page.'); sendPage(req, res, app.nodes.flatten(d.id, { sub: d.ownerSub, admin: false }), d.rev); }
+          else sendDocFile(req, res, d.id, sub);
+          return;
+        }
+        const role = actor ? app.docs.role(d.id, actor) : null;
+        if (actor && !role) throw new Fault(404, 'No such page.');
         if (!actor) {
           res.removeHeader('X-Frame-Options');
           send(401, `<!doctype html><meta charset="utf-8"><title>Sign in</title><body style="font:16px system-ui;padding:40px;max-width:560px;margin:auto"><h1>Sign in to view this page</h1><p><a href="/d/${d.id}">Open it in Anima Docs</a> to sign in (or use the link you were given).</p>`, 'text/html; charset=utf-8');
           return;
         }
+        if (rest !== undefined && rest !== '') { sendDocFile(req, res, d.id, rest); return; } // /p/<id>/<path> with a session or a bearer token: the file
         if (d.type !== 'html') { res.writeHead(302, { Location: `/d/${d.id}` }); res.end(); return; }
-        sendPage(req, res, app.nodes.flatten(d.id, actor), d.rev);
+        // Agents asking for text get the markdown companion when the page has one.
+        const accept = String(req.headers.accept ?? '');
+        if ((url.searchParams.get('format') === 'md' || (accept.includes('text/markdown') && !accept.includes('text/html'))) && app.files.get(d.id, COMPANION)) {
+          sendSandboxed(req, res, app.files.read(d.id, COMPANION)!.bytes, `"c${app.files.get(d.id, COMPANION)!.mediaId}"`, 'text/markdown; charset=utf-8');
+          return;
+        }
+        // The page proper lives under a signed path, so its relative URLs (data, scripts, styles) resolve without a session.
+        res.writeHead(302, { Location: `/p/${d.id}/t/${app.pageKeys.mint(d.id)}/`, 'Cache-Control': 'no-store' });
+        res.end();
         return;
       }
       // ------------------------------------------------ media
@@ -613,6 +647,16 @@ export function createHttp(app: App) {
             app.docs.require(id, a, 'viewer');
             const t = app.nodes.tree(id, a);
             send(200, { ...t, nodes: t.nodes.map((n) => ({ ...n, role: app.docs.role(n.id, a) })), paths: app.trees.pathsOf(id, a) });
+            return;
+          }
+          if (rest === '/files' && method === 'GET') { app.docs.require(id, a, 'viewer'); send(200, { files: app.files.list(id).map((f) => ({ ...f, url: `/p/${id}/${f.path}` })) }); return; }
+          const fm = /^\/files\/(.+)$/.exec(rest);
+          if (fm && (method === 'PUT' || method === 'DELETE')) {
+            app.docs.require(id, a, 'editor');
+            if (method === 'DELETE') { send(200, { removed: app.files.remove(id, decodeURIComponent(fm[1])) }); return; }
+            const bytes = await readBody(req, app.config.uploadMaxBytes + 1024);
+            const f = app.files.put(id, decodeURIComponent(fm[1]), bytes, a.sub, { maxBytes: app.config.uploadMaxBytes });
+            send(201, { ...f, url: `/p/${id}/${f.path}` });
             return;
           }
           if (rest === '/paths' && method === 'GET') { app.docs.require(id, a, 'viewer'); send(200, { paths: app.trees.pathsOf(id, a), root: app.trees.isRoot(id) }); return; }

@@ -123,6 +123,7 @@ export interface ShareLink {
 export interface LinkPeek { active: boolean; audience?: LinkWho; role?: LinkRole; title?: string; signedIn: boolean; guest: boolean }
 export interface Redeemed { docId: string; title: string; role: Role; guest: boolean; you: Me }
 
+export interface DocFile { path: string; mime: string; size: number; mediaId: string; updatedAt: number; updatedBy: string; url: string }
 export interface MediaInfo { id: string; mime: string; size: number; width: number | null; height: number | null; url: string; name: string | null; kind: 'image' | 'audio' | 'video' | 'file' }
 
 export class ApiError extends Error {
@@ -176,6 +177,10 @@ export const api = {
   doc: (id: string) => call<DocDetail>('GET', `/api/docs/${encodeURIComponent(id)}`),
   patchDoc: (id: string, patch: { title?: string; generalAccess?: GeneralAccess; type?: NodeType }) => call<DocSummary>('PATCH', `/api/docs/${encodeURIComponent(id)}`, patch),
   deleteDoc: (id: string) => call<{ ok: true }>('DELETE', `/api/docs/${encodeURIComponent(id)}`),
+  /** Files attached to a document (an HTML page's data, scripts, styles; its markdown companion). */
+  files: (id: string) => call<{ files: DocFile[] }>('GET', `/api/docs/${encodeURIComponent(id)}/files`),
+  putFile: (id: string, path: string, body: Blob) => call<DocFile>('PUT', `/api/docs/${encodeURIComponent(id)}/files/${path.split('/').map(encodeURIComponent).join('/')}`, body, { headers: { 'Content-Type': body.type || 'application/octet-stream' } }),
+  deleteFile: (id: string, path: string) => call<{ removed: boolean }>('DELETE', `/api/docs/${encodeURIComponent(id)}/files/${path.split('/').map(encodeURIComponent).join('/')}`),
   share: (id: string, who: string, role: Role | 'none') => call<{ ok: true }>('POST', `/api/docs/${encodeURIComponent(id)}/share`, { who, role }),
   versions: (id: string) => call<{ versions: Version[] }>('GET', `/api/docs/${encodeURIComponent(id)}/versions`),
   saveVersion: (id: string, name: string) => call<{ id: string; rev: number }>('POST', `/api/docs/${encodeURIComponent(id)}/versions`, { name }),

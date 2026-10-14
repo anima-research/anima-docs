@@ -207,3 +207,60 @@ test('html pages: /p/<id> serves the document as itself in a sandbox; markdown r
   assert.equal(link.status, 201, await link.text());
   assert.equal((await fetch(`${S.base}${up.url}`)).status, 200);
 });
+
+test('page files: attached files are served next to the page under a signed path, the companion answers text/markdown, and agents read slices', async () => {
+  const ann = await signIn('Ann');
+  const page = await (await fetch(`${S.base}/api/docs`, { method: 'POST', headers: H({ Cookie: ann }), body: JSON.stringify({ title: 'Sim', type: 'html', content: '<!doctype html><title>Sim</title><script>fetch("data/sim.json")</script>' }) })).json();
+  // Attach over the API (editor): a JSON data file and the companion.
+  const data = { arms: { connectome: { retention: [0.9, 0.8], note: 'ok' } }, n: 2 };
+  const put = await fetch(`${S.base}/api/docs/${page.id}/files/data/sim.json`, { method: 'PUT', headers: { Cookie: ann, Origin: S.base, 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+  const putBody = await put.text();
+  assert.equal(put.status, 201, putBody);
+  assert.equal(JSON.parse(putBody).mime, 'application/json; charset=utf-8');
+  await fetch(`${S.base}/api/docs/${page.id}/files/index.md`, { method: 'PUT', headers: { Cookie: ann, Origin: S.base }, body: '# Sim\n\nData in data/sim.json.' });
+  assert.equal((await fetch(`${S.base}/api/docs/${page.id}/files/.hidden`, { method: 'PUT', headers: { Cookie: ann, Origin: S.base }, body: 'x' })).status, 400, 'leading dots are refused');
+  assert.equal((await fetch(`${S.base}/api/docs/${page.id}/files/a%2F..%2Fb`, { method: 'PUT', headers: { Cookie: ann, Origin: S.base }, body: 'x' })).status, 400, '".." parts are refused');
+  const list = await (await fetch(`${S.base}/api/docs/${page.id}/files`, { headers: { Cookie: ann } })).json();
+  assert.deepEqual(list.files.map((f: any) => f.path), ['data/sim.json', 'index.md']);
+  // /p/<id> with a session: redirect to the signed path; the signed page and its file need no session and allow cross-origin reads.
+  const r = await fetch(`${S.base}/p/${page.id}`, { headers: { Cookie: ann }, redirect: 'manual' });
+  assert.equal(r.status, 302);
+  const loc = r.headers.get('location')!;
+  assert.match(loc, new RegExp(`^/p/${page.id}/t/[0-9a-z]+\\.[A-Za-z0-9_-]{22}/$`));
+  const pageR = await fetch(`${S.base}${loc}`);
+  assert.equal(pageR.status, 200);
+  assert.match(pageR.headers.get('content-security-policy') ?? '', /^sandbox allow-scripts/);
+  assert.equal(pageR.headers.get('access-control-allow-origin'), '*');
+  assert.ok((await pageR.text()).includes('fetch("data/sim.json")'));
+  const fileR = await fetch(`${S.base}${loc}data/sim.json`);
+  assert.equal(fileR.status, 200);
+  assert.equal(fileR.headers.get('content-type'), 'application/json; charset=utf-8');
+  assert.deepEqual(await fileR.json(), data);
+  assert.equal((await fetch(`${S.base}/p/${page.id}/t/0.AAAAAAAAAAAAAAAAAAAAAA/`)).status, 404, 'a bad token');
+  assert.equal((await fetch(`${S.base}/p/${page.id}/data/sim.json`)).status, 401, 'files need a session or the signed path');
+  assert.equal((await fetch(`${S.base}/p/${page.id}/data/sim.json`, { headers: { Cookie: ann } })).status, 200, 'files by session');
+  // The companion for agents.
+  const md = await fetch(`${S.base}/p/${page.id}`, { headers: { Cookie: ann, Accept: 'text/markdown' } });
+  assert.equal(md.status, 200); assert.equal(md.headers.get('content-type'), 'text/markdown; charset=utf-8');
+  assert.ok((await md.text()).startsWith('# Sim'));
+  // Tools: read_document gives the companion and the file list; read_file slices by pointer and by lines.
+  const agent = S.token('Reader');
+  await fetch(`${S.base}/api/operations/whoami`, { method: 'POST', headers: { Authorization: `Bearer ${agent}`, 'Content-Type': 'application/json' }, body: '{}' });
+  await fetch(`${S.base}/api/docs/${page.id}/share`, { method: 'POST', headers: H({ Cookie: ann }), body: JSON.stringify({ who: 'agent:reader@test.local', role: 'editor' }) });
+  const op = async (name: string, args: unknown) => (await (await fetch(`${S.base}/api/operations/${name}`, { method: 'POST', headers: { Authorization: `Bearer ${agent}`, 'Content-Type': 'application/json' }, body: JSON.stringify(args) })).json()).content[0].text as string;
+  const read = await op('read_document', { document: page.id });
+  assert.ok(read.includes('companion index.md') && read.includes('# Sim') && read.includes('data/sim.json (application/json, '), read);
+  assert.ok((await op('read_document', { document: page.id, raw: true })).includes('<!doctype html>'));
+  assert.equal(await op('read_file', { document: page.id, path: 'data/sim.json', json_pointer: '/arms/connectome/retention' }), '[\n  0.9,\n  0.8\n]');
+  assert.ok((await op('read_file', { document: page.id, path: 'data/sim.json', json_pointer: '/arms/nope' })).includes('Nothing at /arms/nope'));
+  assert.ok((await op('read_file', { document: page.id, path: 'index.md', from_line: 3, to_line: 3 })).includes('Data in data/sim.json.'));
+  // Tools: attach (base64), list, remove.
+  const att = await op('attach_file', { document: page.id, path: 'app.js', content: Buffer.from('console.log(1)').toString('base64'), encoding: 'base64' });
+  assert.ok(att.includes('Attached app.js (text/javascript, 14 bytes)'), att);
+  assert.ok((await op('list_files', { document: page.id })).includes('app.js  text/javascript  14 bytes'));
+  assert.ok((await op('remove_file', { document: page.id, path: 'app.js' })).startsWith('Removed'));
+  assert.equal((await fetch(`${S.base}${loc}app.js`)).status, 404);
+  // A companion given at creation, and a markdown document is never a page.
+  const made = await op('create_document', { title: 'Report', type: 'html', content: '<h1>R</h1>', companion: 'A report.' });
+  assert.ok(made.includes('companion index.md attached'), made);
+});

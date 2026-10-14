@@ -8,6 +8,7 @@ import { splitHunks } from './hunks.js';
 import { quoteText, suggestionSummary, type Thread } from './comments.js';
 import { atLeast, type Role } from './documents.js';
 import { Media, fetchImage } from './media.js';
+import { COMPANION, isTextMime, jsonPointer } from './files.js';
 import { textChanges } from './diff.js';
 import { findSections, lineOf, lineStarts, outline, withLineNumbers, images } from './markdown.js';
 import { BASE_SETTINGS, WATCH_PRESET, type WatchSettings } from './attention.js';
@@ -272,6 +273,7 @@ export const TOOLS: ToolDef[] = [
       section: S('Read only this section: heading text, "## Heading", or "Parent > Child".'),
       from_line: { type: 'integer', minimum: 1 }, to_line: { type: 'integer', minimum: 1 },
       line_numbers: { type: 'boolean', description: 'Prefix lines with numbers (default false; quote text without them when editing).' },
+      raw: { type: 'boolean', description: 'For an html page: the HTML source itself instead of its markdown companion (index.md).' },
       comments: { type: 'boolean', description: 'Append open comment threads (default true).' },
       suggestions: S('Open suggestions: "list" (default: listed after the document, in full), "inline" (shown in place as CriticMarkup {~~old~>new~~} {++added++} {--deleted--} {>>id<<}; for reading only, quote the plain text when editing), or "none".', { enum: ['list', 'inline', 'none'] }),
       sections: S('Documents can mount other nodes (sections, or other documents) with a line {{node:<id>}}. "inline" (default) shows mounted content in place between "[section <id> begins]" and "[section <id> ends]" lines (not part of any text); "markers" shows this node\'s own text with the marker lines as they are. To edit a section, use edit_document with its id.', { enum: ['inline', 'markers'] }),
@@ -279,6 +281,15 @@ export const TOOLS: ToolDef[] = [
     run(app, actor, a) {
       const id = need(a, 'document');
       const { doc, role } = app.docs.require(id, actor, 'viewer');
+      if (doc.type === 'html' && !a.raw) {
+        // An HTML page reads as its companion (what it is, where its data lives) plus its files; the source is a raw: true away.
+        const files = app.files.list(id);
+        const list = files.length ? `\n\nFiles (${files.length}; read_file reads one, by JSON pointer or lines):\n${files.map((f) => `- ${f.path} (${f.mime.split(';')[0]}, ${f.size} bytes) → ${app.config.origin}/p/${id}/${f.path}`).join('\n')}` : '';
+        const comp = app.files.text(id, COMPANION);
+        if (comp !== null) { app.attention.markRead(actor.sub, id, {}); return text(`“${doc.title}” is an HTML page (${app.config.origin}/p/${id}); this is its companion ${COMPANION}. Pass raw: true for the HTML source.\n\n${comp}${list}`); }
+        const src = app.docs.text(id);
+        if (src.length > 20_000) { app.attention.markRead(actor.sub, id, {}); return text(`“${doc.title}” is an HTML page (${app.config.origin}/p/${id}) of ${src.length} characters with no companion ${COMPANION} (attach one with attach_file so readers get a description instead of markup). Pass raw: true for the source, from_line/to_line for a part.${list}`); }
+      }
       const mounted = app.nodes.childrenOf(id);
       const inline = mounted.length > 0 && a.sections !== 'markers';
       const full = inline ? app.nodes.flatten(id, actor, { delimit: true }) : app.docs.text(id);
@@ -485,6 +496,7 @@ export const TOOLS: ToolDef[] = [
     inputSchema: { type: 'object', required: ['title'], properties: {
       title: S('Document title.'), content: S('Initial content: markdown, or the full HTML for an html page.'),
       type: S('markdown (default), html, latex or text.', { enum: ['markdown', 'html', 'latex', 'text'] }),
+      companion: S('For an html page: a markdown description of the page (what it shows, where its data lives) stored as its index.md; read_document returns it instead of the HTML, and /p/<id>?format=md serves it.'),
       share_with: { type: 'array', items: { type: 'object', required: ['who', 'role'], properties: { who: S('@Name or principal id'), role: S('viewer, commenter or editor', { enum: ['viewer', 'commenter', 'editor'] }) } } },
       general_access: S('Access for everyone signed in: restricted (default), viewer, commenter, editor.', { enum: ['restricted', 'viewer', 'commenter', 'editor'] }),
     } },
@@ -498,7 +510,8 @@ export const TOOLS: ToolDef[] = [
       if (a.general_access) { app.docs.setGeneralAccess(d.id, actor, a.general_access); notes.push(`general access: ${a.general_access}`); }
       app.attention.setWatch(actor.sub, d.id, {}, { preset: true });
       app.attention.markRead(actor.sub, d.id, { comments: true });
-      return text(`Created “${d.title}” (${d.id}).${notes.length ? ` ${notes.join('; ')}.` : ''}\nWeb: ${app.config.origin}/d/${d.id}${d.type === 'html' ? `\nPage: ${app.config.origin}/p/${d.id} (the rendered page; viewers need access to the document, or a link from create_link)` : ''}`);
+      if (typeof a.companion === 'string' && a.companion.trim()) { app.files.put(d.id, COMPANION, Buffer.from(a.companion, 'utf8'), actor.sub, { maxBytes: app.config.uploadMaxBytes }); notes.push('companion index.md attached'); }
+      return text(`Created “${d.title}” (${d.id}).${notes.length ? ` ${notes.join('; ')}.` : ''}\nWeb: ${app.config.origin}/d/${d.id}${d.type === 'html' ? `\nPage: ${app.config.origin}/p/${d.id} (the rendered page; viewers need access to the document, or a link from create_link). Attach data, scripts and styles with attach_file and load them by relative URL.` : ''}`);
     },
   },
   {
@@ -575,6 +588,80 @@ export const TOOLS: ToolDef[] = [
       const { client, deleteSet } = applyEdits(app.docs, id, { sub: actor.sub }, [edit]);
       app.attention.noteOwnEdit(actor.sub, id, client, deleteSet);
       return text(`Inserted ${md} (${m.mime}, ${m.width ?? '?'}×${m.height ?? '?'}).`);
+    },
+  },
+  {
+    name: 'attach_file', featureSet: 'docs.write', toolClass: 'notes',
+    description: 'Attach a file to a document under a path (data/sim.json, app.js, style.css, index.md…). An HTML page loads it by relative URL (fetch("data/sim.json")); agents read it with read_file or GET /p/<id>/<path>. Replacing keeps the path, so links stay valid. index.md is the page\'s markdown companion. Large content: pass the file through your bridge ($file:/abs/path) rather than inline.',
+    inputSchema: { type: 'object', required: ['document', 'path', 'content'], properties: {
+      ...docArg, path: S('Path under the page, e.g. "data/sim.json".'), content: S('The file\'s text, or base64 with encoding "base64".'),
+      encoding: S('utf8 (default) or base64.', { enum: ['utf8', 'base64'] }),
+    } },
+    run(app, actor, a) {
+      const id = need(a, 'document');
+      app.docs.require(id, actor, 'editor');
+      const bytes = Buffer.from(need(a, 'content'), a.encoding === 'base64' ? 'base64' : 'utf8');
+      const f = app.files.put(id, need(a, 'path'), bytes, actor.sub, { maxBytes: app.config.uploadMaxBytes });
+      return text(`Attached ${f.path} (${f.mime.split(';')[0]}, ${f.size} bytes) to ${id}.\nIn the page: ${f.path} (relative). For agents: ${app.config.origin}/p/${id}/${f.path}`);
+    },
+  },
+  {
+    name: 'list_files', featureSet: 'docs.read', toolClass: 'notes',
+    description: 'The files attached to a document, with sizes and types.',
+    inputSchema: { type: 'object', required: ['document'], properties: { ...docArg } },
+    run(app, actor, a) {
+      const id = need(a, 'document');
+      app.docs.require(id, actor, 'viewer');
+      const files = app.files.list(id);
+      return text(files.length ? files.map((f) => `${f.path}  ${f.mime.split(';')[0]}  ${f.size} bytes  ${new Date(f.updatedAt).toISOString()}  → ${app.config.origin}/p/${id}/${f.path}`).join('\n') : 'No files attached.');
+    },
+  },
+  {
+    name: 'remove_file', featureSet: 'docs.write', toolClass: 'notes',
+    description: 'Remove an attached file.',
+    inputSchema: { type: 'object', required: ['document', 'path'], properties: { ...docArg, path: S('The file\'s path.') } },
+    run(app, actor, a) {
+      const id = need(a, 'document');
+      app.docs.require(id, actor, 'editor');
+      return text(app.files.remove(id, need(a, 'path')) ? `Removed ${a.path}.` : `No file ${a.path}.`);
+    },
+  },
+  {
+    name: 'read_file', featureSet: 'docs.read', toolClass: 'notes',
+    description: 'Read an attached file, or a slice of it: json_pointer ("/arms/0/retention") for JSON, from_line/to_line for text. Binary files report size and type only.',
+    inputSchema: { type: 'object', required: ['document', 'path'], properties: {
+      ...docArg, path: S('The file\'s path.'),
+      json_pointer: S('RFC 6901 pointer into a JSON file, e.g. "/arms/connectome/retention"; "" is the whole value.'),
+      from_line: { type: 'integer', minimum: 1 }, to_line: { type: 'integer', minimum: 1 },
+      max_chars: { type: 'integer', minimum: 100, description: 'Cap on the text returned (default 60000).' },
+    } },
+    run(app, actor, a) {
+      const id = need(a, 'document');
+      app.docs.require(id, actor, 'viewer');
+      const r = app.files.read(id, need(a, 'path'));
+      if (!r) throw new Fault(404, `No file ${a.path} on ${id}. list_files shows what is attached.`);
+      const cap = Number(a.max_chars) || 60_000;
+      if (!isTextMime(r.file.mime)) return text(`${r.file.path}: ${r.file.mime.split(';')[0]}, ${r.file.size} bytes (binary). ${app.config.origin}/p/${id}/${r.file.path}`);
+      let body = r.bytes.toString('utf8');
+      if (typeof a.json_pointer === 'string') {
+        let parsed: unknown;
+        try { parsed = JSON.parse(body); } catch { throw new Fault(400, `${r.file.path} is not valid JSON.`); }
+        const v = jsonPointer(parsed, a.json_pointer);
+        body = typeof v === 'string' ? v : JSON.stringify(v, null, 2);
+        if (body.length > cap) {
+          const keys = v && typeof v === 'object' ? (Array.isArray(v) ? `an array of ${v.length}` : `keys: ${Object.keys(v).slice(0, 60).join(', ')}`) : '';
+          return text(`${r.file.path}${a.json_pointer}: ${body.length} characters (${keys}). Narrow the pointer, or raise max_chars.\n\n${body.slice(0, cap)}\n…`);
+        }
+        return text(body);
+      }
+      if (a.from_line || a.to_line) {
+        const lines = body.split('\n');
+        const from = Math.max(1, Number(a.from_line) || 1), to = Math.min(lines.length, Number(a.to_line) || lines.length);
+        body = lines.slice(from - 1, to).join('\n');
+        return text(`${r.file.path} lines ${from}–${to} of ${lines.length}:\n${body.length > cap ? body.slice(0, cap) + '\n…' : body}`);
+      }
+      if (body.length > cap) return text(`${r.file.path}: ${body.length} characters, ${body.split('\n').length} lines — showing the first ${cap}. Use json_pointer or from_line/to_line for a part.\n\n${body.slice(0, cap)}\n…`);
+      return text(body);
     },
   },
   {
