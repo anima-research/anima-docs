@@ -10,7 +10,7 @@ import { HighlightStyle, syntaxHighlighting, syntaxTree } from '@codemirror/lang
 import { search, searchKeymap } from '@codemirror/search';
 import { tags as t } from '@lezer/highlight';
 
-import { api, ApiError, atLeast, isGuestMe, signalUnauthorized, ROLE_LABEL, ROLE_VERB, type DocDetail, type GeneralAccess, type Me, type NodeType, type Role } from '../lib/api';
+import { api, ApiError, atLeast, isGuestMe, signalUnauthorized, ROLE_LABEL, ROLE_VERB, type DocDetail, type GeneralAccess, type Me, type NodeType, type Role, type TreeRoot } from '../lib/api';
 import { debounce, h, modKey, altKey, rafThrottle, isMac } from '../lib/dom';
 import { icon } from '../lib/icons';
 import { splitLabel } from '../lib/format';
@@ -176,7 +176,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     const first = t.split('\n').find((l) => l.trim() && !/^\{\{node:/.test(l))?.replace(/^#+\s*/, '').slice(0, 60) ?? '';
     return { title: i?.title ?? (id === docId ? title : ''), section: i ? i.section : id === docId ? isSection() : false, type: i?.type ?? 'markdown', loaded: p.synced, chars: t.length, lines: t ? t.split('\n').length : 0, first };
   };
-  const navDeps = { docId, role: () => role, tree: treeParam, onOpen: (id: string, tree: string | null) => openNode(id, tree), label: (id: string) => labelOf(id), onChanged: () => { updateCrumbs(); refreshFooter(); } };
+  const navDeps = { docId, role: () => role, tree: treeParam, onOpen: (id: string, tree: string | null) => openNode(id, tree), label: (id: string) => labelOf(id), onChanged: () => { updateCrumbs(); refreshFooter(); }, pickDocument: (title: string) => pickDocument(title) };
   const nav = ctx.nav ?? new NavPanel(navDeps);
   if (ctx.nav) nav.rebind(navDeps);
   ctx.keepNav?.(nav);
@@ -192,6 +192,8 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   });
   /** Suggesting mode: your edits become suggestions (see suggest.ts). */
   let session: SuggestSession | null = null;
+  /** applyDocType has run once (the view exists); role changes after that re-apply it. */
+  let typeApplied = false;
   let switching = false;
   const suggesting = () => !!session;
   /** Can type into the editor: an editor, or anyone suggesting. */
@@ -623,6 +625,21 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     } catch (e) { toast(errorMessage(e), { kind: 'error' }); }
     view.focus();
   }
+  /** Place this document in a space (under its root; drag it elsewhere in the panel): everyone who can open the space can then open it. */
+  async function addToSpace() {
+    let spaces: TreeRoot[] = [];
+    try { spaces = (await api.trees()).trees.filter((t) => atLeast(t.role, 'editor') && t.root !== docId).sort((a, b) => (a.title || '').localeCompare(b.title || '')); }
+    catch (e) { toast(errorMessage(e), { kind: 'error' }); return; }
+    if (!spaces.length) { toast('No space you can edit yet. Make a document a space from the left panel first.', { kind: 'info' }); return; }
+    let chosen: TreeRoot | null = null;
+    const list = h('div.pick-list', { role: 'listbox' }, ...spaces.map((t) => h('button.pick-row', { type: 'button', role: 'option', onclick: () => { chosen = t; d.close(); } }, icon('columns', 16), h('span', null, t.title || 'Untitled'), h('span.meta', null, t.role))));
+    const d = openDialog({ title: 'Add to a space', size: 'sm', body: h('div.form-stack', null, h('p.meta', null, 'Everyone who can open the space will be able to open this document.'), list), footer: [h('button.btn.ghost', { type: 'button', onclick: () => d.close() }, 'Cancel')], onClose: () => {
+      if (!chosen) return;
+      const t = chosen;
+      void api.place(t.root, t.root, docId).then(async () => { toast(h('span', null, 'Added to ', h('strong', null, t.title || 'Untitled'), '.'), { kind: 'success', timeout: 4000 }); nav.tree = t.root; await nav.refresh(); openNode(docId, t.root); }).catch((e) => toast(errorMessage(e), { kind: 'error' }));
+    } });
+  }
+
   /** Change how a node renders: markdown, latex (each paragraph a display formula) or text (verbatim). */
   function typeMenu(id: string, anchor: HTMLElement) {
     const cur = labelOf(id)?.type ?? 'markdown';
@@ -665,6 +682,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     titleInput.readOnly = !canEdit();
     titleInput.title = canEdit() ? 'Rename' : '';
     rolePill.textContent = canEdit() ? (role === 'owner' ? 'Owner' : 'Editing') : role === 'commenter' ? 'Commenting' : 'Viewing';
+    if (typeApplied && prev !== next) applyDocType(); // a reader of an HTML page sees the page
     rolePill.className = `role-pill role-${role}`;
     rolePill.setAttribute('data-tip', canEdit() ? `You can edit (${ROLE_LABEL[role]})` : role === 'commenter' ? 'You can suggest edits and comment' : 'You can read this document');
     app.classList.toggle('can-edit', canEdit());
@@ -940,9 +958,11 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   const schedulePreviewMd = debounce(renderPreview, 120);
   const schedulePreviewHtml = debounce(renderPreview, 900);
   const schedulePreview = () => (isHtml() ? schedulePreviewHtml() : schedulePreviewMd());
-  const isHtml = () => (labelOf(docId)?.type ?? detail.type ?? 'markdown') === 'html';
+  // The live node info once the socket said hello; the fetched detail before that.
+  const isHtml = () => (nodes.info.get(docId)?.type ?? detail.type ?? 'markdown') === 'html';
   /** Apply the document's type: language, inline previews, toolbar and preview surface. */
   function applyDocType() {
+    typeApplied = true;
     const html = isHtml();
     app.classList.toggle('html-doc', html);
     view.dispatch({ effects: [langC.reconfigure(html ? htmlLanguage() : markdown({ base: markdownLanguage, codeLanguages, addKeymap: true })), liveC.reconfigure(html ? [] : livePreview)] });
@@ -950,6 +970,8 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     previewCanvas.hidden = html;
     openPageLink.hidden = !html;
     frameKey = '';
+    // Someone who can only read an HTML page gets the page, not its source.
+    if (html && !canWrite() && mode !== 'preview') { setMode('preview'); return; }
     if (mode !== 'edit') renderPreview();
   }
 
@@ -1028,6 +1050,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
       // A guest's /d/ address opens only for them: there's nothing useful to copy.
       ...(guest ? [] : [{ label: 'Copy link', icon: 'link', onSelect: () => { void navigator.clipboard.writeText(`${location.origin}/d/${docId}`).then(() => toast('Link copied', { kind: 'success', timeout: 2000 }), () => toast(`${location.origin}/d/${docId}`)); } }]));
     if (isHtml() && !guest) items.push({ label: 'Copy page link', icon: 'link', onSelect: () => { const url = `${location.origin}/p/${docId}`; void navigator.clipboard.writeText(url).then(() => toast('Page link copied', { kind: 'success', timeout: 2000 }), () => toast(url)); } });
+    if (canEdit() && !guest && !detail.section) items.push({ label: 'Add to a space…', icon: 'columns', onSelect: () => void addToSpace() });
     if (canEdit()) items.push({ label: `Document type: ${labelOf(docId)?.type ?? 'markdown'}…`, icon: 'file', onSelect: () => typeMenu(docId, moreBtn) });
     if (nav.tree === docId && atLeast(role, 'owner')) items.push({ label: 'Stop being a space', icon: 'x', onSelect: () => void nav.dropTree() });
     if (atLeast(role, 'owner')) items.push('separator', { label: 'Delete document', icon: 'trash', danger: true, onSelect: () => void deleteDoc() });

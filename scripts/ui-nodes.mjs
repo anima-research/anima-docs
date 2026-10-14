@@ -599,6 +599,28 @@ try {
     await alice.locator('.seg-btn[data-mode=edit]').click();
   });
 
+  await step('an HTML page is placed in a space from its ⋯ menu; that shares it with the space’s readers, who get the rendered page', async () => {
+    const page = (await api(alice, 'POST', '/api/docs', { title: 'Dashboard', type: 'html', content: '<!doctype html><title>Dashboard</title><body><h1 id="h">Numbers</h1></body>' })).json;
+    // Bob can open the space (editor of Paper) but not this private page. (Checked from here, so the expected 404 is no console error in his page.)
+    const bobCookie = (await bob.context().cookies()).map((c) => `${c.name}=${c.value}`).join('; ');
+    assert((await fetch(`${ORIGIN}/api/docs/${page.id}`, { headers: { Cookie: bobCookie } })).status === 404, 'Bob should not see the page yet');
+    await openDoc(alice, page.id);
+    await alice.locator('.doc-header-right .icon-btn[aria-label="More document actions"]').click();
+    await alice.getByRole('menuitem', { name: 'Add to a space…' }).click();
+    await alice.locator('dialog.dialog .pick-row', { hasText: 'Paper' }).click();
+    await alice.locator('.doc-nav .nav-pages .nav-row', { hasText: 'Dashboard' }).waitFor({ timeout: 8000 });
+    assert((await alice.locator('.doc-nav .nav-pages .nav-row', { hasText: 'Dashboard' }).locator('.type-chip').textContent()) === 'HTML', 'no HTML chip in the tree');
+    // Placement shared it: Bob can read it and gets the page as itself.
+    assert((await fetch(`${ORIGIN}/api/docs/${page.id}`, { headers: { Cookie: bobCookie } })).status === 200, 'placement did not share the page');
+    const served = await bob.evaluate(async (id) => { const r = await fetch(`/p/${id}`); return { status: r.status, text: await r.text() }; }, page.id);
+    assert(served.status === 200 && served.text.includes('Numbers'), `Bob /p: ${served.status}`);
+    await openDoc(bob, page.id, docId);
+    // Through the placement Bob is an editor (derived access caps there), so he keeps his mode; Split shows the page.
+    await bob.waitForFunction(() => document.querySelector('.doc-app')?.classList.contains('html-doc'), null, { timeout: 8000 });
+    await bob.locator('.seg-btn[data-mode=split]').click();
+    await bob.frameLocator('.preview-pane iframe.page-frame').locator('#h', { hasText: 'Numbers' }).waitFor({ timeout: 8000 });
+  });
+
   await step('home lists the tree', async () => {
     await alice.goto(`${ORIGIN}/`);
     await alice.locator('.home-trees a.tree-card', { hasText: 'Paper' }).waitFor({ timeout: 8000 });

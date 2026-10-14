@@ -1339,4 +1339,4 @@ dialog.lightbox figcaption { color: #e6e8ec; font: 14px var(--font-ui); }
 .doc-header-right .open-page { display: inline-flex; align-items: center; gap: 6px; }
 .doc-header-right .open-page[hidden] { display: none; }
 .radio-row { display: flex; gap: 18px; flex-wrap: wrap; }
-.type-chip { font-family: var(--font-mono); font-size: 10.5px; }
+.type-chip { font-family: var(--font-mono); font-size: 10px; padding: 0 5px; border: 1px solid var(--border); border-radius: 999px; color: var(--text-3); margin-left: 4px; flex: none; }

@@ -17,6 +17,8 @@ export interface NavDeps {
   /** Names of nodes in the view (for the outline), by id. */
   label: (id: string) => { title: string; section: boolean } | undefined;
   onChanged?: () => void;
+  /** Choose a document the person can open (the page's picker dialog). */
+  pickDocument?: (title: string) => Promise<{ id: string; title: string } | null>;
 }
 
 const collapsedKey = (tree: string) => `docs.nav.collapsed.${tree}`;
@@ -171,7 +173,7 @@ export class NavPanel {
     const v = this.view;
     if (!v) return;
     const items: MenuItem[] = [{ label: 'Open the space’s root page', icon: 'file', onSelect: () => this.deps.onOpen(v.root, v.root) }];
-    if (atLeast(v.role, 'editor')) items.push({ label: 'New page in this space…', icon: 'plus', onSelect: () => void this.newSubpage(v.root) });
+    if (atLeast(v.role, 'editor')) items.push({ label: 'New page in this space…', icon: 'plus', onSelect: () => void this.newSubpage(v.root) }, { label: 'Add an existing document…', icon: 'file', onSelect: () => void this.addExisting(v.root) });
     if (v.role === 'owner') items.push('separator', { label: 'Wiki settings…', icon: 'globe', onSelect: () => void this.publishDialog() }, { label: 'Stop being a space', icon: 'x', danger: true, onSelect: () => void this.dropTree() });
     openMenu(anchor, items, { align: 'end' });
   }
@@ -285,6 +287,7 @@ export class NavPanel {
         oncontextmenu: (e: MouseEvent) => { e.preventDefault(); this.contextMenu(e, id, parent, index); },
       },
         tri, h('span.nav-name', { class: n?.section ? 'nameless' : '' }, n ? (n.section ? 'section' : n.title || 'Untitled') : id),
+        n?.type === 'html' ? h('span.type-chip', { 'data-tip': 'An HTML page' }, 'HTML') : null,
         canArrange ? h('button.nav-act.nav-add', { type: 'button', 'aria-label': 'New subpage', 'data-tip': 'New subpage', onclick: (e: MouseEvent) => { e.stopPropagation(); void this.newSubpage(id); } }, '+') : null,
         h('button.nav-act.nav-more', { type: 'button', 'aria-label': 'Page actions', 'aria-haspopup': 'menu', onclick: (e: MouseEvent) => { e.stopPropagation(); this.contextMenu(e, id, parent, index); } }, '⋯'));
       if (canArrange) this.wireDrag(el, id, parent, index);
@@ -362,7 +365,7 @@ export class NavPanel {
       { label: 'Copy link', icon: 'link', onSelect: () => { const url = `${location.origin}/d/${id}?tree=${encodeURIComponent(v.root)}`; void navigator.clipboard.writeText(url).then(() => toast('Link copied', { kind: 'success', timeout: 2000 }), () => toast(url)); } },
     ];
     if (canArrange) {
-      items.push('separator', { label: 'New subpage…', icon: 'plus', onSelect: () => void this.newSubpage(id) });
+      items.push('separator', { label: 'New subpage…', icon: 'plus', onSelect: () => void this.newSubpage(id) }, { label: 'Add an existing document here…', icon: 'file', onSelect: () => void this.addExisting(id) });
       if (parent) {
         items.push(
           { label: 'Move up', icon: 'arrowLeft', disabled: index === 0, onSelect: () => void this.act(api.movePage(v.root, parent, id, 'up')) },
@@ -438,6 +441,19 @@ export class NavPanel {
       await api.place(v.root, parent, d.id);
       await this.refresh();
       this.deps.onOpen(d.id, v.root);
+    } catch (e) { toast(errorMessage(e), { kind: 'error' }); }
+  }
+
+  /** Place a document the person can edit under a page of this space: everyone who can open the space can then open it. */
+  private async addExisting(parent: string) {
+    const v = this.view;
+    if (!v || !this.deps.pickDocument) return;
+    const chosen = await this.deps.pickDocument('Add a document to this space');
+    if (!chosen) return;
+    try {
+      await api.place(v.root, parent, chosen.id);
+      toast(h('span', null, h('strong', null, chosen.title || 'Untitled'), ' is in this space now: everyone who can open the space can open it.'), { kind: 'success', timeout: 5000 });
+      await this.refresh();
     } catch (e) { toast(errorMessage(e), { kind: 'error' }); }
   }
 
