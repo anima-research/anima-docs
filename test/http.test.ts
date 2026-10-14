@@ -239,6 +239,11 @@ test('page files: attached files are served next to the page under a signed path
   assert.equal((await fetch(`${S.base}/p/${page.id}/t/0.AAAAAAAAAAAAAAAAAAAAAA/`)).status, 404, 'a bad token');
   assert.equal((await fetch(`${S.base}/p/${page.id}/data/sim.json`)).status, 401, 'files need a session or the signed path');
   assert.equal((await fetch(`${S.base}/p/${page.id}/data/sim.json`, { headers: { Cookie: ann } })).status, 200, 'files by session');
+  // A person navigating to the short link gets the app shell (the page framed inside it); ?raw=1 gets the page.
+  const nav = await fetch(`${S.base}/p/${page.id}`, { headers: { Cookie: ann, Accept: 'text/html,*/*', 'Sec-Fetch-Dest': 'document' }, redirect: 'manual' });
+  assert.equal(nav.status, 200); assert.ok((await nav.text()).includes('<div id="app"'), 'the app shell');
+  assert.equal((await fetch(`${S.base}/p/${page.id}?raw=1`, { headers: { Cookie: ann, Accept: 'text/html', 'Sec-Fetch-Dest': 'document' }, redirect: 'manual' })).status, 302);
+  assert.equal((await fetch(`${S.base}/p/${page.id}`, { headers: { Cookie: ann, Accept: 'text/html', 'Sec-Fetch-Dest': 'iframe' }, redirect: 'manual' })).status, 302, 'frames get the page');
   // The companion for agents.
   const md = await fetch(`${S.base}/p/${page.id}`, { headers: { Cookie: ann, Accept: 'text/markdown' } });
   assert.equal(md.status, 200); assert.equal(md.headers.get('content-type'), 'text/markdown; charset=utf-8');
@@ -260,6 +265,10 @@ test('page files: attached files are served next to the page under a signed path
   assert.ok((await op('list_files', { document: page.id })).includes('app.js  text/javascript  14 bytes'));
   assert.ok((await op('remove_file', { document: page.id, path: 'app.js' })).startsWith('Removed'));
   assert.equal((await fetch(`${S.base}${loc}app.js`)).status, 404);
+  // A whole-page rewrite reports a summary, not the text back again.
+  const big = '<!doctype html>\n' + Array.from({ length: 400 }, (_, i) => `<p>line ${i}</p>`).join('\n');
+  const rewrite = await op('edit_document', { document: page.id, edits: [{ replace_all_content: big }] });
+  assert.ok(rewrite.length < 2000 && rewrite.includes('more lines'), `rewrite report ${rewrite.length} chars`);
   // A companion given at creation, and a markdown document is never a page.
   const made = await op('create_document', { title: 'Report', type: 'html', content: '<h1>R</h1>', companion: 'A report.' });
   assert.ok(made.includes('companion index.md attached'), made);

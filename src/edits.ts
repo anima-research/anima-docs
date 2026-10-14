@@ -189,8 +189,15 @@ export function applyEdits(docs: Documents, docId: string, actor: { sub: string;
     const a = lineOf(starts, s), b = lineOf(starts, Math.max(s, e - 1));
     report.applied.push(`${i + 1}. ${l.label}${l.count > 1 ? ` ×${l.count}` : ''} → line${a === b ? ` ${a}` : `s ${a}–${b}`}`);
     if (l.count === 1) {
-      const excerpt = lines.slice(Math.max(0, a - 2), Math.min(lines.length, b + 1));
-      report.lines.push(excerpt.map((t, k) => `${String(Math.max(1, a - 1) + k).padStart(5)}\t${t}`).join('\n'));
+      const from = Math.max(0, a - 2), to = Math.min(lines.length, b + 1);
+      const num = (t: string, k: number) => `${String(from + 1 + k).padStart(5)}\t${t}`;
+      const excerpt = lines.slice(from, to);
+      const chars = excerpt.reduce((n, t) => n + t.length + 1, 0);
+      // A large change (a whole-page rewrite) is summarised: the head and the tail, not the text back again.
+      if (excerpt.length > 60 || chars > 4000) {
+        const head = excerpt.slice(0, 6).map(num), tail = excerpt.slice(-3).map((t, k) => num(t, excerpt.length - 3 + k));
+        report.lines.push(`${head.join('\n')}\n      … ${excerpt.length - 9} more lines (${chars} characters in lines ${from + 1}–${to}) …\n${tail.join('\n')}`);
+      } else report.lines.push(excerpt.map(num).join('\n'));
     }
   });
   return { report, client, deleteSet };

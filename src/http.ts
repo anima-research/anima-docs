@@ -503,6 +503,10 @@ export function createHttp(app: App) {
           else sendDocFile(req, res, d.id, sub);
           return;
         }
+        // A person navigating to the short link gets the app around the page (title, share, comments, edit);
+        // frames, agents, non-browsers and ?raw=1 get the page itself (redirected to its signed path below).
+        const browserNav = method === 'GET' && (rest === undefined || rest === '') && req.headers['sec-fetch-dest'] === 'document' && String(req.headers.accept ?? '').includes('text/html') && !url.searchParams.has('raw') && !url.searchParams.has('format');
+        if (browserNav) { send(200, readFileSync(join(PUBLIC_DIR, 'index.html')), 'text/html; charset=utf-8'); return; }
         const role = actor ? app.docs.role(d.id, actor) : null;
         if (actor && !role) throw new Fault(404, 'No such page.');
         if (!actor) {

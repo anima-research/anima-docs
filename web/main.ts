@@ -30,7 +30,8 @@ function unmount() {
 
 function render(path: string) {
   // Another document while a document page is open: swap the document, keep the shell (nav, trees).
-  const docNow = me ? /^\/d\/([A-Za-z0-9]+)$/.exec(path) : null;
+  // /p/<id> is the page's own address: for a person it is the document opened as the page (the app around it).
+  const docNow = me ? /^\/[dp]\/([A-Za-z0-9]+)$/.exec(path) : null;
   if (docNow && cleanup && typeof (cleanup as Partial<DocPage>).open === 'function') { (cleanup as DocPage).open(docNow[1]); return; }
   unmount();
   root.classList.remove('boot');
@@ -47,7 +48,7 @@ function render(path: string) {
     renderSignIn(root, config, { onSignedIn: signedIn });
     return;
   }
-  const doc = /^\/d\/([A-Za-z0-9]+)$/.exec(path);
+  const doc = /^\/[dp]\/([A-Za-z0-9]+)$/.exec(path);
   if (doc) cleanup = mountDocPage(root, me, doc[1]);
   else if ((path === '/people' || path === '/admin') && isGuestMe(me)) renderMembersOnly(me);
   else if (path === '/people') cleanup = mountPeople(root, me);

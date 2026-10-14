@@ -246,7 +246,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   const shareBtn = h('button.btn.primary.share-btn', { type: 'button', onclick: () => openShareDialog({ docId, me, title, onChanged: (d) => applyDetail(d) }) }, icon('lock', 16, 'share-lock'), h('span.btn-label', null, 'Share'));
   const shareSlot = guest ? guestSignInButton() : shareBtn;
   /** HTML pages: the rendered page in its own tab. */
-  const openPageLink = h('a.btn.ghost.sm.open-page', { href: `/p/${docId}`, target: '_blank', rel: 'noopener', hidden: true, 'data-tip': 'Open the rendered page in a new tab' }, icon('external', 16), h('span.tb-text', null, 'Open page'));
+  const openPageLink = h('a.btn.ghost.sm.open-page', { href: `/p/${docId}?raw=1`, target: '_blank', rel: 'noopener', hidden: true, 'data-tip': 'Open the rendered page in a new tab' }, icon('external', 16), h('span.tb-text', null, 'Open page'));
   const moreBtn: HTMLButtonElement = h('button.icon-btn', { type: 'button', 'aria-label': 'More document actions', 'aria-haspopup': 'menu', 'data-tip': 'More', onclick: () => openMenu(moreBtn, moreItems(), { align: 'end' }) }, icon('more', 20));
 
   const header = h('header.doc-header', null,
@@ -949,7 +949,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
       // The page is served from what is saved; edits sync within milliseconds, so a reload after a pause shows them.
       const t = binding.current.text;
       const key = `${t.length}:${t.slice(0, 2000)}:${t.slice(-2000)}`;
-      if (key !== frameKey) { frameKey = key; pageFrame.src = `/p/${docId}?v=${Date.now().toString(36)}`; }
+      if (key !== frameKey) { frameKey = key; pageFrame.src = `/p/${docId}?raw=1&v=${Date.now().toString(36)}`; }
       return;
     }
     const text = renderSource(binding.current);

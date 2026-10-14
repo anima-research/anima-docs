@@ -581,6 +581,13 @@ try {
     const frame = alice.locator('.preview-pane iframe.page-frame');
     await frame.waitFor({ timeout: 8000 });
     assert((await frame.getAttribute('sandbox') ?? '').includes('allow-scripts') && !(await frame.getAttribute('sandbox') ?? '').includes('allow-same-origin'), 'frame sandbox');
+    // The page's own address shows the app around it for a person: the header (share, more) and the framed page.
+    await alice.goto(`${ORIGIN}/p/${page.id}`);
+    await alice.waitForFunction(() => document.querySelector('.doc-app')?.classList.contains('html-doc') && document.querySelector('.doc-app')?.dataset.mode === 'preview', null, { timeout: 8000 });
+    assert(alice.url().endsWith(`/p/${page.id}`), `address changed to ${alice.url()}`);
+    assert((await alice.locator('.doc-header-right .btn', { hasText: 'Share' }).count()) === 1, 'no Share control at /p/');
+    await alice.frameLocator('.preview-pane iframe.page-frame').locator('#h', { hasText: 'Hello from JS' }).waitFor({ timeout: 8000 });
+    await alice.locator('.seg-btn[data-mode=split]').click();
     // Playwright can look inside the (opaque-origin) frame: the page rendered and its script ran.
     await alice.frameLocator('.preview-pane iframe.page-frame').locator('#h', { hasText: 'Hello from JS' }).waitFor({ timeout: 8000 });
     // The page itself says what it is.
@@ -588,7 +595,7 @@ try {
     assert(served.status === 200 && served.csp.startsWith('sandbox allow-scripts') && served.text.includes('Hello from JS'), `served: ${JSON.stringify(served).slice(0, 200)}`);
     // A real browser runs it: open the page top-level in a fresh tab and read the DOM.
     const tab = await alice.context().newPage();
-    await tab.goto(`${ORIGIN}/p/${page.id}`);
+    await tab.goto(`${ORIGIN}/p/${page.id}?raw=1`); // the bare page (a person without ?raw gets the app around it)
     await tab.waitForFunction(() => document.getElementById('h')?.textContent === 'Hello from JS', null, { timeout: 8000 });
     assert(await tab.evaluate(() => { try { return window.origin === 'null' && document.cookie === ''; } catch { return true; } }), 'page is not isolated');
     await tab.close();
