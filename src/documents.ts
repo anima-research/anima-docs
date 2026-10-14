@@ -388,10 +388,10 @@ export class Documents extends EventEmitter {
   }
 
   /** What a link leads to, for a visitor who hasn't opened it yet. Titles are shown for "anyone" links only. */
-  peekLink(key: string): { active: boolean; audience?: LinkAudience; role?: Role; title?: string } {
+  peekLink(key: string): { active: boolean; audience?: LinkAudience; role?: Role; title?: string; docId?: string } {
     const r = this.db.prepare('SELECT * FROM doc_links WHERE key = ?').get(String(key)) as LinkRow | undefined;
     if (!r || !this.linkActive(r) || !this.get(r.doc_id)) return { active: false };
-    return { active: true, audience: r.audience, role: r.role, ...(r.audience === 'anyone' ? { title: this.get(r.doc_id)!.title } : {}) };
+    return { active: true, audience: r.audience, role: r.role, ...(r.audience === 'anyone' ? { title: this.get(r.doc_id)!.title, docId: r.doc_id } : {}) };
   }
 
   /**

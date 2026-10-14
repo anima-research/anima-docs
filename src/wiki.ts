@@ -228,7 +228,7 @@ export class Wiki {
       lang: 'en',
       name: esc(name),
       title: esc(page.title),
-      head: `<meta charset="utf-8">\n<meta name="viewport" content="width=device-width, initial-scale=1">\n<title>${esc(page.depth === 0 ? name : `${page.title} · ${name}`)}</title>\n<meta property="og:title" content="${esc(page.title)}">\n<meta property="og:site_name" content="${esc(name)}">\n<meta name="description" content="${esc(excerpt(body))}">\n<link rel="canonical" href="${esc(href(page))}">\n${hasMathHtml(article) || asides.some((x) => hasMathHtml(x.html)) ? '<link rel="stylesheet" href="/katex/katex.min.css">\n' : ''}<style>${CSS.replace('__ACCENT__', theme.accent || '#2459e0')}</style>\n${theme.css ? `<style class="custom">${theme.css}</style>` : ''}`,
+      head: `<meta charset="utf-8">\n<meta name="viewport" content="width=device-width, initial-scale=1">\n<title>${esc(page.depth === 0 ? name : `${page.title} · ${name}`)}</title>\n<meta property="og:title" content="${esc(page.title)}">\n<meta property="og:site_name" content="${esc(name)}">\n<meta property="og:type" content="article">\n<meta property="og:url" content="${esc(href(page))}">\n<meta name="description" content="${esc(excerpt(body))}">\n<meta property="og:description" content="${esc(excerpt(body))}">\n<meta property="og:image" content="${esc(`${this.app.config.origin}/og-default.png`)}">\n<meta name="twitter:card" content="summary_large_image">\n<link rel="canonical" href="${esc(href(page))}">\n${hasMathHtml(article) || asides.some((x) => hasMathHtml(x.html)) ? '<link rel="stylesheet" href="/katex/katex.min.css">\n' : ''}<style>${CSS.replace('__ACCENT__', theme.accent || '#2459e0')}</style>\n${theme.css ? `<style class="custom">${theme.css}</style>` : ''}`,
       brand: `<a class="brand" href="${esc(base)}/">${theme.emoji ? `<span class="emoji">${esc(theme.emoji)}</span>` : ''}<span>${esc(name)}</span></a>`,
       tagline: theme.tagline ? `<span class="tagline">${esc(theme.tagline)}</span>` : '',
       search: `<form class="search" action="${esc(base)}/search" method="get"><input type="search" name="q" placeholder="Search ${esc(name)}" aria-label="Search"></form>`,
@@ -325,8 +325,12 @@ function isAncestor(a: string, of: string, byId: Map<string, WikiPage>): boolean
   return false;
 }
 
-function excerpt(md: string): string {
-  return md.replace(/<(script|style)[\s\S]*?<\/\1>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/^#.*$/gm, '').replace(/[*_`>#[\]()!-]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200);
+/** A plain-text summary of markdown (or HTML) for descriptions and link cards: no headings, images, addresses or markup. */
+export function excerpt(md: string): string {
+  return md.replace(/<(script|style)[\s\S]*?<\/\1>/gi, ' ').replace(/<[^>]+>/g, ' ')
+    .replace(/^\{\{node:[^}]*\}\}[ \t]*$/gm, ' ').replace(/^#.*$/gm, '')
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ').replace(/\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/\$\$[\s\S]*?\$\$/g, ' ')
+    .replace(/[*_`>#[\]()!|-]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200);
 }
 
 export class WikiFault extends Fault {}

@@ -20,6 +20,7 @@ import { TOOLS, runTool } from './tools.js';
 import { atLeast } from './documents.js';
 import { Media, inlineMime } from './media.js';
 import { COMPANION, isTextMime } from './files.js';
+import { excerpt } from './wiki.js';
 import { createReadStream } from 'node:fs';
 
 const PUBLIC_DIR = resolve(new URL('.', import.meta.url).pathname, '..', 'public');
@@ -99,6 +100,7 @@ const STATIC: Record<string, [string, string]> = {
   '/app.css': ['app.css', 'text/css; charset=utf-8'],
   '/style.css': ['style.css', 'text/css; charset=utf-8'],
   '/favicon.svg': ['favicon.svg', 'image/svg+xml'],
+  '/og-default.png': ['og-default.png', 'image/png'],
 };
 
 const staticCache = new Map<string, { mtime: number; raw: Buffer; gz: Buffer | null }>();
@@ -227,6 +229,41 @@ export function createHttp(app: App) {
    * API of this origin (requests from it arrive with Origin: null and no session). The editor
    * frames it (frame-ancestors 'self'); nobody else may.
    */
+  // ---------------------------------------------------------------- the app shell, with link previews
+  // Crawlers (Slack, Discord, X, iMessage) fetch a link without a session and read Open Graph tags.
+  // A document's title and excerpt go out only when anyone could read it anyway: a public wiki, an
+  // active anyone-with-the-link link, or the share link itself. Everything else gets a generic card.
+  interface LinkMeta { title: string; description: string; url: string; image?: string; type?: string }
+  const attr = (v: string) => v.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]!));
+  const GENERIC = { title: 'Anima Docs', description: 'Documents, pages and wikis that people and agents write together.' };
+  function shell(meta: LinkMeta): string {
+    const html = readFileSync(join(PUBLIC_DIR, 'index.html'), 'utf8');
+    const image = meta.image ?? `${app.config.origin}/og-default.png`;
+    const tags = [
+      `<meta name="description" content="${attr(meta.description)}">`,
+      `<meta property="og:site_name" content="Anima Docs">`, `<meta property="og:type" content="${meta.type ?? 'website'}">`,
+      `<meta property="og:title" content="${attr(meta.title)}">`, `<meta property="og:description" content="${attr(meta.description)}">`,
+      `<meta property="og:url" content="${attr(meta.url)}">`, `<meta property="og:image" content="${attr(image)}">`,
+      `<meta name="twitter:card" content="summary_large_image">`, `<meta name="twitter:title" content="${attr(meta.title)}">`, `<meta name="twitter:description" content="${attr(meta.description)}">`, `<meta name="twitter:image" content="${attr(image)}">`,
+    ].join('\n  ');
+    return html.replace(/<title>[^<]*<\/title>/, `<title>${attr(meta.title === 'Anima Docs' ? meta.title : `${meta.title} · Anima Docs`)}</title>`).replace('</head>', `  ${tags}\n</head>`);
+  }
+  /** Readable by anyone who has the address: a public wiki, or an active anyone-with-the-link link. */
+  function openToAnyone(docId: string): boolean {
+    const links = (app.db.prepare("SELECT count(*) AS n FROM doc_links WHERE doc_id = ? AND audience = 'anyone' AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)").get(docId, Date.now()) as { n: number }).n;
+    if (links > 0) return true;
+    const roots = app.db.prepare("SELECT root_id FROM trees WHERE published = 'public'").all() as { root_id: string }[];
+    return roots.some((t) => app.wiki.members(t.root_id).has(docId));
+  }
+  /** The card for a document: its title and an excerpt when it is open to anyone (or `reveal` says the address itself is the secret), else generic. */
+  function docMeta(d: { id: string; title: string; type: string }, url: string, reveal = false): LinkMeta {
+    if (!reveal && !openToAnyone(d.id)) return { ...GENERIC, title: 'Anima Docs', description: 'A document on Anima Docs. Sign in to open it.', url };
+    const text = (d.type === 'html' ? app.files.text(d.id, COMPANION) : null) ?? app.docs.text(d.id);
+    const first = /!\[[^\]]*\]\((\/media\/[0-9a-f]{32}\.(?:png|jpg|gif|webp))\)/.exec(text)?.[1];
+    return { title: d.title || 'Untitled', description: excerpt(text) || (d.type === 'html' ? 'An HTML page on Anima Docs.' : 'A document on Anima Docs.'), url, type: 'article', image: first ? `${app.config.origin}${first}` : undefined };
+  }
+  const sendShell = (res: ServerResponse, meta: LinkMeta) => { res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(shell(meta)); };
+
   const SANDBOX = "sandbox allow-scripts allow-forms allow-popups allow-modals allow-downloads allow-pointer-lock allow-presentation; frame-ancestors 'self'";
   function sendSandboxed(req: IncomingMessage, res: ServerResponse, body: Buffer | string, etag: string, type: string, cache = 'private, no-cache') {
     res.removeHeader('X-Frame-Options');
@@ -434,7 +471,8 @@ export function createHttp(app: App) {
       // Peek: what a link leads to, before opening it (no sign-in needed).
       const peek = /^\/api\/links\/([A-Za-z0-9_-]{20,40})$/.exec(path);
       if (peek && method === 'GET') {
-        send(200, { ...app.docs.peekLink(peek[1]), signedIn: !!actor && !isGuest(actor.sub), guest: !!actor && isGuest(actor.sub) });
+        const { docId: _docId, ...peeked } = app.docs.peekLink(peek[1]); // the id is for link previews on the server, not for the visitor
+        send(200, { ...peeked, signedIn: !!actor && !isGuest(actor.sub), guest: !!actor && isGuest(actor.sub) });
         return;
       }
       if (path === '/api/links/redeem' && method === 'POST') {
@@ -506,13 +544,13 @@ export function createHttp(app: App) {
         // A person navigating to the short link gets the app around the page (title, share, comments, edit);
         // frames, agents, non-browsers and ?raw=1 get the page itself (redirected to its signed path below).
         const browserNav = method === 'GET' && (rest === undefined || rest === '') && req.headers['sec-fetch-dest'] === 'document' && String(req.headers.accept ?? '').includes('text/html') && !url.searchParams.has('raw') && !url.searchParams.has('format');
-        if (browserNav) { send(200, readFileSync(join(PUBLIC_DIR, 'index.html')), 'text/html; charset=utf-8'); return; }
+        if (browserNav) { sendShell(res, docMeta(d, `${app.config.origin}/p/${d.id}`)); return; }
         const role = actor ? app.docs.role(d.id, actor) : null;
         if (actor && !role) throw new Fault(404, 'No such page.');
         if (!actor) {
-          res.removeHeader('X-Frame-Options');
-          send(401, `<!doctype html><meta charset="utf-8"><title>Sign in</title><body style="font:16px system-ui;padding:40px;max-width:560px;margin:auto"><h1>Sign in to view this page</h1><p><a href="/d/${d.id}">Open it in Anima Docs</a> to sign in (or use the link you were given).</p>`, 'text/html; charset=utf-8');
-          return;
+          // No session: the bare page needs one (401); the short link gets the shell — the app asks to sign in, crawlers read the card.
+          if ((rest === undefined || rest === '') && !url.searchParams.has('raw') && !url.searchParams.has('format')) { sendShell(res, docMeta(d, `${app.config.origin}/p/${d.id}`)); return; }
+          throw new Fault(401, 'Sign in to view this page.');
         }
         if (rest !== undefined && rest !== '') { sendDocFile(req, res, d.id, rest); return; } // /p/<id>/<path> with a session or a bearer token: the file
         if (d.type !== 'html') { res.writeHead(302, { Location: `/d/${d.id}` }); res.end(); return; }
@@ -820,8 +858,21 @@ export function createHttp(app: App) {
         send(200, gzip ? cached.gz! : cached.raw, st[1], { 'Cache-Control': km ? 'public, max-age=604800' : 'no-cache', ETag: etag, Vary: 'Accept-Encoding', ...(gzip ? { 'Content-Encoding': 'gzip' } : {}) });
         return;
       }
-      if (path === '/' || path === '/auth/callback' || path === '/admin' || path === '/people' || /^\/d\/[A-Za-z0-9]+$/.test(path) || /^\/l\/[A-Za-z0-9_-]{20,40}$/.test(path)) {
-        send(200, readFileSync(join(PUBLIC_DIR, 'index.html')), 'text/html; charset=utf-8');
+      const dmatch = /^\/d\/([A-Za-z0-9]+)$/.exec(path), lmatch = /^\/l\/([A-Za-z0-9_-]{20,40})$/.exec(path);
+      if (dmatch) {
+        const d = app.docs.get(dmatch[1]);
+        sendShell(res, d ? docMeta(d, `${app.config.origin}/d/${d.id}`) : { ...GENERIC, url: `${app.config.origin}${path}` });
+        return;
+      }
+      if (lmatch) {
+        // The share link is itself the secret: an active anyone-link reveals the card; a members-only or dead link does not.
+        const peek = app.docs.peekLink(lmatch[1]);
+        const d = peek.active && peek.docId ? app.docs.get(peek.docId) : null;
+        sendShell(res, d ? docMeta(d, `${app.config.origin}${path}`, true) : { ...GENERIC, url: `${app.config.origin}${path}` });
+        return;
+      }
+      if (path === '/' || path === '/auth/callback' || path === '/admin' || path === '/people') {
+        sendShell(res, { ...GENERIC, url: `${app.config.origin}${path === '/auth/callback' ? '/' : path}` });
         return;
       }
       throw new Fault(404, 'Not found.');

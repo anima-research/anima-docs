@@ -189,10 +189,11 @@ test('html pages: /p/<id> serves the document as itself in a sandbox; markdown r
   assert.ok(body.includes('<script>document.title="ran"</script>'), 'scripts kept verbatim');
   const etag = r.headers.get('etag')!;
   assert.equal((await fetch(`${S.base}/p/${page.id}`, { headers: { Cookie: ann, 'If-None-Match': etag } })).status, 304);
-  // Nobody signed in: a sign-in page, not the content.
+  // Nobody signed in: the app shell (sign-in, a generic card for crawlers), never the content; the bare page is refused.
   const anon = await fetch(`${S.base}/p/${page.id}`);
-  assert.equal(anon.status, 401);
+  assert.equal(anon.status, 200);
   assert.ok(!(await anon.text()).includes('<h1>Hi</h1>'));
+  assert.equal((await fetch(`${S.base}/p/${page.id}?raw=1`)).status, 401);
   // Another member without access: nothing.
   const bob = await signIn('Bob');
   assert.equal((await fetch(`${S.base}/p/${page.id}`, { headers: { Cookie: bob } })).status, 404);
@@ -272,4 +273,37 @@ test('page files: attached files are served next to the page under a signed path
   // A companion given at creation, and a markdown document is never a page.
   const made = await op('create_document', { title: 'Report', type: 'html', content: '<h1>R</h1>', companion: 'A report.' });
   assert.ok(made.includes('companion index.md attached'), made);
+});
+
+test('link previews: Open Graph cards reveal a document only when anyone could read it (an anyone-link, a public wiki, or the share link itself)', async () => {
+  const ann = await signIn('Ann');
+  const d = await (await fetch(`${S.base}/api/docs`, { method: 'POST', headers: H({ Cookie: ann }), body: JSON.stringify({ title: 'Quarterly plan', content: '# Quarterly plan\n\nWe ship the **thing** in March.\n\n![cover](/media/00000000000000000000000000000000.png)\n' }) })).json();
+  const og = (html: string, prop: string) => new RegExp(`<meta property="${prop}" content="([^"]*)"`).exec(html)?.[1];
+  const page = async (p: string) => { const r = await fetch(`${S.base}${p}`); const t = await r.text(); if (!t.includes('og:title')) console.log('OGDBG', p, r.status, t.slice(0, 100)); return t; };
+  // Private: a crawler gets the generic card, not the title or text.
+  let html = await page(`/d/${d.id}`);
+  assert.equal(og(html, 'og:title'), 'Anima Docs');
+  assert.ok(!html.includes('Quarterly') && !html.includes('March'), 'private content leaked');
+  assert.equal(og(html, 'og:image'), `${S.base}/og-default.png`);
+  assert.equal((await fetch(`${S.base}/og-default.png`)).headers.get('content-type'), 'image/png');
+  html = await page(`/p/${d.id}`);
+  assert.ok(!html.includes('Quarterly'), 'private page leaked via /p/');
+  // A members-only link reveals nothing; an anyone-link reveals the card at /d/, /p/ and the link itself.
+  const members = await (await fetch(`${S.base}/api/docs/${d.id}/links`, { method: 'POST', headers: H({ Cookie: ann }), body: JSON.stringify({ role: 'viewer', who: 'members' }) })).json();
+  const keyOf = (l: { url: string }) => l.url.split('/l/')[1];
+  html = await page(`/l/${keyOf(members)}`);
+  assert.equal(og(html, 'og:title'), 'Anima Docs');
+  const anyone = await (await fetch(`${S.base}/api/docs/${d.id}/links`, { method: 'POST', headers: H({ Cookie: ann }), body: JSON.stringify({ role: 'viewer', who: 'anyone' }) })).json();
+  for (const path of [`/d/${d.id}`, `/p/${d.id}`, `/l/${keyOf(anyone)}`]) {
+    html = await page(path);
+    assert.equal(og(html, 'og:title'), 'Quarterly plan', path);
+    assert.equal(og(html, 'og:description'), 'We ship the thing in March.', path);
+    assert.equal(og(html, 'og:image'), `${S.base}/media/00000000000000000000000000000000.png`, path);
+    assert.equal(og(html, 'og:url'), `${S.base}${path}`, path);
+    assert.ok(html.includes('<title>Quarterly plan · Anima Docs</title>'), path);
+  }
+  // Revoked: generic again.
+  await fetch(`${S.base}/api/docs/${d.id}/links/${anyone.id}`, { method: 'DELETE', headers: H({ Cookie: ann }) });
+  html = await page(`/d/${d.id}`);
+  assert.equal(og(html, 'og:title'), 'Anima Docs');
 });
