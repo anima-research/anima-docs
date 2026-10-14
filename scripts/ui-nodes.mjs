@@ -56,7 +56,7 @@ async function signIn(page, name) {
 }
 async function openDoc(page, id, tree) {
   await page.goto(`${ORIGIN}/d/${id}${tree ? `?tree=${tree}` : ''}`);
-  await page.locator('.editor-page .cm-content').waitFor();
+  await page.locator('.editor-page .cm-content').waitFor({ state: 'attached' }); // an HTML page opens in Preview: the editor exists but is not shown
   await page.locator('.sync-veil').waitFor({ state: 'detached' });
   await sleep(200);
 }
@@ -575,6 +575,8 @@ try {
     await openDoc(alice, page.id);
     await alice.waitForFunction(() => document.querySelector('.doc-app')?.classList.contains('html-doc'), null, { timeout: 8000 });
     assert(await alice.locator('.doc-header-right .open-page').isVisible(), 'no Open page link');
+    // An HTML page opens as the page (preview), whatever mode the person last used for documents.
+    await alice.waitForFunction(() => document.querySelector('.doc-app')?.dataset.mode === 'preview', null, { timeout: 8000 });
     await alice.locator('.seg-btn[data-mode=split]').click();
     const frame = alice.locator('.preview-pane iframe.page-frame');
     await frame.waitFor({ timeout: 8000 });
@@ -605,9 +607,13 @@ try {
     const bobCookie = (await bob.context().cookies()).map((c) => `${c.name}=${c.value}`).join('; ');
     assert((await fetch(`${ORIGIN}/api/docs/${page.id}`, { headers: { Cookie: bobCookie } })).status === 404, 'Bob should not see the page yet');
     await openDoc(alice, page.id);
-    await alice.locator('.doc-header-right .icon-btn[aria-label="More document actions"]').click();
-    await alice.getByRole('menuitem', { name: 'Add to a space…' }).click();
-    await alice.locator('dialog.dialog .pick-row', { hasText: 'Paper' }).click();
+    // The left panel: choosing a space shows its pages without leaving this document, and offers to add the document to it.
+    if (!(await alice.evaluate(() => document.querySelector('.doc-app').classList.contains('nav-open')))) await alice.locator('.nav-btn').click();
+    await alice.locator('.doc-nav .nav-space-btn').click();
+    await alice.locator('.nav-space-pop .nav-space-item', { hasText: 'Paper' }).click();
+    await alice.locator('.doc-nav .nav-add-here button', { hasText: 'Add it here' }).waitFor({ timeout: 8000 });
+    assert(alice.url().includes(`/d/${page.id}`), 'choosing a space navigated away');
+    await alice.locator('.doc-nav .nav-add-here button', { hasText: 'Add it here' }).click();
     await alice.locator('.doc-nav .nav-pages .nav-row', { hasText: 'Dashboard' }).waitFor({ timeout: 8000 });
     assert((await alice.locator('.doc-nav .nav-pages .nav-row', { hasText: 'Dashboard' }).locator('.type-chip').textContent()) === 'HTML', 'no HTML chip in the tree');
     // Placement shared it: Bob can read it and gets the page as itself.
@@ -616,8 +622,7 @@ try {
     assert(served.status === 200 && served.text.includes('Numbers'), `Bob /p: ${served.status}`);
     await openDoc(bob, page.id, docId);
     // Through the placement Bob is an editor (derived access caps there), so he keeps his mode; Split shows the page.
-    await bob.waitForFunction(() => document.querySelector('.doc-app')?.classList.contains('html-doc'), null, { timeout: 8000 });
-    await bob.locator('.seg-btn[data-mode=split]').click();
+    await bob.waitForFunction(() => document.querySelector('.doc-app')?.dataset.mode === 'preview', null, { timeout: 8000 });
     await bob.frameLocator('.preview-pane iframe.page-frame').locator('#h', { hasText: 'Numbers' }).waitFor({ timeout: 8000 });
   });
 

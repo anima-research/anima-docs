@@ -239,7 +239,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   const commentsBtn = h('button.btn.ghost.comments-btn', { type: 'button', 'aria-label': 'Show all comments', 'data-tip': 'All comments', onclick: () => toggleList() }, icon('comment', 18), h('span.btn-label', null, 'Comments'), commentsCount);
   const modeBtns = (['edit', 'split', 'preview'] as Mode[]).map((m) => h('button.seg-btn', {
     type: 'button', role: 'radio', 'data-mode': m, 'aria-label': m === 'edit' ? 'Edit mode' : m === 'split' ? 'Split view' : 'Preview mode',
-    'data-tip': m === 'edit' ? 'Edit' : m === 'split' ? 'Split: source and preview' : 'Preview', onclick: () => setMode(m),
+    'data-tip': m === 'edit' ? 'Edit' : m === 'split' ? 'Split: source and preview' : 'Preview', onclick: () => setMode(m, { chosen: true }),
   }, icon(m === 'edit' ? 'pencil' : m === 'split' ? 'columns' : 'eye', 16), h('span.seg-label', null, m === 'edit' ? 'Edit' : m === 'split' ? 'Split' : 'Preview')));
   const modeSwitch = h('div.seg.mode-switch', { role: 'radiogroup', 'aria-label': 'View mode' }, modeBtns);
   const shareBtn = h('button.btn.primary.share-btn', { type: 'button', onclick: () => openShareDialog({ docId, me, title, onChanged: (d) => applyDetail(d) }) }, icon('lock', 16, 'share-lock'), h('span.btn-label', null, 'Share'));
@@ -970,14 +970,18 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     previewCanvas.hidden = html;
     openPageLink.hidden = !html;
     frameKey = '';
-    // Someone who can only read an HTML page gets the page, not its source.
-    if (html && !canWrite() && mode !== 'preview') { setMode('preview'); return; }
+    // An HTML page opens as the page; the source is a click away (Edit or Split). Readers always get the page.
+    if (html && (!canWrite() || !modeChosen) && mode !== 'preview') { setMode('preview'); return; }
     if (mode !== 'edit') renderPreview();
   }
 
-  function setMode(m: Mode) {
+  /** The person chose a mode on this page (an HTML page otherwise opens as the page). */
+  let modeChosen = false;
+  function setMode(m: Mode, opts: { chosen?: boolean } = {}) {
     mode = m;
-    saveMode(m);
+    if (opts.chosen) modeChosen = true;
+    // An HTML page's default (preview) is not remembered as the person's mode for documents.
+    if (opts.chosen || !isHtml()) saveMode(m);
     app.dataset.mode = m;
     for (const b of modeBtns) {
       const on = b.dataset.mode === m;

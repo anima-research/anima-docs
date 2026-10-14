@@ -139,7 +139,7 @@ export class NavPanel {
     // A page in several spaces says so, with a switch to each of the others.
     const others = this.inSpaces.filter((t) => t !== this.tree).map((t) => this.roots.find((r) => r.root === t)).filter((r): r is TreeRoot => !!r);
     const also = others.length
-      ? h('div.nav-space-also', null, h('span.meta', null, this.tree ? 'Also in ' : 'In '), ...others.flatMap((r, i) => [i ? h('span.meta', null, ' · ') : null, h('button.link-btn', { type: 'button', onclick: () => { this.tree = r.root; this.loadCollapsed(); void this.refresh(); this.deps.onOpen(this.deps.docId, r.root); } }, r.title || 'Untitled')]))
+      ? h('div.nav-space-also', null, h('span.meta', null, this.tree ? 'Also in ' : 'In '), ...others.flatMap((r, i) => [i ? h('span.meta', null, ' · ') : null, h('button.link-btn', { type: 'button', onclick: () => { this.tree = r.root; this.loadCollapsed(); void this.refresh(); } }, r.title || 'Untitled')]))
       : null;
     this.spaceEl.replaceChildren(h('div.nav-space-row', null, btn, actions), ...(also ? [also] : []));
   }
@@ -151,9 +151,11 @@ export class NavPanel {
     const fill = () => {
       const q = input.value.trim().toLowerCase();
       const items = this.roots.filter((t) => !q || (t.title || '').toLowerCase().includes(q));
-      list.replaceChildren(...items.map((t) => h('button.nav-space-item', { type: 'button', role: 'option', 'aria-selected': String(t.root === this.tree), class: t.root === this.tree ? 'on' : '', onclick: () => { close(); this.tree = t.root; this.loadCollapsed(); void this.refresh(); this.deps.onOpen(t.root, t.root); } },
+      // Choosing a space shows its pages here; the document you are on stays open (the root row opens the space's own page).
+      list.replaceChildren(...items.map((t) => h('button.nav-space-item', { type: 'button', role: 'option', 'aria-selected': String(t.root === this.tree), class: t.root === this.tree ? 'on' : '', onclick: () => { close(); this.tree = t.root; this.loadCollapsed(); void this.refresh(); } },
         h('span', null, t.title || 'Untitled'), h('span.meta', null, t.role))));
       if (!items.length) list.replaceChildren(h('div.nav-note', null, this.roots.length ? 'No space matches.' : 'A space is a document whose subpages show here, Notion-style. Make one with + above.'));
+      else list.append(h('div.nav-note', null, 'Shows that space’s pages; you stay on this document.'));
     };
     input.addEventListener('input', fill);
     input.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.preventDefault(); close(); } if (e.key === 'Enter') { (list.querySelector('.nav-space-item') as HTMLButtonElement | null)?.click(); } });
@@ -295,7 +297,14 @@ export class NavPanel {
       if (!col) kids.forEach((p, i) => { if (p.child !== id) row(p.child, depth + 1, id, i); });
     };
     row(v.root, 0, null, 0);
-    this.pagesEl.replaceChildren(h('div.nav-tree', { role: 'tree', 'aria-label': `Pages in ${v.title}` }, ...rows));
+    const inSpace = this.deps.docId === v.root || v.placements.some((p) => p.child === this.deps.docId);
+    const me = this.deps.label(this.deps.docId);
+    const addHere = !inSpace && canArrange && me && !me.section
+      ? h('div.nav-add-here', null,
+        h('span', null, h('strong', null, me.title || 'This document'), ' is not in this space.'),
+        h('button.btn.sm.primary', { type: 'button', onclick: () => void this.addCurrentHere() }, 'Add it here'))
+      : null;
+    this.pagesEl.replaceChildren(...(addHere ? [addHere] : []), h('div.nav-tree', { role: 'tree', 'aria-label': `Pages in ${v.title}` }, ...rows));
   }
 
   /** Drag a page onto another (nest it there) or between two (reorder). */
@@ -441,6 +450,18 @@ export class NavPanel {
       await api.place(v.root, parent, d.id);
       await this.refresh();
       this.deps.onOpen(d.id, v.root);
+    } catch (e) { toast(errorMessage(e), { kind: 'error' }); }
+  }
+
+  /** Place the open document under this space's root (drag it elsewhere afterwards). */
+  private async addCurrentHere() {
+    const v = this.view;
+    if (!v) return;
+    try {
+      await api.place(v.root, v.root, this.deps.docId);
+      toast(h('span', null, 'Added to ', h('strong', null, v.title || 'Untitled'), ': everyone who can open the space can open this document now.'), { kind: 'success', timeout: 5000 });
+      await this.refresh();
+      this.deps.onChanged?.();
     } catch (e) { toast(errorMessage(e), { kind: 'error' }); }
   }
 

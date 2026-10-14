@@ -1340,3 +1340,7 @@ dialog.lightbox figcaption { color: #e6e8ec; font: 14px var(--font-ui); }
 .doc-header-right .open-page[hidden] { display: none; }
 .radio-row { display: flex; gap: 18px; flex-wrap: wrap; }
 .type-chip { font-family: var(--font-mono); font-size: 10px; padding: 0 5px; border: 1px solid var(--border); border-radius: 999px; color: var(--text-3); margin-left: 4px; flex: none; }
+
+/* The open document is not in the space shown: offer to place it. */
+.nav-add-here { margin: 4px 6px 8px; padding: 8px 10px; border: 1px dashed var(--border-strong); border-radius: 8px; font: 12.5px/1.4 var(--font-ui); color: var(--text-2); display: flex; flex-direction: column; gap: 6px; }
+.nav-add-here .btn { align-self: flex-start; }
