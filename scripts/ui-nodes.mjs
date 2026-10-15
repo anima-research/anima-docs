@@ -655,6 +655,31 @@ try {
     assert(files.join() === 'data/sim.json,index.md', files.join());
   });
 
+  await step('annotating a page: select text in the rendered page → comment on it; the comment highlights in the page; double-click edits the text', async () => {
+    const page = (await api(alice, 'POST', '/api/docs', { title: 'Memo', type: 'html', content: '<!doctype html><title>Memo</title><body><h1>Memo</h1><p id="p1">We ship the thing in March.</p><p id="p2">Budget is &amp; stays flat.</p></body>' })).json;
+    await openDoc(alice, page.id);
+    const frame = alice.frameLocator('.preview-pane iframe.page-frame');
+    await frame.locator('#p1').waitFor({ timeout: 8000 });
+    // Select "the thing" inside the page and use its Comment button.
+    await frame.locator('#p1').evaluate((p) => { const t = p.firstChild; const r = document.createRange(); r.setStart(t, 8); r.setEnd(t, 17); const s = window.getSelection(); s.removeAllRanges(); s.addRange(r); document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true })); });
+    await frame.locator('.anima-bar button', { hasText: 'Comment' }).click();
+    // The app's composer opened on that text; type and send.
+    const composer = alice.locator('textarea.comment-input').first();
+    await composer.waitFor({ timeout: 8000 });
+    await composer.fill('Is it really March?');
+    await composer.press('Meta+Enter');
+    await alice.waitForFunction(() => window.__anima.nodes.allThreads().some((t) => t.quote === 'the thing' && t.comments[0]?.body === 'Is it really March?'), null, { timeout: 8000 });
+    // The page highlights it.
+    await frame.locator('mark.anima-mark[data-thread]', { hasText: 'the thing' }).waitFor({ timeout: 8000 });
+    // Double-click a text run, edit it, confirm: the source changes.
+    await frame.locator('#p2').dblclick();
+    const edit = frame.locator('.anima-edit');
+    await edit.waitFor({ timeout: 5000 });
+    await alice.keyboard.press('Meta+a'); await alice.keyboard.type('Budget is & grows.'); await alice.keyboard.press('Enter');
+    await alice.locator('dialog.dialog button.btn.primary', { hasText: 'Replace' }).click();
+    await alice.waitForFunction(() => window.__anima.view.state.doc.toString().includes('<p id="p2">Budget is & grows.</p>'), null, { timeout: 8000 });
+  });
+
   await step('home lists the tree', async () => {
     await alice.goto(`${ORIGIN}/`);
     await alice.locator('.home-trees a.tree-card', { hasText: 'Paper' }).waitFor({ timeout: 8000 });

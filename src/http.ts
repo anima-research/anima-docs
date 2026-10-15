@@ -101,6 +101,7 @@ const STATIC: Record<string, [string, string]> = {
   '/style.css': ['style.css', 'text/css; charset=utf-8'],
   '/favicon.svg': ['favicon.svg', 'image/svg+xml'],
   '/og-default.png': ['og-default.png', 'image/png'],
+  '/page-annotate.js': ['page-annotate.js', 'text/javascript; charset=utf-8'],
 };
 
 const staticCache = new Map<string, { mtime: number; raw: Buffer; gz: Buffer | null }>();
@@ -537,7 +538,13 @@ export function createHttp(app: App) {
           res.setHeader('Access-Control-Allow-Origin', '*'); // errors too: the page's scripts see a 404, not a CORS failure
           if (!app.pageKeys.verify(d.id, tm[1])) throw new Fault(404, 'This page address has expired; open the page again.');
           const sub = tm[2] ?? '';
-          if (sub === '') { if (d.type !== 'html') throw new Fault(404, 'Not an HTML page.'); sendPage(req, res, app.nodes.flatten(d.id, { sub: d.ownerSub, admin: false }), d.rev); }
+          if (sub === '') {
+            if (d.type !== 'html') throw new Fault(404, 'Not an HTML page.');
+            let body = app.nodes.flatten(d.id, { sub: d.ownerSub, admin: false });
+            // Framed by the app with ?annotate=1: the annotation layer rides along (selection → comment, highlights, text edits; the app confirms everything).
+            if (url.searchParams.get('annotate') === '1') { const tag = '<script src="/page-annotate.js" data-anima-ui></script>'; body = /<\/body\s*>/i.test(body) ? body.replace(/<\/body\s*>/i, `${tag}\n</body>`) : `${body}\n${tag}`; }
+            sendPage(req, res, body, d.rev);
+          }
           else sendDocFile(req, res, d.id, sub);
           return;
         }
@@ -561,7 +568,7 @@ export function createHttp(app: App) {
           return;
         }
         // The page proper lives under a signed path, so its relative URLs (data, scripts, styles) resolve without a session.
-        res.writeHead(302, { Location: `/p/${d.id}/t/${app.pageKeys.mint(d.id)}/`, 'Cache-Control': 'no-store' });
+        res.writeHead(302, { Location: `/p/${d.id}/t/${app.pageKeys.mint(d.id)}/${url.searchParams.get('annotate') === '1' ? '?annotate=1' : ''}`, 'Cache-Control': 'no-store' });
         res.end();
         return;
       }

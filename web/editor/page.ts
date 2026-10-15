@@ -10,12 +10,13 @@ import { HighlightStyle, syntaxHighlighting, syntaxTree } from '@codemirror/lang
 import { search, searchKeymap } from '@codemirror/search';
 import { tags as t } from '@lezer/highlight';
 
-import { api, ApiError, atLeast, isGuestMe, signalUnauthorized, ROLE_LABEL, ROLE_VERB, type DocDetail, type GeneralAccess, type Me, type NodeType, type Role, type TreeRoot } from '../lib/api';
+import { api, ApiError, atLeast, isGuestMe, signalUnauthorized, ROLE_LABEL, ROLE_VERB, type DocDetail, type GeneralAccess, type Me, type NodeType, type Role, type Thread, type TreeRoot } from '../lib/api';
 import { debounce, h, modKey, altKey, rafThrottle, isMac } from '../lib/dom';
 import { icon } from '../lib/icons';
 import { splitLabel } from '../lib/format';
 import { renderDocument } from '../lib/markdown';
 import { embedOf, wrapByType } from '../../src/mdext';
+import { findQuote } from '../../src/quote';
 import { openFilesDialog } from './files';
 import { searchPeople } from '../lib/people';
 import { avatar, confirmDialog, emptyState, errorMessage, openDialog, openMenu, promptDialog, spinner, toast, type MenuItem } from '../lib/ui';
@@ -857,7 +858,53 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     if (ctx.restoreScroll) requestAnimationFrame(() => { editPane.scrollTop = ctx.restoreScroll!; });
     if (canEdit() && provider.ytext.length === 0) view.focus();
   });
-  cleanups.push(nodes.onThreads((threads, ev) => { session?.onThreads(threads); rail.setThreads(threads, ev); }));
+  cleanups.push(nodes.onThreads((threads, ev) => { session?.onThreads(threads); rail.setThreads(threads, ev); latestThreads = threads; sendHighlights(); }));
+
+  // ------------------------------------------------------------------ the page's annotation layer
+  // The framed page (opaque origin) runs /page-annotate.js and talks over postMessage. It only ever
+  // proposes: a quote to comment on (the composer is the app's), a text replacement (confirmed here),
+  // a thread to open. Nothing from the frame changes the document unconfirmed.
+  let latestThreads: Thread[] = [];
+  const toFrame = (m: Record<string, unknown>) => { try { pageFrame.contentWindow?.postMessage({ anima: 'app', ...m }, '*'); } catch { /* frame not ready */ } };
+  function sendHighlights() {
+    if (!isHtml()) return;
+    toFrame({ type: 'highlights', threads: latestThreads.filter((t) => t.quote && !t.orphaned).map((t) => ({ id: t.id, quote: t.quote, resolved: t.resolved })) });
+  }
+  /** The source range of a quote seen on the page (the view's text, so positions are the editor's). */
+  function sourceRange(m: { quote?: unknown; prefix?: unknown; suffix?: unknown }) {
+    return findQuote(view.state.doc.toString(), String(m.quote ?? ''), typeof m.prefix === 'string' ? m.prefix : null, typeof m.suffix === 'string' ? m.suffix : null, { html: true });
+  }
+  const onFrameMessage = (e: MessageEvent) => {
+    if (e.source !== pageFrame.contentWindow) return;
+    const m = e.data as { anima?: string; type?: string; id?: unknown; quote?: unknown; prefix?: unknown; suffix?: unknown; text?: unknown };
+    if (!m || m.anima !== 'page') return;
+    if (m.type === 'ready') { toFrame({ type: 'config', canComment: atLeast(role, 'commenter') && !guest, canEdit: canEdit() && !suggesting() }); sendHighlights(); return; }
+    if (m.type === 'open-thread') { rail.setActive(String(m.id ?? ''), { scroll: true }); return; }
+    if (m.type === 'comment') {
+      if (!atLeast(role, 'commenter')) return;
+      const r = sourceRange(m);
+      if (!r) { toast('That text is not in the page’s source (the page may produce it when it runs); commenting on the document instead.', { kind: 'info', timeout: 5000 }); void rail.commentOnDocument(); return; }
+      view.dispatch({ selection: { anchor: r.from, head: r.to } });
+      rail.startDraft();
+      return;
+    }
+    if (m.type === 'edit') {
+      if (!canEdit() || suggesting()) { toast('Switch to Editing to change the page’s text.', { kind: 'info' }); return; }
+      const next = String(m.text ?? '');
+      const r = sourceRange(m);
+      const current = r ? view.state.doc.sliceString(r.from, r.to) : '';
+      if (!r || /<[^>]+>/.test(current)) { toast('That text is not a single run in the page’s source; edit it in Source.', { kind: 'info', timeout: 5000 }); return; }
+      void confirmDialog({ title: 'Change the page’s text?', message: h('span', null, 'Replace ', h('q', null, current.length > 160 ? `${current.slice(0, 160)}…` : current), ' with ', h('q', null, next.length > 160 ? `${next.slice(0, 160)}…` : next), '.'), confirmLabel: 'Replace' }).then((ok) => {
+        if (!ok) { frameKey = ''; renderPreview(); return; } // the page reverts
+        const again = sourceRange(m); // the source may have moved while the dialog was up
+        if (!again) { toast('The text changed meanwhile; edit it in Source.', { kind: 'info' }); return; }
+        view.dispatch({ changes: { from: again.from, to: again.to, insert: next }, userEvent: 'input.page' });
+        toast('Changed.', { kind: 'success', timeout: 2000 });
+      });
+    }
+  };
+  window.addEventListener('message', onFrameMessage);
+  cleanups.push(() => window.removeEventListener('message', onFrameMessage));
   provider.on('meta', (d) => applyDetail(d));
   provider.on('role', (r) => applyRole(r, true));
   // A guest renamed (here or in another tab): show it, and re-announce so others see the new name.
@@ -949,7 +996,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
       // The page is served from what is saved; edits sync within milliseconds, so a reload after a pause shows them.
       const t = binding.current.text;
       const key = `${t.length}:${t.slice(0, 2000)}:${t.slice(-2000)}`;
-      if (key !== frameKey) { frameKey = key; pageFrame.src = `/p/${docId}?raw=1&v=${Date.now().toString(36)}`; }
+      if (key !== frameKey) { frameKey = key; pageFrame.src = `/p/${docId}?raw=1&annotate=1&v=${Date.now().toString(36)}`; }
       return;
     }
     const text = renderSource(binding.current);
