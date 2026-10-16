@@ -680,6 +680,25 @@ try {
     await alice.waitForFunction(() => window.__anima.view.state.doc.toString().includes('<p id="p2">Budget is & grows.</p>'), null, { timeout: 8000 });
   });
 
+  await step('a document with an anyone-with-the-link link shows that link as its address, and the link address reloads to the document', async () => {
+    const d = (await api(alice, 'POST', '/api/docs', { title: 'Open notes', content: '# Open notes\n\nShared with the world.\n' })).json;
+    const link = (await api(alice, 'POST', `/api/docs/${d.id}/links`, { role: 'viewer', who: 'anyone' })).json;
+    const key = link.url.split('/l/')[1];
+    await openDoc(alice, d.id);
+    await alice.waitForFunction((k) => location.pathname === `/l/${k}`, key, { timeout: 8000 });
+    await alice.locator('.editor-page .cm-content').waitFor({ state: 'attached' });
+    // Reloading the shareable address lands on the document, address unchanged.
+    await alice.goto(`${ORIGIN}/l/${key}`);
+    await alice.locator('.editor-page .cm-content').waitFor({ state: 'attached', timeout: 10000 });
+    await alice.waitForFunction((k) => location.pathname === `/l/${k}`, key, { timeout: 8000 });
+    assert((await alice.locator('.doc-title').inputValue()) === 'Open notes', 'wrong document');
+    // Without such a link the address stays the document's own.
+    const priv = (await api(alice, 'POST', '/api/docs', { title: 'Private notes', content: 'x' })).json;
+    await openDoc(alice, priv.id);
+    await sleep(500);
+    assert(alice.url().endsWith(`/d/${priv.id}`), `private doc address changed: ${alice.url()}`);
+  });
+
   await step('home lists the tree', async () => {
     await alice.goto(`${ORIGIN}/`);
     await alice.locator('.home-trees a.tree-card', { hasText: 'Paper' }).waitFor({ timeout: 8000 });
