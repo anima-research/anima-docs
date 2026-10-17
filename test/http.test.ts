@@ -270,6 +270,11 @@ test('page files: attached files are served next to the page under a signed path
   const big = '<!doctype html>\n' + Array.from({ length: 400 }, (_, i) => `<p>line ${i}</p>`).join('\n');
   const rewrite = await op('edit_document', { document: page.id, edits: [{ replace_all_content: big }] });
   assert.ok(rewrite.length < 2000 && rewrite.includes('more lines'), `rewrite report ${rewrite.length} chars`);
+  // Handing an agent the page says what it is: list_documents tags it, open_link explains the rendered address, the companion and the files.
+  assert.ok((await op('list_documents', {})).includes(`“Sim” [HTML page]`), 'list_documents tags html pages');
+  const shareLink = await (await fetch(`${S.base}/api/docs/${page.id}/links`, { method: 'POST', headers: H({ Cookie: ann }), body: JSON.stringify({ role: 'viewer', who: 'anyone' }) })).json();
+  const opened = await op('open_link', { link: shareLink.url });
+  assert.ok(opened.includes(`rendered at ${S.base}/p/${page.id}`) && opened.includes('markdown companion (index.md)') && opened.includes('attached file'), opened);
   // A companion given at creation, and a markdown document is never a page.
   const made = await op('create_document', { title: 'Report', type: 'html', content: '<h1>R</h1>', companion: 'A report.' });
   assert.ok(made.includes('companion index.md attached'), made);

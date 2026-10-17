@@ -42,6 +42,19 @@ function ago(ms: number): string {
   return `${Math.round(s / 86400)}d ago`;
 }
 
+/** What kind of document this is and how to approach it — for answers that hand an agent a document. */
+function describeKind(app: App, d: { id: string; title: string; type: string }): string {
+  if (d.type === 'html') {
+    const files = app.files.list(d.id);
+    const companion = files.some((f) => f.path === COMPANION);
+    const others = files.filter((f) => f.path !== COMPANION).length;
+    return ` It is an HTML page, rendered at ${app.config.origin}/p/${d.id}; read_document returns ${companion ? 'its markdown companion (index.md)' : 'its source (it has no index.md companion yet)'}${others ? `; ${others} attached file${others === 1 ? '' : 's'} (list_files, read_file)` : ''}.`;
+  }
+  if (d.type === 'latex') return ' It is a LaTeX node (each paragraph renders as a display formula).';
+  if (d.type === 'text') return ' It is a plain-text node (rendered verbatim).';
+  return '';
+}
+
 function need(args: Record<string, any>, key: string): string {
   const v = args[key];
   if (typeof v !== 'string' || !v.trim()) throw new Fault(400, `${key} is required.`);
@@ -244,7 +257,7 @@ export const TOOLS: ToolDef[] = [
       const r = app.docs.redeemLink(key, actor);
       const sug = app.comments.openSuggestionCount(r.doc.id);
       const open = app.comments.openCount(r.doc.id) - sug;
-      return text(`Opened “${r.doc.title}” (${r.doc.id}); you are ${r.role === 'owner' ? 'its owner' : r.role === 'editor' ? 'an editor' : `a ${r.role}`}. Owner ${app.principals.label(r.doc.ownerSub)}; ${open} open comment${open === 1 ? '' : 's'}${sug ? `, ${sug} open suggestion${sug === 1 ? '' : 's'}` : ''}. Read it with read_document {"document":"${r.doc.id}"}.${r.role === 'commenter' ? ' You can comment and suggest edits (suggest_edit).' : ''}`);
+      return text(`Opened “${r.doc.title}” (${r.doc.id}); you are ${r.role === 'owner' ? 'its owner' : r.role === 'editor' ? 'an editor' : `a ${r.role}`}. Owner ${app.principals.label(r.doc.ownerSub)}; ${open} open comment${open === 1 ? '' : 's'}${sug ? `, ${sug} open suggestion${sug === 1 ? '' : 's'}` : ''}. Read it with read_document {"document":"${r.doc.id}"}.${describeKind(app, r.doc)}${r.role === 'commenter' ? ' You can comment and suggest edits (suggest_edit).' : ''}`);
     },
   },
   {
@@ -261,7 +274,7 @@ export const TOOLS: ToolDef[] = [
       return text(list.map((d) => {
         const sug = app.comments.openSuggestionCount(d.id);
         const open = app.comments.openCount(d.id) - sug;
-        return `${d.id}  “${d.title}” — you: ${d.role}; owner ${app.principals.label(d.ownerSub)}; updated ${ago(d.updatedAt)}; rev ${d.rev}${open ? `; ${open} open comment${open === 1 ? '' : 's'}` : ''}${sug ? `; ${sug} open suggestion${sug === 1 ? '' : 's'}` : ''}`;
+        return `${d.id}  “${d.title}”${d.type !== 'markdown' ? ` [${d.type === 'html' ? 'HTML page' : d.type}]` : ''} — you: ${d.role}; owner ${app.principals.label(d.ownerSub)}; updated ${ago(d.updatedAt)}; rev ${d.rev}${open ? `; ${open} open comment${open === 1 ? '' : 's'}` : ''}${sug ? `; ${sug} open suggestion${sug === 1 ? '' : 's'}` : ''}`;
       }).join('\n'));
     },
   },
