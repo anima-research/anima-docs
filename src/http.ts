@@ -21,6 +21,7 @@ import { atLeast } from './documents.js';
 import { Media, inlineMime } from './media.js';
 import { COMPANION, isTextMime } from './files.js';
 import { excerpt } from './wiki.js';
+import { agentNote, agentsMarkdown, mcplUrl } from './agents-md.js';
 import { createReadStream } from 'node:fs';
 
 const PUBLIC_DIR = resolve(new URL('.', import.meta.url).pathname, '..', 'public');
@@ -234,7 +235,7 @@ export function createHttp(app: App) {
   // Crawlers (Slack, Discord, X, iMessage) fetch a link without a session and read Open Graph tags.
   // A document's title and excerpt go out only when anyone could read it anyway: a public wiki, an
   // active anyone-with-the-link link, or the share link itself. Everything else gets a generic card.
-  interface LinkMeta { title: string; description: string; url: string; image?: string; type?: string }
+  interface LinkMeta { title: string; description: string; url: string; image?: string; type?: string; docId?: string }
   const attr = (v: string) => v.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]!));
   const GENERIC = { title: 'Anima Docs', description: 'Documents, pages and wikis that people and agents write together.' };
   function shell(meta: LinkMeta): string {
@@ -246,8 +247,11 @@ export function createHttp(app: App) {
       `<meta property="og:title" content="${attr(meta.title)}">`, `<meta property="og:description" content="${attr(meta.description)}">`,
       `<meta property="og:url" content="${attr(meta.url)}">`, `<meta property="og:image" content="${attr(image)}">`,
       `<meta name="twitter:card" content="summary_large_image">`, `<meta name="twitter:title" content="${attr(meta.title)}">`, `<meta name="twitter:description" content="${attr(meta.description)}">`, `<meta name="twitter:image" content="${attr(image)}">`,
+      `<meta name="mcpl" content="${attr(mcplUrl(app.config.origin))}">`, `<link rel="mcpl" href="${attr(mcplUrl(app.config.origin))}">`, `<link rel="help" type="text/markdown" href="${attr(`${app.config.origin}/agents.md`)}">`,
     ].join('\n  ');
-    return html.replace(/<title>[^<]*<\/title>/, `<title>${attr(meta.title === 'Anima Docs' ? meta.title : `${meta.title} · Anima Docs`)}</title>`).replace('</head>', `  ${tags}\n</head>`);
+    // Readers without JavaScript — agents fetching the address, text extractors — get the pointer to the door.
+    const note = `<noscript><div class="agents-note">${agentNote(app.config.origin, meta.docId).split('\n').map((l) => `<p>${attr(l)}</p>`).join('')}</div></noscript>`;
+    return html.replace(/<title>[^<]*<\/title>/, `<title>${attr(meta.title === 'Anima Docs' ? meta.title : `${meta.title} · Anima Docs`)}</title>`).replace('</head>', `  ${tags}\n</head>`).replace('</body>', `${note}\n</body>`);
   }
   /** Readable by anyone who has the address: a public wiki, or an active anyone-with-the-link link. */
   function openToAnyone(docId: string): boolean {
@@ -258,10 +262,26 @@ export function createHttp(app: App) {
   }
   /** The card for a document: its title and an excerpt when it is open to anyone (or `reveal` says the address itself is the secret), else generic. */
   function docMeta(d: { id: string; title: string; type: string }, url: string, reveal = false): LinkMeta {
-    if (!reveal && !openToAnyone(d.id)) return { ...GENERIC, title: 'Anima Docs', description: 'A document on Anima Docs. Sign in to open it.', url };
+    if (!reveal && !openToAnyone(d.id)) return { ...GENERIC, title: 'Anima Docs', description: 'A document on Anima Docs. Sign in to open it.', url, docId: d.id };
     const text = (d.type === 'html' ? app.files.text(d.id, COMPANION) : null) ?? app.docs.text(d.id);
     const first = /!\[[^\]]*\]\((\/media\/[0-9a-f]{32}\.(?:png|jpg|gif|webp))\)/.exec(text)?.[1];
-    return { title: d.title || 'Untitled', description: excerpt(text) || (d.type === 'html' ? 'An HTML page on Anima Docs.' : 'A document on Anima Docs.'), url, type: 'article', image: first ? `${app.config.origin}${first}` : undefined };
+    return { title: d.title || 'Untitled', description: excerpt(text) || (d.type === 'html' ? 'An HTML page on Anima Docs.' : 'A document on Anima Docs.'), url, type: 'article', image: first ? `${app.config.origin}${first}` : undefined, docId: d.id };
+  }
+  /** The request asks for text rather than the app: Accept prefers markdown/plain text, or ?format=md. */
+  const wantsMarkdown = (req: IncomingMessage, url: URL) => {
+    if (url.searchParams.get('format') === 'md') return true;
+    const a = String(req.headers.accept ?? '');
+    return /text\/(markdown|plain)/.test(a) && !/text\/html/.test(a);
+  };
+  /** What an agent gets at a document's address: the pointer to the door, and the text when anyone may read it. */
+  function sendAgentMarkdown(res: ServerResponse, d: { id: string; title: string; type: string } | null, reveal: boolean) {
+    const parts = [agentNote(app.config.origin, d?.id)];
+    if (d && (reveal || openToAnyone(d.id))) {
+      const text = (d.type === 'html' ? app.files.text(d.id, COMPANION) : null) ?? (d.type === 'html' ? null : app.nodes.flatten(d.id, { sub: '', admin: true }));
+      parts.push(`---\n\n# ${d.title || 'Untitled'}\n`, text ?? `(An HTML page with no markdown companion. read_document {"document": "${d.id}", "raw": true} returns its source over MCPL.)`);
+    } else if (d) parts.push('---\n\nThis document is not readable without signing in. Connect over MCPL with your identity, or ask whoever sent the address for a share link.');
+    res.writeHead(200, { 'Content-Type': 'text/markdown; charset=utf-8', 'Cache-Control': 'no-store', Vary: 'Accept' });
+    res.end(parts.join('\n\n'));
   }
   const sendShell = (res: ServerResponse, meta: LinkMeta) => { res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(shell(meta)); };
 
@@ -301,6 +321,8 @@ export function createHttp(app: App) {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('X-Frame-Options', 'DENY');
+    // Discovery for agents handed an address here: the MCPL door and the guide, on every response.
+    res.setHeader('Link', `<${mcplUrl(app.config.origin)}>; rel="mcpl", <${app.config.origin}/agents.md>; rel="help"`);
     const wsOrigin = app.config.origin.replace(/^http/, 'ws');
     res.setHeader('Content-Security-Policy', `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data: blob:; media-src 'self' https: blob:; frame-src 'self' https://www.youtube-nocookie.com https://player.vimeo.com; connect-src 'self' ${wsOrigin}; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`);
     if (production) res.setHeader('Strict-Transport-Security', 'max-age=31536000');
@@ -317,6 +339,13 @@ export function createHttp(app: App) {
       const method = req.method ?? 'GET';
 
       if (path === '/health') { app.db.prepare('SELECT 1').get(); send(200, { ok: true }); return; }
+      if ((path === '/.well-known/mcpl' || path === '/.well-known/mcpl.json') && method === 'GET') {
+        send(200, { service: 'Anima Docs', origin: app.config.origin, mcpl: mcplUrl(app.config.origin), wss: `${app.config.origin.replace(/^http/, 'ws')}/mcpl`, spec: 'MCPL 0.5; mcpl:// per RFC-004',
+          identity: { issuer: 'https://id.animalabs.ai', audience: app.config.audience, scopes: app.config.requiredScopes, guide: 'https://id.animalabs.ai/agents.md' },
+          guide: `${app.config.origin}/agents.md`, http: `${app.config.origin}/api/operations/<tool>`, featureSets: ['docs.read', 'docs.write', 'docs.comment', 'docs.share', 'docs.watch'] }, 'application/json; charset=utf-8', { 'Cache-Control': 'public, max-age=3600' });
+        return;
+      }
+      if ((path === '/agents.md' || path === '/llms.txt') && method === 'GET') { send(200, agentsMarkdown(app.config.origin), path === '/llms.txt' ? 'text/plain; charset=utf-8' : 'text/markdown; charset=utf-8', { 'Cache-Control': 'public, max-age=3600' }); return; }
       const wm = /^\/w\/([a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?)(\/.*)?$/.exec(path);
       if (wm && (method === 'GET' || method === 'HEAD')) {
         const root = app.trees.rootBySlug(wm[1]);
@@ -550,6 +579,7 @@ export function createHttp(app: App) {
         }
         // A person navigating to the short link gets the app around the page (title, share, comments, edit);
         // frames, agents, non-browsers and ?raw=1 get the page itself (redirected to its signed path below).
+        if ((rest === undefined || rest === '') && wantsMarkdown(req, url) && !(actor && app.files.get(d.id, COMPANION) && app.docs.role(d.id, actor))) { sendAgentMarkdown(res, d, false); return; }
         const browserNav = method === 'GET' && (rest === undefined || rest === '') && req.headers['sec-fetch-dest'] === 'document' && String(req.headers.accept ?? '').includes('text/html') && !url.searchParams.has('raw') && !url.searchParams.has('format');
         if (browserNav) { sendShell(res, docMeta(d, `${app.config.origin}/p/${d.id}`)); return; }
         const role = actor ? app.docs.role(d.id, actor) : null;
@@ -868,6 +898,7 @@ export function createHttp(app: App) {
       const dmatch = /^\/d\/([A-Za-z0-9]+)$/.exec(path), lmatch = /^\/l\/([A-Za-z0-9_-]{20,40})$/.exec(path);
       if (dmatch) {
         const d = app.docs.get(dmatch[1]);
+        if (wantsMarkdown(req, url)) { sendAgentMarkdown(res, d ?? null, false); return; }
         sendShell(res, d ? docMeta(d, `${app.config.origin}/d/${d.id}`) : { ...GENERIC, url: `${app.config.origin}${path}` });
         return;
       }
@@ -875,6 +906,7 @@ export function createHttp(app: App) {
         // The share link is itself the secret: an active anyone-link reveals the card; a members-only or dead link does not.
         const peek = app.docs.peekLink(lmatch[1]);
         const d = peek.active && peek.docId ? app.docs.get(peek.docId) : null;
+        if (wantsMarkdown(req, url)) { sendAgentMarkdown(res, d, !!d); return; }
         sendShell(res, d ? docMeta(d, `${app.config.origin}${path}`, true) : { ...GENERIC, url: `${app.config.origin}${path}` });
         return;
       }

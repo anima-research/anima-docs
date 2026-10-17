@@ -307,3 +307,37 @@ test('link previews: Open Graph cards reveal a document only when anyone could r
   html = await page(`/d/${d.id}`);
   assert.equal(og(html, 'og:title'), 'Anima Docs');
 });
+
+test('discovery for agents: well-known, Link headers, meta, noscript note, agents.md, and markdown answers at document addresses', async () => {
+  const ann = await signIn('Ann');
+  const wk = await fetch(`${S.base}/.well-known/mcpl`);
+  assert.equal(wk.status, 200);
+  const info = await wk.json();
+  assert.equal(info.mcpl, `${S.base.replace(/^http:\/\//, 'ws://')}/mcpl`.replace(/^ws:\/\//, 'ws://'));
+  assert.equal(info.identity.audience, 'docs'); assert.ok(info.guide.endsWith('/agents.md'));
+  const guide = await fetch(`${S.base}/agents.md`);
+  assert.equal(guide.headers.get('content-type'), 'text/markdown; charset=utf-8');
+  const guideText = await guide.text();
+  assert.ok(guideText.includes('id.animalabs.ai/agents.md') && guideText.includes('read_document') && guideText.includes('/mcpl'));
+  assert.equal((await fetch(`${S.base}/llms.txt`)).headers.get('content-type'), 'text/plain; charset=utf-8');
+  const d = await (await fetch(`${S.base}/api/docs`, { method: 'POST', headers: H({ Cookie: ann }), body: JSON.stringify({ title: 'Plan', content: '# Plan\n\nShip in March.\n' }) })).json();
+  // The shell: Link header, meta/link tags, and a noscript note naming the document.
+  const shell = await fetch(`${S.base}/d/${d.id}`);
+  assert.match(shell.headers.get('link') ?? '', /rel="mcpl"/);
+  const html = await shell.text();
+  assert.ok(html.includes('<link rel="mcpl"') && html.includes('<meta name="mcpl"'), 'mcpl link/meta');
+  assert.ok(html.includes('<noscript>') && html.includes(`document ${d.id}`) && html.includes('agents.md'), 'noscript note');
+  assert.ok(!html.includes('Ship in March'), 'private text not in the shell');
+  // Markdown for agents: the pointer, and the text only once anyone may read it.
+  const md1 = await fetch(`${S.base}/d/${d.id}`, { headers: { Accept: 'text/markdown' } });
+  assert.equal(md1.headers.get('content-type'), 'text/markdown; charset=utf-8');
+  const t1 = await md1.text();
+  assert.ok(t1.includes('/mcpl') && t1.includes(`"${d.id}"`) && t1.includes('not readable without signing in') && !t1.includes('Ship in March'), t1);
+  const link = await (await fetch(`${S.base}/api/docs/${d.id}/links`, { method: 'POST', headers: H({ Cookie: ann }), body: JSON.stringify({ role: 'viewer', who: 'anyone' }) })).json();
+  const t2 = await (await fetch(`${S.base}/d/${d.id}?format=md`)).text();
+  assert.ok(t2.includes('# Plan') && t2.includes('Ship in March'), t2);
+  const t3 = await (await fetch(`${S.base}${new URL(link.url).pathname}`, { headers: { Accept: 'text/plain' } })).text();
+  assert.ok(t3.includes('Ship in March'), 'share link answers markdown');
+  // Browsers (Accept text/html) still get the app.
+  assert.ok((await (await fetch(`${S.base}/d/${d.id}`, { headers: { Accept: 'text/html,*/*' } })).text()).includes('<div id="app"'));
+});

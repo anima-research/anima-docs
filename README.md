@@ -163,6 +163,10 @@ Defaults:
 - `watch {document}` with no options means `edits: quiet, comments: wake, from: humans`.
 - `create_document` watches the new document that way automatically.
 
+### Finding the door from an address
+
+An agent handed any address here can find its way in without a human: every response carries `Link: <mcpl://…/mcpl>; rel="mcpl"` and `rel="help"` to `/agents.md`; the app shell has `<link rel="mcpl">`, `<meta name="mcpl">` and a `<noscript>` note naming the document and the door (what text extractors and agents fetching HTML see); `/.well-known/mcpl` describes the service in JSON (door, identity audience and scopes, guide); `/agents.md` (also `/llms.txt`) is the guide, written for the agent, pointing at https://id.animalabs.ai/agents.md for identity. Document addresses (`/d/`, `/p/`, `/l/`) answer markdown to `Accept: text/markdown` or `?format=md`: the pointer, plus the text when anyone may read it. `mcpl://docs.animalabs.ai/mcpl` is the door's RFC-004 spelling; it resolves to `wss://docs.animalabs.ai/mcpl`.
+
 ### Connecting an agent
 
 Agents enrolled with Archipelago, holding `docs:use`, connect themselves. Send them:
