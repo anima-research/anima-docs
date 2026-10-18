@@ -10,7 +10,7 @@ import { HighlightStyle, syntaxHighlighting, syntaxTree } from '@codemirror/lang
 import { search, searchKeymap } from '@codemirror/search';
 import { tags as t } from '@lezer/highlight';
 
-import { api, ApiError, atLeast, isGuestMe, signalUnauthorized, ROLE_LABEL, ROLE_VERB, type DocDetail, type GeneralAccess, type Me, type NodeType, type Role, type Thread, type TreeRoot } from '../lib/api';
+import { api, ApiError, atLeast, isGuestMe, signalUnauthorized, ROLE_LABEL, ROLE_VERB, type DocDetail, type GeneralAccess, type LinkPeek, type Me, type NodeType, type Role, type Thread, type TreeRoot } from '../lib/api';
 import { debounce, h, modKey, altKey, rafThrottle, isMac } from '../lib/dom';
 import { icon } from '../lib/icons';
 import { splitLabel } from '../lib/format';
@@ -22,7 +22,7 @@ import { searchPeople } from '../lib/people';
 import { avatar, confirmDialog, emptyState, errorMessage, openDialog, openMenu, promptDialog, spinner, toast, type MenuItem } from '../lib/ui';
 import { navigate } from '../router';
 import { guestSignInButton, userMenuButton } from '../pages/shell';
-import { onMeChanged, startSignIn, updateMe } from '../lib/session';
+import { linkKeyFor, onMeChanged, startSignIn, updateMe } from '../lib/session';
 import { DocProvider, type ConnStatus } from './provider';
 import { remoteCursors } from './cursors';
 import { livePreview } from './livepreview';
@@ -247,7 +247,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   const shareBtn = h('button.btn.primary.share-btn', { type: 'button', onclick: () => openShareDialog({ docId, me, title, onChanged: (d) => applyDetail(d) }) }, icon('lock', 16, 'share-lock'), h('span.btn-label', null, 'Share'));
   const shareSlot = guest ? guestSignInButton() : shareBtn;
   /** HTML pages: the rendered page in its own tab. */
-  const openPageLink = h('a.btn.ghost.sm.open-page', { href: `/p/${docId}?raw=1`, target: '_blank', rel: 'noopener', hidden: true, 'data-tip': 'Open the rendered page in a new tab' }, icon('external', 16), h('span.tb-text', null, 'Open page'));
+  const openPageLink = h('a.btn.ghost.sm.open-page', { href: `/p/${docId}?raw=1`, target: '_blank', rel: 'noopener', hidden: true, 'aria-label': 'Open page', 'data-tip': 'Open the rendered page in a new tab' }, icon('external', 16), h('span.tb-text', null, 'Open page'));
   const moreBtn: HTMLButtonElement = h('button.icon-btn', { type: 'button', 'aria-label': 'More document actions', 'aria-haspopup': 'menu', 'data-tip': 'More', onclick: () => openMenu(moreBtn, moreItems(), { align: 'end' }) }, icon('more', 20));
 
   const header = h('header.doc-header', null,
@@ -708,7 +708,9 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     editTools.hidden = !canWrite();
     imageTool.hidden = sug;
     readNotice.hidden = canWrite() || role === 'commenter';
-    readNotice.replaceChildren(icon('eye', 16), role === 'commenter' ? 'Connecting…' : 'View only. Ask the owner for access to comment or edit.');
+    readNotice.replaceChildren(icon('eye', 16), ...(role === 'commenter' ? ['Connecting…'] : ['View only.', h('span.tb-notice-more', null, ' Ask the owner for access to comment or edit.')]));
+    // Read-only: the toolbar holds only that notice (phones drop the row; the header's pill says "Viewing").
+    app.classList.toggle('view-only', !readNotice.hidden);
     toolbar.classList.toggle('reader', !canWrite());
     writeModeBtn.hidden = !atLeast(role, 'commenter');
     writeModeBtn.disabled = !canEdit();
@@ -792,12 +794,20 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   }
   let wantSuggest = false;
 
-  /** The anyone-with-the-link address, when the document has one: the address people see and copy, so what they share works for everyone. */
+  /**
+   * The address people see and copy, when there is one that works for others: for editors the document's
+   * anyone-with-the-link link; for everyone else (guests included) the share link this browser came through.
+   */
   let shareUrl: string | null = null;
+  /** shareUrl opens for anyone (an "anyone" link), not only for Archipelago members. */
+  let shareForAnyone = false;
   let shareUrlSeq = 0;
+  /** The link this browser came through, looked up once per page (the socket's hello repeats the detail). */
+  let keyPeek: { key: string; peek: Promise<LinkPeek> } | null = null;
   async function syncShareUrl() {
     const seq = ++shareUrlSeq;
     let next: string | null = null;
+    let forAnyone = true;
     if (publicLink && !guest && atLeast(role, 'editor')) {
       try {
         const r = await api.links(docId);
@@ -807,7 +817,19 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
         next = pick?.url ?? null;
       } catch { next = null; }
     }
+    // A reader who came in through a link keeps it as the address: their /d/<id> opens only for them.
+    const key = next ? null : linkKeyFor(docId);
+    if (key) {
+      try {
+        if (!keyPeek || keyPeek.key !== key) keyPeek = { key, peek: api.peekLink(key) };
+        const peek = await keyPeek.peek;
+        if (seq !== shareUrlSeq) return;
+        if (peek.active) { next = `${location.origin}/l/${key}`; forAnyone = peek.audience === 'anyone'; }
+      } catch { keyPeek = null; /* the document's own address, then */ }
+    }
+    if (seq !== shareUrlSeq) return;
     shareUrl = next;
+    shareForAnyone = !!next && forAnyone;
     // The address bar shows the shareable link while this document is open at its own address.
     if (shareUrl && (location.pathname === `/d/${docId}` || location.pathname === `/p/${docId}`)) {
       try { window.history.replaceState(window.history.state, '', `${new URL(shareUrl, location.origin).pathname}${location.search}`); } catch { /* ignore */ }
@@ -888,6 +910,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   // a thread to open. Nothing from the frame changes the document unconfirmed.
   let latestThreads: Thread[] = [];
   const toFrame = (m: Record<string, unknown>) => { try { pageFrame.contentWindow?.postMessage({ anima: 'app', ...m }, '*'); } catch { /* frame not ready */ } };
+  const sendFrameConfig = () => toFrame({ type: 'config', canComment: atLeast(role, 'commenter') && !guest, canEdit: canEdit() && !suggesting() });
   function sendHighlights() {
     if (!isHtml()) return;
     toFrame({ type: 'highlights', threads: latestThreads.filter((t) => t.quote && !t.orphaned).map((t) => ({ id: t.id, quote: t.quote, resolved: t.resolved })) });
@@ -900,7 +923,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     if (e.source !== pageFrame.contentWindow) return;
     const m = e.data as { anima?: string; type?: string; id?: unknown; quote?: unknown; prefix?: unknown; suffix?: unknown; text?: unknown };
     if (!m || m.anima !== 'page') return;
-    if (m.type === 'ready') { toFrame({ type: 'config', canComment: atLeast(role, 'commenter') && !guest, canEdit: canEdit() && !suggesting() }); sendHighlights(); return; }
+    if (m.type === 'ready') { sendFrameConfig(); sendHighlights(); return; }
     if (m.type === 'open-thread') { rail.setActive(String(m.id ?? ''), { scroll: true }); return; }
     if (m.type === 'comment') {
       if (!atLeast(role, 'commenter')) return;
@@ -1011,14 +1034,26 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     }
     return wrapByType(text, typeOf(docId));
   }
+  /** What the framed page was loaded from: a key over the text ('' = not loaded). */
   let frameKey = '';
+  /** The frame was loaded before the first sync, from what the server had saved: the synced text becomes its key. */
+  let frameAdopts = false;
+  const loadFrame = () => { pageFrame.src = `/p/${docId}?raw=1&annotate=1&v=${Date.now().toString(36)}`; };
   const renderPreview = () => {
     if (mode === 'edit') return;
     if (isHtml()) {
       // The page is served from what is saved; edits sync within milliseconds, so a reload after a pause shows them.
+      // Before the first sync the editor holds nothing yet: load what is saved now, and when the sync arrives adopt
+      // its text as the frame's key instead of loading the page a second time (two copies of a large page at once
+      // are enough for a phone to kill the tab).
+      if (!provider.synced) {
+        if (!frameKey) { frameKey = 'unsynced'; frameAdopts = true; loadFrame(); }
+        return;
+      }
       const t = binding.current.text;
       const key = `${t.length}:${t.slice(0, 2000)}:${t.slice(-2000)}`;
-      if (key !== frameKey) { frameKey = key; pageFrame.src = `/p/${docId}?raw=1&annotate=1&v=${Date.now().toString(36)}`; }
+      if (frameAdopts) { frameAdopts = false; frameKey = key; return; }
+      if (key !== frameKey) { frameKey = key; loadFrame(); }
       return;
     }
     const text = renderSource(binding.current);
@@ -1039,7 +1074,9 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     pageFrame.hidden = !html;
     previewCanvas.hidden = html;
     openPageLink.hidden = !html;
-    frameKey = '';
+    // A document that stops being a page drops its frame. One that is a page keeps it: a role change (the socket
+    // confirming a reader's role, say) only changes what the annotation layer may do, not the page.
+    if (!html) { frameKey = ''; frameAdopts = false; } else sendFrameConfig();
     // An HTML page opens as the page; the source is a click away (Edit or Split). Readers always get the page.
     if (html && (!canWrite() || !modeChosen) && mode !== 'preview') { setMode('preview'); return; }
     if (mode !== 'edit') renderPreview();
@@ -1121,10 +1158,10 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     if (atLeast(role, 'commenter') && !guest) items.push({ label: 'Ping an agent…', icon: 'bell', onSelect: () => pingAgent() });
     items.push('separator',
       { label: 'Download as Markdown (.md)', icon: 'download', onSelect: () => { const a = h('a', { href: api.exportUrl(docId), download: '' }); document.body.append(a); a.click(); a.remove(); } },
-      // A guest's /d/ address opens only for them: there's nothing useful to copy.
-      ...(guest ? [] : [{ label: shareUrl ? 'Copy link (works for anyone)' : 'Copy link', icon: 'link', onSelect: () => { const url = shareUrl ?? `${location.origin}/d/${docId}`; void navigator.clipboard.writeText(url).then(() => toast('Link copied', { kind: 'success', timeout: 2000 }), () => toast(url)); } }]));
+      // A guest's /d/ address opens only for them: they copy the link they came through, or nothing.
+      ...(guest && !shareUrl ? [] : [{ label: shareForAnyone ? 'Copy link (works for anyone)' : 'Copy link', icon: 'link', onSelect: () => { const url = shareUrl ?? `${location.origin}/d/${docId}`; void navigator.clipboard.writeText(url).then(() => toast('Link copied', { kind: 'success', timeout: 2000 }), () => toast(url)); } }]));
     if (!guest) items.push({ label: 'Attached files…', icon: 'file', onSelect: () => openFilesDialog(docId, canEdit(), isHtml()) });
-    if (isHtml() && !guest) items.push({ label: shareUrl ? 'Copy page link (works for anyone)' : 'Copy page link', icon: 'link', onSelect: () => { const url = shareUrl ?? `${location.origin}/p/${docId}`; void navigator.clipboard.writeText(url).then(() => toast('Page link copied', { kind: 'success', timeout: 2000 }), () => toast(url)); } });
+    if (isHtml() && !guest) items.push({ label: shareForAnyone ? 'Copy page link (works for anyone)' : 'Copy page link', icon: 'link', onSelect: () => { const url = shareUrl ?? `${location.origin}/p/${docId}`; void navigator.clipboard.writeText(url).then(() => toast('Page link copied', { kind: 'success', timeout: 2000 }), () => toast(url)); } });
     if (canEdit() && !guest && !detail.section) items.push({ label: 'Add to a space…', icon: 'columns', onSelect: () => void addToSpace() });
     if (canEdit()) items.push({ label: `Document type: ${labelOf(docId)?.type ?? 'markdown'}…`, icon: 'file', onSelect: () => typeMenu(docId, moreBtn) });
     if (nav.tree === docId && atLeast(role, 'owner')) items.push({ label: 'Stop being a space', icon: 'x', onSelect: () => void nav.dropTree() });

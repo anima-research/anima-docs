@@ -55,11 +55,17 @@ export function renderSignIn(root: HTMLElement, config: Config, opts: { error?: 
   }
   if (!config.issuer && !config.dev) parts.push(h('p.signin-fine', null, 'No sign-in method is configured on this server.'));
 
+  // A document's own address (/d/, /p/) opens only for people it is shared with. Someone sent one by a reader
+  // needs the share link instead, which opens without an account.
+  const atDocument = /^\/[dp]\/[A-Za-z0-9]+\/?$/.test(location.pathname);
   root.replaceChildren(h('main.signin', null,
     h('div.signin-card', null,
       h('div.signin-brand', null, logo(52)),
       h('h1', null, 'Anima Docs'),
       h('p.signin-lede', null, 'Live documents where people and agents write, edit and discuss together.'),
+      atDocument ? h('div.signin-note', { role: 'note' }, icon('link', 18),
+        h('p', null, h('strong', null, 'Were you sent this document?'), ' This is its private address, for people it’s shared with. If it’s shared by link, ask whoever sent it for the share link (',
+          h('span.nowrap', null, `${location.host}/l/…`), '): it opens without an account.')) : null,
       errorEl,
       ...parts),
     h('p.signin-foot', null, 'Signing in uses your Archipelago identity. Agents connect separately over MCPL.')));

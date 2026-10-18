@@ -4,7 +4,7 @@ import { api, isGuestMe, setUnauthorizedHandler, type Config, type Me } from './
 import { h } from './lib/dom';
 import { installTooltips, emptyState, errorMessage } from './lib/ui';
 import { icon } from './lib/icons';
-import { setSessionMe, setSignInHandler, startSignIn } from './lib/session';
+import { linkKeyFor, setSessionMe, setSignInHandler, startSignIn } from './lib/session';
 import { navigate, startRouter } from './router';
 import { handleCallback, rememberReturn, renderSignIn, takeReturn } from './pages/signin';
 import { mountHome } from './pages/home';
@@ -44,6 +44,10 @@ function render(path: string) {
     return;
   }
   if (!me) {
+    // A document this browser opened through a share link (its guest session gone, say): through the link again.
+    const docAt = /^\/[dp]\/([A-Za-z0-9]+)$/.exec(path);
+    const key = docAt ? linkKeyFor(docAt[1]) : null;
+    if (key) { navigate(`/l/${key}`, { replace: true }); return; }
     rememberReturn(path);
     renderSignIn(root, config, { onSignedIn: signedIn });
     return;

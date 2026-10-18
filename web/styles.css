@@ -387,6 +387,11 @@ dialog.busy .dialog-body { opacity: 0.75; }
 .signin h1 { margin: 0 0 6px; font-size: 25px; font-weight: 700; letter-spacing: -0.02em; }
 .signin-lede { margin: 0 0 24px; color: var(--text-2); font-size: 15px; line-height: 1.5; }
 .signin-fine { color: var(--text-3); font-size: 12.5px; margin: 10px 0 0; text-align: center; }
+.signin-note { display: flex; gap: 10px; align-items: flex-start; margin: -8px 0 20px; padding: 12px 14px; border-radius: 10px; background: var(--surface-2); border: 1px solid var(--border); color: var(--text-2); font-size: 13.5px; line-height: 1.45; text-align: left; }
+.signin-note > svg { flex: none; margin-top: 1px; color: var(--accent); }
+.signin-note p { margin: 0; }
+.signin-note strong { color: var(--text); }
+.nowrap { white-space: nowrap; }
 .signin-foot { color: var(--text-3); font-size: 12.5px; margin-top: 20px; text-align: center; }
 .dev-banner { display: flex; gap: 9px; align-items: flex-start; padding: 10px 12px; margin-bottom: 18px; border-radius: 10px; background: var(--warn-soft); color: var(--warn); font-size: 12.5px; line-height: 1.45; }
 .dev-banner .icon { flex: none; margin-top: 1px; }
@@ -607,7 +612,10 @@ dialog.busy .dialog-body { opacity: 0.75; }
 .doc-body { position: relative; flex: 1; min-height: 0; display: flex; overflow: hidden; overflow: clip; }
 .doc-scroll { flex: 1 1 0; min-width: 0; overflow: auto; scroll-padding: 80px; }
 .doc-app[data-mode="edit"] .preview-pane { display: none; }
-.doc-app[data-mode="preview"] .edit-pane { display: none; }
+/* Preview hides the source without display:none: an editor that can't measure itself keeps every line of a
+   freshly loaded document in the DOM (14,000 lines of a large HTML page, hundreds of MB on a phone). Laid out but
+   invisible, it renders only a screenful. */
+.doc-app[data-mode="preview"] .edit-pane { position: absolute; inset: 0; visibility: hidden; pointer-events: none; }
 .doc-app[data-mode="split"] .preview-pane { border-left: 1px solid var(--border); }
 .doc-canvas { display: flex; justify-content: center; align-items: flex-start; gap: 22px; min-width: min-content; padding: 28px 24px 40vh; }
 .page-wrap { position: relative; flex: 0 1 816px; min-width: 0; }
@@ -1093,8 +1101,16 @@ dialog.busy .dialog-body { opacity: 0.75; }
   .doc-icon { width: 32px; height: 32px; }
   .doc-header { flex-wrap: wrap; gap: 6px; padding: 8px 8px 4px; }
   .doc-home { width: 36px; height: 36px; }
-  .doc-header-right { width: 100%; justify-content: flex-end; gap: 4px; }
+  /* The actions row wraps rather than running off the left edge; split view is the source here anyway. */
+  .doc-header-right { width: 100%; justify-content: flex-end; flex-wrap: wrap; row-gap: 6px; gap: 4px; min-width: 0; }
+  .mode-switch .seg-btn[data-mode="split"] { display: none; }
+  .doc-header-right .open-page { padding: 0 8px; }
+  .doc-header-right .open-page .tb-text { display: none; }
   .presence { margin-right: auto; }
+  .presence-btn:nth-child(n+3) { display: none; }
+  /* Read-only: the toolbar is only the "View only" notice, and the header pill already says Viewing. */
+  .doc-app.view-only .doc-toolbar-wrap { display: none; }
+  .tb-notice-more { display: none; }
   .doc-toolbar { margin: 4px 8px 8px; }
   .doc-canvas { padding: 12px 8px 40vh; }
   .editor-page .cm-editor .cm-content, .preview-body { padding: 28px 22px 80px; }
@@ -1113,6 +1129,10 @@ dialog.busy .dialog-body { opacity: 0.75; }
   .link-copy { padding: 0 8px; }
   .home-actions .toggle-check { flex: none; }
   .toast-host { left: 12px; right: 12px; bottom: 12px; }
+}
+@media (max-width: 360px) {
+  .doc-header .guest-signin { padding: 0 10px; }
+  .doc-header .guest-signin .signin-label { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }

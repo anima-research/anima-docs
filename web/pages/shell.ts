@@ -72,7 +72,7 @@ export function userMenuButton(me: Me, opts: { compact?: boolean } = {}): HTMLBu
 
 /** "Sign in" for guests: become a member, keeping the way back to what they were looking at. */
 export function guestSignInButton(opts: { compact?: boolean } = {}): HTMLButtonElement {
-  return h('button.btn.guest-signin', { type: 'button', class: opts.compact ? 'sm' : '', 'data-tip': 'Sign in with Archipelago to create, share and keep documents', onclick: () => startSignIn() }, icon('login', 16), 'Sign in');
+  return h('button.btn.guest-signin', { type: 'button', class: opts.compact ? 'sm' : '', 'aria-label': 'Sign in', 'data-tip': 'Sign in with Archipelago to create, share and keep documents', onclick: () => startSignIn() }, icon('login', 16), h('span.signin-label', null, 'Sign in'));
 }
 
 export function topBar(me: Me, active: 'docs' | 'people' | 'admin'): HTMLElement {
