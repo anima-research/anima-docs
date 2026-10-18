@@ -46,7 +46,15 @@ interface Room {
 
 export class Realtime {
   private rooms = new Map<string, Room>();
-  readonly wss = new WebSocketServer({ noServer: true, maxPayload: 5 * 1024 * 1024 });
+  /**
+   * A document's first sync is its whole text (over a megabyte for a large page); deflated it is a fraction of
+   * that. Only messages over 4 KB are compressed (keystrokes and cursors go as they are), and no compression
+   * history is kept between messages.
+   */
+  readonly wss = new WebSocketServer({
+    noServer: true, maxPayload: 5 * 1024 * 1024,
+    perMessageDeflate: { threshold: 4096, serverNoContextTakeover: true, clientNoContextTakeover: true, zlibDeflateOptions: { level: 6, memLevel: 7 } },
+  });
 
   constructor(private app: App, private sessionFor: (req: IncomingMessage) => WebSession | null, private sessionValid: (s: WebSession) => boolean) {
     app.docs.on('update', (e: { docId: string; update: Uint8Array; origin?: { conn?: string } }) => this.broadcastUpdate(e.docId, e.update, e.origin?.conn));

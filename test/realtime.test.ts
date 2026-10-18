@@ -103,3 +103,16 @@ test('a live connection outlasts its session’s original expiry when the sessio
     c.close();
   } finally { await S2.close(); }
 });
+
+test('a large document syncs over a deflated socket, intact', async () => {
+  const ann = await signIn('Ann');
+  const text = Array.from({ length: 6000 }, (_, i) => `<p class="row" data-i="${i}">Memory is what survives the cut, line ${i}.</p>`).join('\n');
+  const d = S.app.docs.create(S.app.principals.get('human:test:ann') as any, 'Big', text);
+  const c = await browser(ann, d.id);
+  try {
+    assert.match((c.ws as any).extensions ?? '', /permessage-deflate/);
+    assert.equal(c.text(), text);
+    const wire = (c.ws as any)._socket.bytesRead as number;
+    assert.ok(wire < text.length / 3, `${wire} bytes on the wire for ${text.length} characters`);
+  } finally { c.close(); }
+});
