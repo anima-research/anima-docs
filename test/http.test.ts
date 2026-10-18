@@ -1,7 +1,9 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { deflateSync } from 'node:zlib';
+import { brotliDecompressSync, deflateSync, gunzipSync } from 'node:zlib';
+import { get as httpGet, request as httpRequest } from 'node:http';
 import { startServer } from './server-harness.js';
+import { compressible, pickEncoding } from '../src/http.js';
 
 let S: Awaited<ReturnType<typeof startServer>>;
 before(async () => { S = await startServer({ DOCS_ADMINS: 'human:test:root' }); });
@@ -345,4 +347,84 @@ test('discovery for agents: well-known, Link headers, meta, noscript note, agent
   assert.ok(t3.includes('Ship in March'), 'share link answers markdown');
   // Browsers (Accept text/html) still get the app.
   assert.ok((await (await fetch(`${S.base}/d/${d.id}`, { headers: { Accept: 'text/html,*/*' } })).text()).includes('<div id="app"'));
+});
+
+/** A GET whose body comes back as sent (fetch would decode it). */
+function rawGet(url: string, headers: Record<string, string> = {}): Promise<{ status: number; headers: import('node:http').IncomingHttpHeaders; body: Buffer }> {
+  return new Promise((resolve, reject) => {
+    httpGet(url, { headers }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body: Buffer.concat(chunks) }));
+    }).on('error', reject);
+  });
+}
+
+test('Accept-Encoding: brotli first, then gzip; q=0 refuses; nothing offered, nothing picked', () => {
+  assert.equal(pickEncoding('gzip, deflate, br'), 'br');
+  assert.equal(pickEncoding('gzip, deflate'), 'gzip');
+  assert.equal(pickEncoding('br;q=0, gzip'), 'gzip');
+  assert.equal(pickEncoding('BR ; q=0.5'), 'br');
+  assert.equal(pickEncoding('*'), 'br');
+  assert.equal(pickEncoding('*, br;q=0'), 'gzip');
+  assert.equal(pickEncoding('identity'), null);
+  assert.equal(pickEncoding(undefined), null);
+  assert.equal(pickEncoding('gzip, br', ['gzip']), 'gzip');
+  assert.ok(compressible('text/html; charset=utf-8') && compressible('application/json; charset=utf-8') && compressible('text/javascript') && compressible('image/svg+xml'));
+  assert.ok(!compressible('image/png') && !compressible('font/woff2') && !compressible('application/zip'));
+});
+
+test('pages and their files go out compressed to clients that accept it, and decode to the same bytes', async () => {
+  const ann = await signIn('Ann');
+  const html = `<!doctype html><title>Big</title><body>${'<p class="row">Memory is what survives the cut.</p>\n'.repeat(4000)}<script src="build/data.js"></script></body>`;
+  const page = await (await fetch(`${S.base}/api/docs`, { method: 'POST', headers: H({ Cookie: ann }), body: JSON.stringify({ title: 'Big', type: 'html', content: html }) })).json();
+  const data = Buffer.from(`window.DATA = ${JSON.stringify(Array.from({ length: 5000 }, (_, i) => ({ i, arm: 'connectome', kept: i % 7 })))};`);
+  assert.equal((await fetch(`${S.base}/api/docs/${page.id}/files/build/data.js`, { method: 'PUT', headers: { Cookie: ann, Origin: S.base, 'Content-Type': 'text/javascript' }, body: data })).status, 201);
+  assert.equal((await fetch(`${S.base}/api/docs/${page.id}/files/img/dot.png`, { method: 'PUT', headers: { Cookie: ann, Origin: S.base, 'Content-Type': 'image/png' }, body: png(40, 40) })).status, 201);
+  const loc = (await fetch(`${S.base}/p/${page.id}`, { headers: { Cookie: ann }, redirect: 'manual' })).headers.get('location')!;
+
+  const pageBr = await rawGet(`${S.base}${loc}`, { 'Accept-Encoding': 'gzip, deflate, br' });
+  assert.equal(pageBr.status, 200);
+  assert.equal(pageBr.headers['content-encoding'], 'br');
+  assert.match(String(pageBr.headers.vary), /Accept-Encoding/);
+  assert.match(pageBr.headers['content-security-policy'] ?? '', /^sandbox allow-scripts/, 'still sandboxed');
+  assert.equal(brotliDecompressSync(pageBr.body).toString(), html);
+  assert.ok(pageBr.body.length < html.length / 5, `compressed to ${pageBr.body.length} of ${html.length}`);
+
+  const dataGz = await rawGet(`${S.base}${loc}build/data.js`, { 'Accept-Encoding': 'br;q=0, gzip' });
+  assert.equal(dataGz.headers['content-encoding'], 'gzip');
+  assert.ok(gunzipSync(dataGz.body).equals(data));
+
+  const plain = await rawGet(`${S.base}${loc}build/data.js`);
+  assert.equal(plain.headers['content-encoding'], undefined);
+  assert.ok(plain.body.equals(data));
+  assert.equal(Number(plain.headers['content-length']), data.length);
+
+  const img = await rawGet(`${S.base}${loc}img/dot.png`, { 'Accept-Encoding': 'br, gzip' });
+  assert.equal(img.headers['content-encoding'], undefined, 'images are already compressed');
+
+  // Revalidation: the compressed copy's tag, or the plain one, both mean "unchanged".
+  const tagBr = String(pageBr.headers.etag);
+  assert.match(tagBr, /-br"$/);
+  assert.equal((await rawGet(`${S.base}${loc}`, { 'Accept-Encoding': 'br', 'If-None-Match': tagBr })).status, 304);
+  const tagPlain = String((await rawGet(`${S.base}${loc}`)).headers.etag);
+  assert.equal((await rawGet(`${S.base}${loc}`, { 'Accept-Encoding': 'br', 'If-None-Match': tagPlain })).status, 304);
+  // HEAD: the headers of the compressed response, no body.
+  const head = await new Promise<number>((r) => httpRequest(`${S.base}${loc}`, { method: 'HEAD', headers: { 'Accept-Encoding': 'br' } }, (res) => { res.resume(); r(Number(res.headers['content-length'])); }).end());
+  assert.equal(head, pageBr.body.length);
+});
+
+test('static files: gzip at once, brotli once it has been made', async () => {
+  const first = await rawGet(`${S.base}/page-annotate.js`, { 'Accept-Encoding': 'br, gzip' });
+  assert.equal(first.status, 200);
+  assert.ok(['gzip', 'br'].includes(String(first.headers['content-encoding'])));
+  let enc = String(first.headers['content-encoding']);
+  for (let i = 0; i < 50 && enc !== 'br'; i++) { await new Promise((r) => setTimeout(r, 100)); enc = String((await rawGet(`${S.base}/page-annotate.js`, { 'Accept-Encoding': 'br, gzip' })).headers['content-encoding']); }
+  assert.equal(enc, 'br');
+  const br = await rawGet(`${S.base}/page-annotate.js`, { 'Accept-Encoding': 'br' });
+  const plain = await rawGet(`${S.base}/page-annotate.js`);
+  assert.equal(plain.headers['content-encoding'], undefined);
+  assert.ok(brotliDecompressSync(br.body).equals(plain.body));
+  const image = await rawGet(`${S.base}/og-default.png`, { 'Accept-Encoding': 'br, gzip' });
+  assert.equal(image.headers['content-encoding'], undefined);
 });

@@ -2,7 +2,8 @@
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { readFileSync, existsSync, statSync, rmSync, writeFileSync } from 'node:fs';
-import { gzipSync } from 'node:zlib';
+import { brotliCompress, constants as zlibConstants, gzip, gzipSync } from 'node:zlib';
+import { promisify } from 'node:util';
 import { join, resolve } from 'node:path';
 import type { App } from './app.js';
 import { DEFAULT_TEMPLATE, TEMPLATE_SLOTS } from './wiki.js';
@@ -105,7 +106,55 @@ const STATIC: Record<string, [string, string]> = {
   '/page-annotate.js': ['page-annotate.js', 'text/javascript; charset=utf-8'],
 };
 
-const staticCache = new Map<string, { mtime: number; raw: Buffer; gz: Buffer | null }>();
+const staticCache = new Map<string, { mtime: number; raw: Buffer; gz: Buffer | null; br: Buffer | null; brPending?: boolean }>();
+
+// ------------------------------------------------------------------ compression
+const brotliAsync = promisify(brotliCompress);
+const gzipAsync = promisify(gzip);
+const brotli = (buf: Buffer, quality: number) => brotliAsync(buf, { params: { [zlibConstants.BROTLI_PARAM_QUALITY]: quality, [zlibConstants.BROTLI_PARAM_SIZE_HINT]: buf.length } });
+
+/** Worth compressing: text, data, scripts, styles, SVG, wasm. Images, audio, video and archives already are. */
+export const compressible = (type: string) => isTextMime(type) || /^(image\/svg\+xml|application\/(wasm|ld\+json|manifest\+json|x-ndjson|geo\+json))\b/.test(type);
+
+/** The best of `offered` an Accept-Encoding header allows, in that order of preference (q=0 refuses one). */
+export function pickEncoding(header: string | string[] | undefined, offered: ('br' | 'gzip')[] = ['br', 'gzip']): 'br' | 'gzip' | null {
+  const q = new Map<string, number>();
+  for (const part of String(header ?? '').toLowerCase().split(',')) {
+    const [name, ...params] = part.split(';').map((s) => s.trim());
+    if (!name) continue;
+    const qp = params.map((p) => /^q=([0-9.]+)$/.exec(p)).find(Boolean);
+    q.set(name, qp ? Number(qp[1]) : 1);
+  }
+  return offered.find((e) => (q.get(e) ?? q.get('*') ?? 0) > 0) ?? null;
+}
+
+/** Compressed bodies by content key (an ETag over the bytes) and encoding: least recently used out past `max` bytes. */
+export class CompressedCache {
+  private items = new Map<string, Buffer>();
+  private pending = new Map<string, Promise<Buffer>>();
+  private size = 0;
+  constructor(private max = 64 * 1024 * 1024) {}
+  get(key: string, make: () => Promise<Buffer>): Promise<Buffer> {
+    const hit = this.items.get(key);
+    if (hit) { this.items.delete(key); this.items.set(key, hit); return Promise.resolve(hit); }
+    let p = this.pending.get(key);
+    if (!p) {
+      p = make().then((b) => { this.put(key, b); return b; }).finally(() => this.pending.delete(key));
+      this.pending.set(key, p);
+    }
+    return p;
+  }
+  private put(key: string, b: Buffer) {
+    if (b.length > this.max / 4) return;
+    this.items.set(key, b);
+    this.size += b.length;
+    for (const [k, v] of this.items) {
+      if (this.size <= this.max) break;
+      this.items.delete(k);
+      this.size -= v.length;
+    }
+  }
+}
 
 export function createHttp(app: App) {
   const production = app.config.origin.startsWith('https:');
@@ -286,24 +335,35 @@ export function createHttp(app: App) {
   const sendShell = (res: ServerResponse, meta: LinkMeta) => { res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(shell(meta)); };
 
   const SANDBOX = "sandbox allow-scripts allow-forms allow-popups allow-modals allow-downloads allow-pointer-lock allow-presentation; frame-ancestors 'self'";
-  function sendSandboxed(req: IncomingMessage, res: ServerResponse, body: Buffer | string, etag: string, type: string, cache = 'private, no-cache') {
+  /** Compressed pages and files, keyed by their ETags (content hashes). */
+  const compressed = new CompressedCache();
+  async function sendSandboxed(req: IncomingMessage, res: ServerResponse, body: Buffer | string, etag: string, type: string, cache = 'private, no-cache') {
     res.removeHeader('X-Frame-Options');
     res.setHeader('Content-Security-Policy', SANDBOX);
     // The page's own scripts fetch its files from an opaque origin: the token in the path is the capability, so CORS may be open.
     res.setHeader('Access-Control-Allow-Origin', '*');
-    if (req.headers['if-none-match'] === etag) { res.writeHead(304, { ETag: etag }); res.end(); return; }
     const buf = Buffer.isBuffer(body) ? body : Buffer.from(body);
-    res.writeHead(200, { 'Content-Type': type, 'Content-Length': buf.length, 'Cache-Control': cache, ETag: etag, Vary: 'Cookie' });
-    res.end(req.method === 'HEAD' ? undefined : buf);
+    // Pages and their data run to megabytes of text; compressed they are a fraction of that on a phone's connection.
+    const squeezable = buf.length >= 1024 && compressible(type);
+    const enc = squeezable ? pickEncoding(req.headers['accept-encoding']) : null;
+    const tag = enc ? etag.replace(/"$/, `-${enc}"`) : etag;
+    const vary = squeezable ? 'Cookie, Accept-Encoding' : 'Cookie';
+    // A copy cached in either encoding is still the same content.
+    const inm = req.headers['if-none-match'];
+    if (inm === tag || inm === etag) { res.writeHead(304, { ETag: inm, Vary: vary }); res.end(); return; }
+    const out = enc ? await compressed.get(`${etag}|${enc}`, () => (enc === 'br' ? brotli(buf, 5) : gzipAsync(buf, { level: 6 }))) : buf;
+    if (res.destroyed) return;
+    res.writeHead(200, { 'Content-Type': type, 'Content-Length': out.length, 'Cache-Control': cache, ETag: tag, Vary: vary, ...(enc ? { 'Content-Encoding': enc } : {}) });
+    res.end(req.method === 'HEAD' ? undefined : out);
   }
   function sendPage(req: IncomingMessage, res: ServerResponse, body: string, rev: number) {
-    sendSandboxed(req, res, body, `"p${rev}-${createHash('sha1').update(body).digest('hex').slice(0, 16)}"`, 'text/html; charset=utf-8');
+    return sendSandboxed(req, res, body, `"p${rev}-${createHash('sha1').update(body).digest('hex').slice(0, 16)}"`, 'text/html; charset=utf-8');
   }
   /** An attached file of a page, served next to it. */
   function sendDocFile(req: IncomingMessage, res: ServerResponse, docId: string, filePath: string) {
     const f = app.files.read(docId, filePath);
     if (!f) throw new Fault(404, 'No such file.');
-    sendSandboxed(req, res, f.bytes, `"f${f.file.mediaId}"`, f.file.mime, 'private, max-age=60');
+    return sendSandboxed(req, res, f.bytes, `"f${f.file.mediaId}"`, f.file.mime, 'private, max-age=60');
   }
   /** Media readable without a session: its document is shareable beyond its explicit list (an active link, members access, a public wiki). Ids are content hashes: unguessable. */
   function mediaOpen(mediaId: string): boolean {
@@ -572,9 +632,9 @@ export function createHttp(app: App) {
             let body = app.nodes.flatten(d.id, { sub: d.ownerSub, admin: false });
             // Framed by the app with ?annotate=1: the annotation layer rides along (selection → comment, highlights, text edits; the app confirms everything).
             if (url.searchParams.get('annotate') === '1') { const tag = '<script src="/page-annotate.js" data-anima-ui></script>'; body = /<\/body\s*>/i.test(body) ? body.replace(/<\/body\s*>/i, `${tag}\n</body>`) : `${body}\n${tag}`; }
-            sendPage(req, res, body, d.rev);
+            await sendPage(req, res, body, d.rev);
           }
-          else sendDocFile(req, res, d.id, sub);
+          else await sendDocFile(req, res, d.id, sub);
           return;
         }
         // A person navigating to the short link gets the app around the page (title, share, comments, edit);
@@ -589,12 +649,12 @@ export function createHttp(app: App) {
           if ((rest === undefined || rest === '') && !url.searchParams.has('raw') && !url.searchParams.has('format')) { sendShell(res, docMeta(d, `${app.config.origin}/p/${d.id}`)); return; }
           throw new Fault(401, 'Sign in to view this page.');
         }
-        if (rest !== undefined && rest !== '') { sendDocFile(req, res, d.id, rest); return; } // /p/<id>/<path> with a session or a bearer token: the file
+        if (rest !== undefined && rest !== '') { await sendDocFile(req, res, d.id, rest); return; } // /p/<id>/<path> with a session or a bearer token: the file
         if (d.type !== 'html') { res.writeHead(302, { Location: `/d/${d.id}` }); res.end(); return; }
         // Agents asking for text get the markdown companion when the page has one.
         const accept = String(req.headers.accept ?? '');
         if ((url.searchParams.get('format') === 'md' || (accept.includes('text/markdown') && !accept.includes('text/html'))) && app.files.get(d.id, COMPANION)) {
-          sendSandboxed(req, res, app.files.read(d.id, COMPANION)!.bytes, `"c${app.files.get(d.id, COMPANION)!.mediaId}"`, 'text/markdown; charset=utf-8');
+          await sendSandboxed(req, res, app.files.read(d.id, COMPANION)!.bytes, `"c${app.files.get(d.id, COMPANION)!.mediaId}"`, 'text/markdown; charset=utf-8');
           return;
         }
         // The page proper lives under a signed path, so its relative URLs (data, scripts, styles) resolve without a session.
@@ -888,11 +948,19 @@ export function createHttp(app: App) {
         const mtime = statSync(file).mtimeMs;
         const etag = `"${mtime.toString(36)}"`;
         if (req.headers['if-none-match'] === etag) { res.writeHead(304, { ETag: etag }); res.end(); return; }
-        const gzip = /\bgzip\b/.test(String(req.headers['accept-encoding'] ?? ''));
         let cached = staticCache.get(file);
-        if (!cached || cached.mtime !== mtime) staticCache.set(file, cached = { mtime, raw: readFileSync(file), gz: null });
-        if (gzip && !cached.gz) cached.gz = gzipSync(cached.raw, { level: 9 });
-        send(200, gzip ? cached.gz! : cached.raw, st[1], { 'Cache-Control': km ? 'public, max-age=604800' : 'no-cache', ETag: etag, Vary: 'Accept-Encoding', ...(gzip ? { 'Content-Encoding': 'gzip' } : {}) });
+        if (!cached || cached.mtime !== mtime) staticCache.set(file, cached = { mtime, raw: readFileSync(file), gz: null, br: null });
+        const c = cached;
+        const ae = req.headers['accept-encoding'];
+        const squeezable = compressible(st[1]);
+        // Brotli at its best setting takes a second or two on the bundle: made once per build in the background; gzip until then.
+        if (squeezable && !c.br && !c.brPending && pickEncoding(ae, ['br'])) {
+          c.brPending = true;
+          void brotli(c.raw, 11).then((b) => { c.br = b; }, (e) => console.error('[static] brotli failed', st[0], e)).finally(() => { c.brPending = false; });
+        }
+        const enc = squeezable ? pickEncoding(ae, c.br ? ['br', 'gzip'] : ['gzip']) : null;
+        if (enc === 'gzip' && !c.gz) c.gz = gzipSync(c.raw, { level: 9 });
+        send(200, enc === 'br' ? c.br! : enc === 'gzip' ? c.gz! : c.raw, st[1], { 'Cache-Control': km ? 'public, max-age=604800' : 'no-cache', ETag: etag, Vary: 'Accept-Encoding', ...(enc ? { 'Content-Encoding': enc } : {}) });
         return;
       }
       const dmatch = /^\/d\/([A-Za-z0-9]+)$/.exec(path), lmatch = /^\/l\/([A-Za-z0-9_-]{20,40})$/.exec(path);
