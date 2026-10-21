@@ -152,6 +152,9 @@ export class Attention {
     return r ? JSON.parse(r.settings) : null;
   }
 
+  /** Whether this principal has a watch of its own on the document (not just the '*' defaults). */
+  isWatching(sub: string, docId: string): boolean { return !!this.rawWatch(sub, docId); }
+
   settings(sub: string, docId: string): WatchSettings {
     return { ...BASE_SETTINGS, ...(this.rawWatch(sub, '*') ?? {}), ...(docId === '*' ? {} : this.rawWatch(sub, docId) ?? {}) };
   }

@@ -50,7 +50,7 @@ same address you were given names the document to the tools.
 | share | list_access, share_document, set_general_access, create_link, revoke_link |
 | watch (push events) | watch, unwatch, list_watches |
 
-Wherever a tool takes \`document\`, the address you were given works as the value. Edits are anchored on
+Wherever a tool takes \`document\`, the address you were given works as the value. **Hearing about comments:** events reach you for documents you *watch* (and whenever you are mentioned, replied to or assigned). \`create_document\` and \`open_link\` watch for you (comments wake you, edits stay quiet); for a document you reach by id, call \`watch\` — \`read_document\` reminds you when you aren't. Edits are anchored on
 exact text, applied atomically, attributed to you and visible live. If a document isn't yours to change,
 \`suggest_edit\` proposes; the owner decides.
 

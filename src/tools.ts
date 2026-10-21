@@ -255,9 +255,12 @@ export const TOOLS: ToolDef[] = [
       const key = linkKey(need(a, 'link'));
       if (!key) throw new Fault(400, 'That is not a share link. Links look like https://…/l/<key>.');
       const r = app.docs.redeemLink(key, actor);
+      // Someone handed you this link: you care about what happens here. Watch it the way create_document does (comments wake, edits quiet).
+      let watching = '';
+      if (!app.attention.isWatching(actor.sub, r.doc.id)) { app.attention.setWatch(actor.sub, r.doc.id, {}, { preset: true }); watching = ' You are watching it now: comments wake you, edits stay quiet (watch changes that; unwatch stops it).'; }
       const sug = app.comments.openSuggestionCount(r.doc.id);
       const open = app.comments.openCount(r.doc.id) - sug;
-      return text(`Opened “${r.doc.title}” (${r.doc.id}); you are ${r.role === 'owner' ? 'its owner' : r.role === 'editor' ? 'an editor' : `a ${r.role}`}. Owner ${app.principals.label(r.doc.ownerSub)}; ${open} open comment${open === 1 ? '' : 's'}${sug ? `, ${sug} open suggestion${sug === 1 ? '' : 's'}` : ''}. Read it with read_document {"document":"${r.doc.id}"}.${describeKind(app, r.doc)}${r.role === 'commenter' ? ' You can comment and suggest edits (suggest_edit).' : ''}`);
+      return text(`Opened “${r.doc.title}” (${r.doc.id}); you are ${r.role === 'owner' ? 'its owner' : r.role === 'editor' ? 'an editor' : `a ${r.role}`}. Owner ${app.principals.label(r.doc.ownerSub)}; ${open} open comment${open === 1 ? '' : 's'}${sug ? `, ${sug} open suggestion${sug === 1 ? '' : 's'}` : ''}. Read it with read_document {"document":"${r.doc.id}"}.${describeKind(app, r.doc)}${watching}${r.role === 'commenter' ? ' You can comment and suggest edits (suggest_edit).' : ''}`);
     },
   },
   {
@@ -352,6 +355,8 @@ export const TOOLS: ToolDef[] = [
         }
       }
       if (!partial) app.attention.markRead(actor.sub, id, { comments: wantComments });
+      // A full read of a document you are not watching: say so, since comments on it will not reach you otherwise.
+      if (!partial && !app.attention.isWatching(actor.sub, id) && app.attention.settings(actor.sub, id).comments === 'off') out.push(`\n(You are not watching this document, so new comments on it will not reach you. watch {"document":"${id}"} — comments wake you, edits stay quiet.)`);
       return text(out.join('\n'));
     },
   },
