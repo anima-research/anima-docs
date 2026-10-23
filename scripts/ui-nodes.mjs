@@ -699,6 +699,22 @@ try {
     assert(alice.url().endsWith(`/d/${priv.id}`), `private doc address changed: ${alice.url()}`);
   });
 
+  await step('⌘F opens the editor’s search even when the editor is not focused; a match far down is found and shown', async () => {
+    const lines = Array.from({ length: 80 }, (_, i) => `Line ${i} of the document${i === 70 ? ' with needle inside' : ''}.`);
+    const d = (await api(alice, 'POST', '/api/docs', { title: 'Search me', content: `# Search me\n\n${lines.join('\n\n')}\n` })).json;
+    await openDoc(alice, d.id);
+    await alice.locator('.seg-btn[data-mode=edit]').click();
+    await alice.locator('.doc-nav').click({ position: { x: 10, y: 400 } }).catch(() => {}); // focus away from the editor
+    await alice.keyboard.press('Meta+f');
+    const search = alice.locator('.cm-search input[name=search]');
+    await search.waitFor({ timeout: 5000 });
+    await search.fill('needle');
+    await alice.keyboard.press('Enter'); await alice.keyboard.press('Enter');
+    await alice.waitForFunction(() => { const s = window.__anima.view.state.selection.main; return window.__anima.view.state.doc.sliceString(s.from, s.to) === 'needle'; }, null, { timeout: 5000 });
+    assert(await alice.locator('.cm-searchMatch-selected').isVisible(), 'match not scrolled into view');
+    await alice.keyboard.press('Escape');
+  });
+
   await step('home lists the tree', async () => {
     await alice.goto(`${ORIGIN}/`);
     await alice.locator('.home-trees a.tree-card', { hasText: 'Paper' }).waitFor({ timeout: 8000 });

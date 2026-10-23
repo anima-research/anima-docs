@@ -7,7 +7,7 @@ import { defaultKeymap, history, historyKeymap, indentWithTab, redo as cmRedo, u
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown';
 import { html as htmlLanguage } from '@codemirror/lang-html';
 import { HighlightStyle, syntaxHighlighting, syntaxTree } from '@codemirror/language';
-import { search, searchKeymap } from '@codemirror/search';
+import { openSearchPanel, search, searchKeymap } from '@codemirror/search';
 import { tags as t } from '@lezer/highlight';
 
 import { api, ApiError, atLeast, isGuestMe, signalUnauthorized, ROLE_LABEL, ROLE_VERB, type DocDetail, type GeneralAccess, type LinkPeek, type Me, type NodeType, type Role, type Thread, type TreeRoot } from '../lib/api';
@@ -948,6 +948,20 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
       });
     }
   };
+  // ⌘F / Ctrl-F anywhere on the page goes to the editor's search while the editor is on screen: the
+  // browser's own find only sees the lines the editor has rendered, so it misses most of a long document.
+  const onFindKey = (e: KeyboardEvent) => {
+    if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey || e.key.toLowerCase() !== 'f') return;
+    if (mode === 'preview') return; // the preview is fully rendered: the browser's find works there
+    const t = e.target as HTMLElement | null;
+    if (document.querySelector('dialog[open]')) return;
+    if (t && !view.dom.contains(t) && (t.closest('input, textarea, select, [contenteditable="true"], [contenteditable="plaintext-only"]'))) return; // typing in another field: leave it
+    e.preventDefault();
+    view.focus();
+    openSearchPanel(view);
+  };
+  window.addEventListener('keydown', onFindKey, true);
+  cleanups.push(() => window.removeEventListener('keydown', onFindKey, true));
   window.addEventListener('message', onFrameMessage);
   cleanups.push(() => window.removeEventListener('message', onFrameMessage));
   provider.on('meta', (d) => applyDetail(d));
