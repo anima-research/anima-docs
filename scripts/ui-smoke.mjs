@@ -124,6 +124,8 @@ async function openDoc(page, id) {
 }
 
 const docText = (page, id) => page.evaluate((i) => fetch(`/api/docs/${i}/export.md`).then((r) => r.text()), id);
+/** The server's copy once it contains `needle` (edits reach it a sync batch later), or the last text seen. */
+const docTextWith = async (page, id, needle, ms = 8000) => { const t0 = Date.now(); let t = await docText(page, id); while (!t.includes(needle) && Date.now() - t0 < ms) { await sleep(100); t = await docText(page, id); } return t; };
 const editorText = (page) => page.evaluate(() => document.querySelector('.editor-page .cm-content').innerText);
 
 /** Select `text` inside the editor through a DOM range (CodeMirror reads it). */
@@ -263,7 +265,7 @@ try {
     await alice.keyboard.type('Milestone');
     await alice.keyboard.press('ControlOrMeta+End');
     // Fill the template through the source while the cursor is inside it.
-    const text = await docText(alice, docId);
+    const text = await docTextWith(alice, docId, '| Milestone |');
     assert(text.includes('| Milestone | Column 2 | Column 3 |'), 'table template inserted with typed header');
     await alice.keyboard.insertText('\nThe beta cohort grows each week until launch.\n');
     await alice.locator('.cm-table-widget table').waitFor();
