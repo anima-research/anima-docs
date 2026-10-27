@@ -735,6 +735,30 @@ try {
     await alice.locator('.seg-btn[data-mode=edit]').click();
   });
 
+  await step('comment congestion: twenty threads on the first lines stack beside the text as closed cards; clicking a far-down card brings its anchor back on screen; the open card collapses again', async () => {
+    const paras = Array.from({ length: 120 }, (_, i) => `Paragraph ${i + 1} of the busy report, with enough words to take a line or two on screen.`);
+    const d = (await api(alice, 'POST', '/api/docs', { title: 'Busy report', content: `# Busy report\n\n${paras.join('\n\n')}\n` })).json;
+    for (let i = 0; i < 20; i++) await api(alice, 'POST', '/api/operations/add_comment', { document: d.id, quote: `Paragraph ${(i % 3) + 1} of the busy`, text: `Thread ${i + 1}: a remark that runs on for a couple of lines so the card has some height to it, and then some more.` });
+    await openDoc(alice, d.id);
+    await alice.locator('.seg-btn[data-mode=edit]').click();
+    await alice.locator('.comment-rail.margin .thread-card.placed').nth(19).waitFor({ timeout: 10000 });
+    // Closed cards are small; replies are summarised. Scroll the pane to where the last cards sit.
+    const closed = await alice.locator('.comment-rail.margin .thread-card.closed').count();
+    assert(closed >= 19, `expected the cards to be closed, got ${closed}`);
+    const lastCard = alice.locator('.comment-rail.margin .thread-card', { hasText: 'Thread 20:' });
+    await alice.evaluate(() => { const pane = document.querySelector('.edit-pane'); pane.scrollTop = pane.scrollHeight; });
+    await lastCard.scrollIntoViewIfNeeded();
+    const anchorOnScreen = () => alice.evaluate(() => { const v = window.__anima.view; const i = v.state.doc.toString().indexOf('Paragraph 2 of'); const c = v.coordsAtPos(i); if (!c) return false; const s = document.querySelector('.edit-pane').getBoundingClientRect(); return c.top >= s.top && c.bottom <= s.bottom; });
+    assert(!(await anchorOnScreen()), 'the anchor should be off screen before the click');
+    await lastCard.click();
+    await alice.waitForFunction(() => { const v = window.__anima.view; const i = v.state.doc.toString().indexOf('Paragraph 2 of'); const c = v.coordsAtPos(i); if (!c) return false; const s = document.querySelector('.edit-pane').getBoundingClientRect(); return c.top >= s.top && c.bottom <= s.bottom; }, null, { timeout: 8000 });
+    // The clicked card is open (not closed) and has a collapse button; collapsing closes it again.
+    await alice.locator('.comment-rail.margin .thread-card.active:not(.closed)', { hasText: 'Thread 20:' }).waitFor({ timeout: 5000 });
+    await alice.locator('.thread-card.active .collapse-btn').click();
+    await alice.locator('.comment-rail.margin .thread-card.closed', { hasText: 'Thread 20:' }).waitFor({ timeout: 5000 });
+    assert((await alice.locator('.thread-card.active').count()) === 0, 'no card should be active after collapsing');
+  });
+
   await step('a document with an anyone-with-the-link link shows that link as its address, and the link address reloads to the document', async () => {
     const d = (await api(alice, 'POST', '/api/docs', { title: 'Open notes', content: '# Open notes\n\nShared with the world.\n' })).json;
     const link = (await api(alice, 'POST', `/api/docs/${d.id}/links`, { role: 'viewer', who: 'anyone' })).json;

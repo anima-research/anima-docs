@@ -1404,3 +1404,11 @@ dialog.lightbox figcaption { color: #e6e8ec; font: 14px var(--font-ui); }
 .anima-bar button:hover { filter: brightness(.92); }
 .anima-bar .anima-hint { opacity: .7; padding-right: 4px; }
 .preview-body .anima-edit { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 2px; background: color-mix(in srgb, var(--accent) 8%, transparent); }
+
+/* Closed cards: a fixed-size block — the first comment clamped — until opened by a click */
+.thread-card.closed .comment.root .comment-body { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.thread-card.closed .comment.root .comment-body > * + * { display: none; }
+.thread-card.closed .card-quote { -webkit-line-clamp: 1; }
+.thread-card.closed .more-replies { margin-top: 8px; font-weight: 500; color: var(--text-2); }
+.thread-card.closed .more-replies:hover { color: var(--accent); }
+.collapse-btn svg { transform: rotate(180deg); }

@@ -554,7 +554,8 @@ export class CommentsRail {
   private createCard(t: Thread): Card {
     const body = h('div.card-comments');
     const el = h('div.thread-card', {
-      dataset: { id: t.id }, tabindex: '-1',
+      // Not focusable: a focused card is scrolled into view by the browser, which fought the scroll to its anchor.
+      dataset: { id: t.id },
       onmousedown: (e: MouseEvent) => {
         if ((e.target as HTMLElement).closest('button, textarea, input, a, .menu')) return;
         // Beside the text, a card usually sits by its anchor; cards pushed down by their neighbours may not, so the
@@ -607,9 +608,21 @@ export class CommentsRail {
       parts.push(h('div.assignee-chip', { class: mine ? 'me' : '' }, icon('userCheck', 14), mine ? 'Assigned to you' : 'Assigned to ', mine ? null : h('strong', null, shownName(t.assignee)), mine ? null : kindBadge(t.assignee.kind)));
     }
     const comments = t.comments;
-    const collapse = !active && comments.length > 3;
+    // A card that is not the active one is closed: the first comment (clamped by CSS) and one line for the
+    // replies. Open it by clicking; the open card has a collapse button. Suggestions keep their own shape.
+    const closed = !active && !t.suggestion;
+    const collapse = !active && !!t.suggestion && comments.length > 3;
+    card.el.classList.toggle('closed', closed);
     comments.forEach((c, i) => {
       if (t.suggestion && i === 0) return; // the suggestion's header and note are rendered above
+      if (closed && i > 0) {
+        if (i === 1) {
+          const last = comments[comments.length - 1];
+          parts.push(h('button.more-replies', { type: 'button', onclick: () => this.setActive(t.id, { scroll: true, gentle: true }) },
+            `${comments.length - 1} ${comments.length === 2 ? 'reply' : 'replies'} · last by ${shownName(last.author)} ${relTime(last.createdAt)}`));
+        }
+        return;
+      }
       if (collapse && i > 0 && i < comments.length - 1) {
         if (i === 1) parts.push(h('button.more-replies', { type: 'button', onclick: () => this.setActive(t.id) }, `${comments.length - 2} more replies`));
         return;
@@ -727,6 +740,9 @@ export class CommentsRail {
     const mine = c.author.sub === me.sub;
     const canDelete = mine || atLeast(role, 'owner');
     const actions: HTMLElement[] = [];
+    if (isRoot && this.active === t.id) {
+      actions.push(h('button.icon-btn.sm.collapse-btn', { type: 'button', 'aria-label': 'Collapse', 'data-tip': 'Collapse', onclick: (e: MouseEvent) => { e.stopPropagation(); this.setActive(null); } }, icon('chevronDown', 16)));
+    }
     if (isRoot && this.canComment && !t.resolved) {
       actions.push(h('button.icon-btn.sm.resolve-btn', { type: 'button', 'aria-label': 'Resolve thread', 'data-tip': 'Mark as resolved and hide', onclick: () => void this.op({ type: 'comment.resolve', comment: t.id, resolved: true }, 'Comment resolved') }, icon('check', 18)));
     }
