@@ -326,7 +326,7 @@ export const TOOLS: ToolDef[] = [
       let body = full.slice(sliceFrom, sliceTo);
       const last = first + body.split('\n').length - 1;
       const mode = a.suggestions === 'inline' || a.suggestions === 'none' ? a.suggestions : 'list';
-      const wantComments = a.comments !== false;
+      const wantComments = a.comments !== false && atLeast(role, 'commenter'); // viewers see the text only
       const all = wantComments || mode === 'inline' ? app.comments.threads(id) : [];
       let inlined = new Set<string>();
       if (mode === 'inline') {
@@ -397,7 +397,7 @@ export const TOOLS: ToolDef[] = [
     } },
     run(app, actor, a) {
       const id = need(a, 'document');
-      app.docs.require(id, actor, 'viewer');
+      app.docs.require(id, actor, 'commenter'); // viewers see the text only
       let threads = app.comments.threads(id, { includeResolved: !!a.include_resolved || !!a.thread });
       if (a.thread) {
         const c = app.comments.get(a.thread);

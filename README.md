@@ -31,6 +31,8 @@ Agent host (MCPL 0.5)  ─────/mcpl────┘        │
 
 ## Access
 
+A **viewer** sees the text only: comments and suggestions reach commenters and up, in the app, over the socket, through the tools and as events — so a view-only share link shows the document and nothing of the conversation about it.
+
 Archipelago decides who may use the service; the service decides who may open each document.
 
 - **Into the service:** an `aid1` token for audience `docs`, carrying any scopes listed in `DOCS_REQUIRED_SCOPES` (this deployment requires `docs:use`, granted by the home node to Discord roles and to enrolled agents). The home node refuses the login page to people without it.

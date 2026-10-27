@@ -15,7 +15,7 @@ import * as Y from 'yjs';
 import type { DB } from './db.js';
 import { Fault } from './auth.js';
 import { isGuest, type Principals } from './principals.js';
-import { Documents, type DeleteSet, type DocChange, type Role } from './documents.js';
+import { Documents, type DeleteSet, type DocChange, type Role, atLeast } from './documents.js';
 import { suggestionSummary, type Comment, type CommentEvent, type Comments, type Thread } from './comments.js';
 import { textChanges, firstLook } from './diff.js';
 import { outline, sectionPath } from './markdown.js';
@@ -278,6 +278,11 @@ export class Attention {
     }
   }
 
+  /** Comments and suggestions are for commenters and up: a viewer sees the text and nothing else. */
+  private commentAccess(sub: string, docId: string): Role | null {
+    const r = this.access(sub, docId);
+    return r && atLeast(r, 'commenter') ? r : null;
+  }
   private access(sub: string, docId: string): Role | null {
     const p = this.principals.get(sub);
     if (!p || p.role === 'blocked') return null;
@@ -447,7 +452,7 @@ export class Attention {
     const guestActor = isGuest(e.actor);
     const ignores = (sub: string) => guestActor && this.settings(sub, e.docId).guests === 'off';
     for (const t of e.newlyAddressed) {
-      if (t.sub === e.actor || !this.access(t.sub, e.docId) || ignores(t.sub)) continue;
+      if (t.sub === e.actor || !this.commentAccess(t.sub, e.docId) || ignores(t.sub)) continue;
       handled.add(t.sub);
       if (t.reason === 'suggestion' || t.reason === 'decision') this.queueSuggestionNotice(t.sub, e);
       else this.bg(this.deliverAddressed(t.sub, e, t.reason));
@@ -476,7 +481,7 @@ export class Attention {
         for (const r of thread.replies) participants.add(r.author);
       }
       for (const p of participants) {
-        if (p === e.actor || handled.has(p) || !this.access(p, e.docId) || ignores(p)) continue;
+        if (p === e.actor || handled.has(p) || !this.commentAccess(p, e.docId) || ignores(p)) continue;
         if (this.settings(p, e.docId).replies === 'off') continue;
         handled.add(p);
         this.bg(this.deliverAddressed(p, e, 'reply'));
@@ -495,7 +500,7 @@ export class Attention {
         if (e.kind === 'edited') {
           // The editor too: a replacement updates the version she holds, or
           // one still queued for her, rather than announcing her own act.
-          if (handled.has(r.sub) || !this.access(r.sub, e.docId)) continue;
+          if (handled.has(r.sub) || !this.commentAccess(r.sub, e.docId)) continue;
           handled.add(r.sub);
           this.bg(this.deliverAddressed(r.sub, e, r.reason, { replacement: true, level: r.level }));
         } else {
@@ -507,7 +512,7 @@ export class Attention {
 
     // 4. Everyone else watching comments gets the deferred digest.
     for (const sub of this.watchersOf(e.docId, 'comments')) {
-      if (sub === e.actor || handled.has(sub) || !this.access(sub, e.docId) || ignores(sub)) continue;
+      if (sub === e.actor || handled.has(sub) || !this.commentAccess(sub, e.docId) || ignores(sub)) continue;
       const st = this.settings(sub, e.docId);
       const a = this.commentAccum(sub, e.docId);
       a.actors.add(e.actor);
@@ -525,7 +530,7 @@ export class Attention {
     if (a.timer) clearTimeout(a.timer);
     this.commentAccums.delete(k);
     const doc = this.docs.get(docId);
-    if (!doc || !this.access(sub, docId)) return;
+    if (!doc || !this.commentAccess(sub, docId)) return;
     const st = this.settings(sub, docId);
     if (st.comments === 'off') return;
     const sessions = this.live(sub);
@@ -559,7 +564,7 @@ export class Attention {
   renderComments(sub: string, docId: string): Promise<string> {
     return this.serialize(`${sub}\0${SUBJECT_COMMENTS(docId)}`, async () => {
       const doc = this.docs.get(docId);
-      if (!doc || !this.access(sub, docId)) return '';
+      if (!doc || !this.commentAccess(sub, docId)) return '';
       const base = this.baseline(sub, docId);
       const since = base?.commentSeq ?? Math.max(0, this.comments.lastSeq(docId) - 20);
       const evs = this.comments.eventsSince(docId, since, 500);
@@ -737,7 +742,7 @@ export class Attention {
     if (a.timer) clearTimeout(a.timer);
     this.suggestAccums.delete(k);
     const doc = this.docs.get(docId);
-    if (!doc || !this.access(sub, docId)) return;
+    if (!doc || !this.commentAccess(sub, docId)) return;
     const st = this.settings(sub, docId);
     const live = (id: string) => { const t = this.comments.thread(id); return t && !t.root.deletedAt && t.suggestion ? t : null; };
     let created = [...a.created].map(live).filter((t): t is Thread => !!t && t.suggestion!.status === 'open');
@@ -821,7 +826,7 @@ export class Attention {
 
   private async deliverAddressed(sub: string, e: CommentEvent, reason: 'mention' | 'assigned' | 'reply', opts: { replacement?: boolean; level?: string } = {}) {
     const p = this.principals.get(sub);
-    if (!p || !this.access(sub, e.docId)) return;
+    if (!p || !this.commentAccess(sub, e.docId)) return;
     const st = this.settings(sub, e.docId);
     const levelPref = reason === 'reply' ? st.replies : st.mentions;
     // A replacement keeps its original's treatment: a typo fix must not cancel a pending wake (RFC-006 §4.2).
@@ -869,7 +874,7 @@ export class Attention {
     // host decides (the agent may have read it — RFC-006 §6).
     const row = this.db.prepare('SELECT delivered FROM addressed WHERE sub = ? AND comment_id = ?').get(sub, commentId) as { delivered: number } | undefined;
     if (!row?.delivered) return;
-    const visible = !!this.access(sub, e.docId);
+    const visible = !!this.commentAccess(sub, e.docId);
     const doc = this.docs.get(e.docId);
     const title = doc?.title ?? e.docId;
     const params: PushParams = {

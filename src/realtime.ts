@@ -189,7 +189,12 @@ export class Realtime {
       encoding.writeVarUint8Array(a, awarenessProtocol.encodeAwarenessUpdate(room.awareness, states, isGuest(actor.sub) ? maskStates(room.awareness.getStates()) : undefined));
       send(ws, encoding.toUint8Array(a));
     }
-    this.sendTo(conn, { type: 'threads', threads: this.threads(docId) });
+    this.sendTo(conn, { type: 'threads', threads: this.threadsFor(conn) });
+  }
+
+  /** Comments and suggestions reach commenters and up; a viewer gets the text only. */
+  private threadsFor(conn: Conn, includeResolved?: boolean) {
+    return atLeast(conn.role, 'commenter') ? (includeResolved === undefined ? this.threads(conn.docId) : this.threads(conn.docId, includeResolved)) : [];
   }
 
   private onBinary(room: Room, conn: Conn, data: Uint8Array) {
@@ -290,7 +295,7 @@ export class Realtime {
           });
           reply(true, { results }); return;
         }
-        case 'threads': reply(true, this.threads(room.docId, !!m.includeResolved)); return;
+        case 'threads': reply(true, this.threadsFor(conn, !!m.includeResolved)); return;
         default: reply(false, undefined, `Unknown message ${m.type}`);
       }
     } catch (e) {
@@ -468,7 +473,7 @@ export class Realtime {
         c.actor = { ...c.actor, admin: standing.admin };
         const role = this.app.docs.role(room.docId, c.actor);
         if (!role) { c.ws.close(4003, 'Access removed'); continue; }
-        if (role !== c.role) { c.role = role; this.sendTo(c, { type: 'role', role }); }
+        if (role !== c.role) { c.role = role; this.sendTo(c, { type: 'role', role }); this.sendTo(c, { type: 'threads', threads: this.threadsFor(c) }); }
       }
     }
   }
@@ -486,8 +491,7 @@ export class Realtime {
     }
     // Comment cards elsewhere carry the old name until the thread list is re-sent.
     for (const room of this.rooms.values()) {
-      const threads = this.threads(room.docId);
-      for (const c of room.conns.values()) this.sendTo(c, { type: 'threads', threads });
+      for (const c of room.conns.values()) this.sendTo(c, { type: 'threads', threads: this.threadsFor(c) });
     }
   }
 
@@ -545,9 +549,8 @@ export class Realtime {
     this.pendingThreads.delete(docId);
     const room = this.rooms.get(docId);
     if (!room) return;
-    const threads = this.threads(docId);
     const evs = events.map((x) => ({ kind: x.kind, threadId: x.threadId, commentId: x.commentId, actor: x.actor }));
-    for (const c of room.conns.values()) this.sendTo(c, { type: 'threads', threads, event: evs[evs.length - 1], events: evs });
+    for (const c of room.conns.values()) this.sendTo(c, { type: 'threads', threads: this.threadsFor(c), ...(atLeast(c.role, 'commenter') ? { event: evs[evs.length - 1], events: evs } : {}) });
     for (const a of new Set(events.map((x) => x.actor))) if (a !== undefined) this.showAgentIfAgent(docId, a);
   }
 

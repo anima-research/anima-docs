@@ -690,6 +690,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     app.classList.toggle('can-edit', canEdit());
     app.classList.toggle('can-comment', atLeast(role, 'commenter'));
     commentTool.hidden = !atLeast(role, 'commenter');
+    commentsBtn.hidden = !atLeast(role, 'commenter'); // viewers see the text only: no comments, no suggestions
     pingBtn.hidden = !atLeast(role, 'commenter');
     rail.refreshPermissions();
     if (announce && prev !== next) {

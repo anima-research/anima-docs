@@ -116,3 +116,25 @@ test('a large document syncs over a deflated socket, intact', async () => {
     assert.ok(wire < text.length / 3, `${wire} bytes on the wire for ${text.length} characters`);
   } finally { c.close(); }
 });
+
+test('a viewer sees the text only: no threads on join, none broadcast, none on request; a commenter sees them', async () => {
+  const ann = await signIn('Ann'), vic = await signIn('Vic'), cam = await signIn('Cam');
+  const annP = S.app.principals.get('human:test:ann')!;
+  const owner = { ...annP, admin: false, scopes: [], via: 'web', exp: 0 } as any;
+  const d = S.app.docs.create(owner, 'Quiet', 'The cat sat on the mat.\n');
+  S.app.docs.share(d.id, owner, 'human:test:vic', 'viewer');
+  S.app.docs.share(d.id, owner, 'human:test:cam', 'commenter');
+  const a = await browser(ann, d.id);
+  const r = await a.ask({ type: 'comment.create', body: 'internal note', anchor: rel(a.doc, 4, 7) });
+  assert.equal(r.ok, true, r.error);
+  const v = await browser(vic, d.id), c = await browser(cam, d.id);
+  await until(() => c.json.some((m) => m.type === 'threads' && m.threads.some((th: any) => th.id === r.data.id)), 'commenter gets the thread');
+  await sleep(100);
+  assert.ok(v.json.filter((m) => m.type === 'threads').every((m) => m.threads.length === 0), 'viewer received threads');
+  assert.deepEqual((await v.ask({ type: 'threads', includeResolved: true })).data, [], 'viewer asked and got threads');
+  await a.ask({ type: 'comment.reply', comment: r.data.id, body: 'more', resolve: false });
+  await until(() => c.json.some((m) => m.type === 'threads' && m.event), 'commenter sees the reply event');
+  await sleep(100);
+  assert.ok(v.json.filter((m) => m.type === 'threads').every((m) => m.threads.length === 0 && !m.event), 'viewer saw the reply');
+  a.close(); v.close(); c.close();
+});
