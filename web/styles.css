@@ -1391,3 +1391,6 @@ dialog.lightbox figcaption { color: #e6e8ec; font: 14px var(--font-ui); }
 .member-row:hover { background: var(--hover); }
 .member-row .share-who { flex: 1 1 auto; min-width: 0; }
 .kind-badge.kind-group { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); }
+
+/* ⌘/Ctrl held: links in the source are followable */
+.cm-editor.cm-mod-held .tok-link, .cm-editor.cm-mod-held .tok-url { cursor: pointer; text-decoration: underline; }

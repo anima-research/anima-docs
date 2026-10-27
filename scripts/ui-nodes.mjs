@@ -741,6 +741,24 @@ try {
     assert((await fetch(`${ORIGIN}/api/docs/${d.id}`, { headers: { Cookie: bobCookie } })).status === 200, 'the member cannot open the shared document');
   });
 
+  await step('⌘-click on a link in the source follows it: a document address in place, an external one in a new tab', async () => {
+    const target = (await api(alice, 'POST', '/api/docs', { title: 'Target', content: '# Target\n' })).json;
+    const d = (await api(alice, 'POST', '/api/docs', { title: 'Linky', content: `# Linky\n\nSee [the target](/d/${target.id}) and https://example.com/page for more.\n` })).json;
+    await openDoc(alice, d.id);
+    await alice.locator('.seg-btn[data-mode=edit]').click();
+    const text = await viewText(alice);
+    const clickAt = async (pos) => { const r = await alice.evaluate((p) => { const v = window.__anima.view; const c = v.coordsAtPos(p); return c ? { x: c.left + 2, y: (c.top + c.bottom) / 2 } : null; }, pos); assert(r, 'no coords'); await alice.keyboard.down('Meta'); await alice.mouse.click(r.x, r.y); await alice.keyboard.up('Meta'); }; // mouse.click's `modifiers` doesn't set metaKey here
+    // External: a new page opens.
+    const popup = alice.context().waitForEvent('page', { timeout: 8000 });
+    await clickAt(text.indexOf('example.com') + 3);
+    const p = await popup; assert(p.url().startsWith('https://example.com/page'), `opened ${p.url()}`); await p.close();
+    // Internal: navigates in place, without a reload.
+    const navEl = await alice.evaluateHandle(() => document.querySelector('.doc-nav'));
+    await clickAt(text.indexOf('the target') + 2);
+    await alice.waitForFunction((id) => location.pathname === `/d/${id}`, target.id, { timeout: 8000 });
+    assert(await alice.evaluate((el) => el.isConnected, navEl), 'page was reloaded instead of switched');
+  });
+
   await step('home lists the tree', async () => {
     await alice.goto(`${ORIGIN}/`);
     await alice.locator('.home-trees a.tree-card', { hasText: 'Paper' }).waitFor({ timeout: 8000 });

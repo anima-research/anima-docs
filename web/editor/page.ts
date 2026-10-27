@@ -18,6 +18,7 @@ import { renderDocument } from '../lib/markdown';
 import { embedOf, wrapByType } from '../../src/mdext';
 import { findQuote } from '../../src/quote';
 import { openFilesDialog } from './files';
+import { followLinks } from './followlinks';
 import { searchPeople } from '../lib/people';
 import { avatar, confirmDialog, emptyState, errorMessage, openDialog, openMenu, promptDialog, spinner, toast, type MenuItem } from '../lib/ui';
 import { navigate } from '../router';
@@ -433,6 +434,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
         documentCompletions({ currentId: () => docId, canMount: () => canWrite() }),
         langC.of(markdown({ base: markdownLanguage, codeLanguages, addKeymap: true })),
         syntaxHighlighting(docHighlight),
+        followLinks((path) => { navigate(path); return true; }),
         liveC.of(livePreview),
         commentHighlights,
         EditorView.lineWrapping,
