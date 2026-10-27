@@ -1,5 +1,7 @@
-// Side panels: version history and activity (recorded changes, with diffs,
-// restore and undo; and editing by person).
+// The History panel: recorded changes (every stretch of editing, with diffs,
+// restore and undo), saved versions (named snapshots), and editing by person.
+// One panel, three tabs — a named version and a recorded change are the same
+// kind of thing to the person looking for "what did this look like before".
 
 import { api, atLeast, type ActivityRow, type Checkpoint, type Role, type Version } from '../lib/api';
 import { renderDiff } from './diffview';
@@ -18,7 +20,8 @@ export class SidePanel {
   private titleEl: HTMLElement;
   kind: PanelKind | null = null;
   onClose: () => void = () => {};
-  private tab: 'changes' | 'people' = 'changes';
+  private tab: 'changes' | 'versions' | 'people' = 'changes';
+  private versions: Version[] = [];
   private checkpoints: Checkpoint[] = [];
   private moreHistory = false;
   private activityRows: ActivityRow[] = [];
@@ -37,8 +40,9 @@ export class SidePanel {
     this.kind = kind;
     this.el.classList.add('open');
     this.el.setAttribute('aria-hidden', 'false');
-    this.el.setAttribute('aria-label', kind === 'versions' ? 'Version history' : 'Activity');
-    this.titleEl.textContent = kind === 'versions' ? 'Version history' : 'Activity';
+    this.el.setAttribute('aria-label', 'History');
+    this.titleEl.textContent = 'History';
+    if (kind === 'versions') this.tab = 'versions'; else if (this.tab === 'versions') this.tab = 'changes';
     this.comparing = false;
     void this.refresh();
   }
@@ -56,15 +60,13 @@ export class SidePanel {
     if (!kind) return;
     this.bodyEl.replaceChildren(h('div.side-loading', null, spinner(22)));
     try {
-      if (kind === 'versions') this.renderVersions((await api.versions(this.deps.docId)).versions);
-      else {
-        const [hist, act] = await Promise.all([api.history(this.deps.docId), api.activity(this.deps.docId)]);
-        this.checkpoints = hist.checkpoints;
-        this.moreHistory = hist.more;
-        this.activityRows = act.activity;
-        this.picked = [];
-        this.renderActivityPanel();
-      }
+      const [vers, hist, act] = await Promise.all([api.versions(this.deps.docId), api.history(this.deps.docId), api.activity(this.deps.docId)]);
+      this.versions = vers.versions;
+      this.checkpoints = hist.checkpoints;
+      this.moreHistory = hist.more;
+      this.activityRows = act.activity;
+      this.picked = [];
+      this.renderActivityPanel();
     } catch (e) {
       this.bodyEl.replaceChildren(emptyState({ title: 'Couldn’t load', text: errorMessage(e), action: h('button.btn', { type: 'button', onclick: () => void this.refresh() }, 'Try again') }));
     }
@@ -72,7 +74,7 @@ export class SidePanel {
 
   // ------------------------------------------------------------------ versions
 
-  private renderVersions(versions: Version[]) {
+  private renderVersions(versions: Version[]): HTMLElement {
     const canEdit = atLeast(this.deps.role(), 'editor');
     const parts: HTMLElement[] = [];
     if (canEdit) {
@@ -92,7 +94,7 @@ export class SidePanel {
       parts.push(form);
     }
     if (!versions.length) {
-      parts.push(emptyState({ art: icon('history', 34, 'empty-art-icon'), title: 'No named versions yet', text: canEdit ? 'Name the current version to keep a snapshot you can come back to or restore.' : 'Editors can name versions to keep snapshots of this document.' }));
+      parts.push(emptyState({ art: icon('history', 34, 'empty-art-icon'), title: 'No saved versions yet', text: canEdit ? 'Name the current version to keep a snapshot you can come back to or restore. Every stretch of editing is recorded under Changes regardless.' : 'Editors can name versions to keep snapshots of this document.' }));
     } else {
       const list = h('ol.version-list');
       for (const v of versions) {
@@ -108,7 +110,7 @@ export class SidePanel {
       }
       parts.push(list);
     }
-    this.bodyEl.replaceChildren(...parts);
+    return h('div.versions', null, ...parts);
   }
 
   private async viewVersion(v: Version) {
@@ -153,12 +155,12 @@ export class SidePanel {
   // ------------------------------------------------------------------ activity
 
   private renderActivityPanel() {
-    const tabs = h('div.seg.activity-tabs', { role: 'tablist', 'aria-label': 'Activity view' },
-      ...([['changes', 'Changes'], ['people', 'By person']] as const).map(([k, label]) => h('button.seg-btn', {
+    const tabs = h('div.seg.activity-tabs', { role: 'tablist', 'aria-label': 'History view' },
+      ...([['changes', 'Changes'], ['versions', 'Saved versions'], ['people', 'By person']] as const).map(([k, label]) => h('button.seg-btn', {
         type: 'button', role: 'tab', 'aria-selected': String(this.tab === k), class: this.tab === k ? 'on' : '',
         onclick: () => { this.tab = k; this.renderActivityPanel(); },
       }, label)));
-    const content = this.tab === 'changes' ? this.renderChanges() : this.renderActivity(this.activityRows);
+    const content = this.tab === 'changes' ? this.renderChanges() : this.tab === 'versions' ? this.renderVersions(this.versions) : this.renderActivity(this.activityRows);
     this.bodyEl.replaceChildren(tabs, content);
   }
 

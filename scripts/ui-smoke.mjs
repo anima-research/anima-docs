@@ -391,9 +391,10 @@ try {
     await alice.getByRole('radio', { name: 'Edit mode' }).click();
   });
 
-  await step('version history: name a version, view it; activity panel', async () => {
+  await step('history panel: recorded changes, a saved version named and viewed, by person', async () => {
     await alice.getByRole('button', { name: 'More document actions' }).click();
-    await alice.getByRole('menuitem', { name: 'Version history' }).click();
+    await alice.getByRole('menuitem', { name: 'History' }).click();
+    await alice.locator('.side-panel.open').getByRole('tab', { name: 'Saved versions' }).click();
     await alice.getByLabel('Version name').fill('Ready for review');
     await alice.getByRole('button', { name: 'Save', exact: true }).click();
     await alice.locator('.version-item', { hasText: 'Ready for review' }).waitFor();
@@ -402,8 +403,7 @@ try {
     await alice.locator('dialog.version-dialog .prose table').waitFor();
     await shot(alice, '15-version-view');
     await alice.locator('dialog.version-dialog').getByRole('button', { name: 'Close', exact: true }).click();
-    await alice.getByRole('button', { name: 'More document actions' }).click();
-    await alice.getByRole('menuitem', { name: 'Activity' }).click();
+    await alice.locator('.side-panel.open').getByRole('tab', { name: 'Changes' }).click();
     // Recorded changes: the agent's edit is its own change, the people's edits theirs.
     await alice.locator('.change-row', { hasText: 'Quill' }).first().waitFor();
     await alice.locator('.change-row', { hasText: 'Bob Rivera' }).first().waitFor();

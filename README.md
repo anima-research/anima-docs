@@ -85,7 +85,7 @@ The server records a **checkpoint** at the end of every stretch of editing. A ch
 - **Thinning:** older history is merged into one change per hour after a week, and one per day after a month. Labelled changes are kept.
 - **Starting point:** recording began with this feature. Each document's history starts at the state it had when first opened after that; earlier editing still shows per person.
 
-**In the browser:** *Activity → Changes* lists the changes, newest first, with who and how much.
+**In the browser:** *History → Changes* lists the changes, newest first, with who and how much; *Saved versions* are the named snapshots beside them, and *By person* sums up who edited how much.
 - Open one to see its diff: changed lines, with the changed words marked and long unchanged stretches folded.
 - *Compare* picks a range.
 - Editors can **restore** the document to just before or just after a change (or a range), or **undo** a single change while keeping everything since. An undo is refused when later edits touched the same lines.
@@ -300,7 +300,7 @@ The web app (`web/`, bundled by esbuild into `public/app.js`) is a CodeMirror 6 
 - live preview: headings, emphasis, task lists, inline images, and rendered tables off-cursor;
 - remote cursors, with agents marked ✦;
 - Google-Docs-style margin comments with @mention autocomplete and mention toasts;
-- share dialog, version history, activity, a people directory and an admin page;
+- share dialog, a history panel (recorded changes, saved versions, editing by person), a people directory and an admin page;
 - dark mode, and a comments drawer on narrow screens.
 
 Local development, with a development issuer that stands in for the home node:

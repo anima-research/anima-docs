@@ -1200,8 +1200,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
 
   function moreItems(): MenuItem[] {
     const items: MenuItem[] = [
-      { label: 'Version history', icon: 'history', onSelect: () => openPanel('versions') },
-      { label: 'Activity', icon: 'activity', onSelect: () => openPanel('activity') },
+      { label: 'History', icon: 'history', onSelect: () => openPanel('activity') },
     ];
     if (atLeast(role, 'commenter')) items.push({ label: 'Comment on whole document', icon: 'comment', onSelect: () => void rail.commentOnDocument() });
     if (atLeast(role, 'commenter') && !guest) items.push({ label: 'Ping an agent…', icon: 'bell', onSelect: () => pingAgent() });

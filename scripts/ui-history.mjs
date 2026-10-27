@@ -129,7 +129,7 @@ let docId = '';
 
 async function openActivity() {
   await alice.getByRole('button', { name: 'More document actions' }).click();
-  await alice.getByRole('menuitem', { name: 'Activity' }).click();
+  await alice.getByRole('menuitem', { name: 'History' }).click();
   await alice.locator('.side-panel.open .change-list, .side-panel.open .empty-state').first().waitFor();
 }
 const rows = () => alice.locator('.side-panel.open .change-row');
