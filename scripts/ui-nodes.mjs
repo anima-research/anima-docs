@@ -680,6 +680,31 @@ try {
     await alice.waitForFunction(() => window.__anima.view.state.doc.toString().includes('<p id="p2">Budget is & grows.</p>'), null, { timeout: 8000 });
   });
 
+  await step('annotating a markdown document in Preview: select rendered text → comment; the comment highlights; double-click edits the text', async () => {
+    const d = (await api(alice, 'POST', '/api/docs', { title: 'Plan', content: '# Plan\n\nWe ship **the thing** in March.\n\nBudget stays flat.\n' })).json;
+    await openDoc(alice, d.id);
+    await alice.locator('.seg-btn[data-mode=preview]').click();
+    const body = alice.locator('.preview-body');
+    await body.locator('p', { hasText: 'We ship' }).waitFor({ timeout: 8000 });
+    // Select "ship the thing" across the <strong> and use the Comment bar.
+    await body.locator('p', { hasText: 'We ship' }).evaluate((p) => { const r = document.createRange(); r.setStart(p.firstChild, 3); r.setEnd(p.querySelector('strong').firstChild, 9); const s = window.getSelection(); s.removeAllRanges(); s.addRange(r); document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true })); });
+    await alice.locator('.anima-bar button', { hasText: 'Comment' }).click();
+    const composer = alice.locator('textarea.comment-input').first();
+    await composer.waitFor({ timeout: 8000 });
+    await composer.fill('Which thing?');
+    await composer.press('Meta+Enter');
+    await alice.waitForFunction(() => window.__anima.nodes.allThreads().some((t) => t.quote === 'ship **the thing' && t.comments[0]?.body === 'Which thing?'), null, { timeout: 8000 });
+    await body.locator('mark.anima-mark[data-thread]').first().waitFor({ timeout: 8000 });
+    // Double-click the second paragraph, edit, confirm: the markdown source changes.
+    await body.locator('p', { hasText: 'Budget' }).dblclick();
+    const edit = body.locator('.anima-edit');
+    await edit.waitFor({ timeout: 5000 });
+    await alice.keyboard.press('Meta+a'); await alice.keyboard.type('Budget grows.'); await alice.keyboard.press('Enter');
+    await alice.locator('dialog.dialog button.btn.primary', { hasText: 'Replace' }).click();
+    await alice.waitForFunction(() => window.__anima.view.state.doc.toString().includes('\nBudget grows.\n'), null, { timeout: 8000 });
+    await alice.locator('.seg-btn[data-mode=edit]').click();
+  });
+
   await step('a document with an anyone-with-the-link link shows that link as its address, and the link address reloads to the document', async () => {
     const d = (await api(alice, 'POST', '/api/docs', { title: 'Open notes', content: '# Open notes\n\nShared with the world.\n' })).json;
     const link = (await api(alice, 'POST', `/api/docs/${d.id}/links`, { role: 'viewer', who: 'anyone' })).json;

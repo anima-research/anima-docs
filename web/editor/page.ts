@@ -16,9 +16,10 @@ import { icon } from '../lib/icons';
 import { splitLabel } from '../lib/format';
 import { renderDocument } from '../lib/markdown';
 import { embedOf, wrapByType } from '../../src/mdext';
-import { findQuote } from '../../src/quote';
+import { findQuote, indexSource } from '../../src/quote';
 import { openFilesDialog } from './files';
 import { followLinks } from './followlinks';
+import { annotationLayer, type AnnotationLayer } from './annotate';
 import { searchPeople } from '../lib/people';
 import { avatar, confirmDialog, emptyState, errorMessage, openDialog, openMenu, promptDialog, spinner, toast, type MenuItem } from '../lib/ui';
 import { navigate } from '../router';
@@ -195,6 +196,8 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   });
   /** Suggesting mode: your edits become suggestions (see suggest.ts). */
   let session: SuggestSession | null = null;
+  /** The preview's annotation layer; assigned once the preview exists (the role may be applied before). */
+  let previewAnnotations: AnnotationLayer | null = null;
   /** applyDocType has run once (the view exists); role changes after that re-apply it. */
   let typeApplied = false;
   let switching = false;
@@ -710,6 +713,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     app.classList.toggle('suggesting', sug);
     editTools.hidden = !canWrite();
     imageTool.hidden = sug;
+    if (typeApplied) sendFrameConfig(); // the rendered surfaces (page frame, preview) follow the role and the mode
     readNotice.hidden = canWrite() || role === 'commenter';
     readNotice.replaceChildren(icon('eye', 16), ...(role === 'commenter' ? ['Connecting…'] : ['View only.', h('span.tb-notice-more', null, ' Ask the owner for access to comment or edit.')]));
     // Read-only: the toolbar holds only that notice (phones drop the row; the header's pill says "Viewing").
@@ -913,44 +917,70 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   // a thread to open. Nothing from the frame changes the document unconfirmed.
   let latestThreads: Thread[] = [];
   const toFrame = (m: Record<string, unknown>) => { try { pageFrame.contentWindow?.postMessage({ anima: 'app', ...m }, '*'); } catch { /* frame not ready */ } };
-  const sendFrameConfig = () => toFrame({ type: 'config', canComment: atLeast(role, 'commenter') && !guest, canEdit: canEdit() && !suggesting() });
+  const annotationConfig = () => ({ canComment: atLeast(role, 'commenter') && !guest, canEdit: canEdit() && !suggesting() });
+  const sendFrameConfig = () => { toFrame({ type: 'config', ...annotationConfig() }); previewAnnotations?.setConfig(annotationConfig()); };
+  // A thread's quote is a slice of the source; the rendered surface searches its own text, so the
+  // quote is normalized the same way the source is when a selection is looked up (tags and markdown markers gone).
+  const highlightThreads = () => {
+    const html = isHtml();
+    return latestThreads.filter((t) => t.quote && !t.orphaned).map((t) => ({ id: t.id, quote: indexSource(t.quote ?? '', { html, markdown: !html }).text.trim(), resolved: t.resolved }));
+  };
   function sendHighlights() {
-    if (!isHtml()) return;
-    toFrame({ type: 'highlights', threads: latestThreads.filter((t) => t.quote && !t.orphaned).map((t) => ({ id: t.id, quote: t.quote, resolved: t.resolved })) });
+    if (isHtml()) toFrame({ type: 'highlights', threads: highlightThreads() });
+    else previewAnnotations?.setHighlights(highlightThreads());
   }
-  /** The source range of a quote seen on the page (the view's text, so positions are the editor's). */
+  /** The source range of a quote seen on the rendered document (the view's text, so positions are the editor's). */
   function sourceRange(m: { quote?: unknown; prefix?: unknown; suffix?: unknown }) {
-    return findQuote(view.state.doc.toString(), String(m.quote ?? ''), typeof m.prefix === 'string' ? m.prefix : null, typeof m.suffix === 'string' ? m.suffix : null, { html: true });
+    const html = isHtml();
+    return findQuote(view.state.doc.toString(), String(m.quote ?? ''), typeof m.prefix === 'string' ? m.prefix : null, typeof m.suffix === 'string' ? m.suffix : null, { html, markdown: !html });
   }
+  // What a rendered surface (the framed page or the preview) proposes. Nothing changes the document unconfirmed.
+  const proposals = {
+    openThread(id: string) { rail.setActive(id, { scroll: true }); },
+    comment(m: { quote?: unknown; prefix?: unknown; suffix?: unknown }) {
+      if (!atLeast(role, 'commenter')) return;
+      const r = sourceRange(m);
+      if (!r) {
+        toast(isHtml() ? 'That text is not in the page’s source (the page may produce it when it runs); commenting on the document instead.' : 'That text is not in the document’s source; commenting on the document instead.', { kind: 'info', timeout: 5000 });
+        void rail.commentOnDocument(); return;
+      }
+      view.dispatch({ selection: { anchor: r.from, head: r.to } });
+      rail.startDraft();
+    },
+    edit(m: { quote?: unknown; prefix?: unknown; suffix?: unknown; text?: unknown }, revert: () => void) {
+      const html = isHtml();
+      if (!canEdit() || suggesting()) { toast(`Switch to Editing to change the ${html ? 'page' : 'document'}’s text.`, { kind: 'info' }); revert(); return; }
+      const next = String(m.text ?? '');
+      const r = sourceRange(m);
+      const current = r ? view.state.doc.sliceString(r.from, r.to) : '';
+      // A run the rendered text came from as it is: no tags, no markdown markers inside it.
+      const plain = html ? !/<[^>]+>/.test(current) : /^[^*_`\[\]\\~|<>$]*$/.test(current);
+      if (!r || !plain) { toast(`That text is not a single run in the ${html ? 'page' : 'document'}’s source; edit it in ${html ? 'Source' : 'Edit mode'}.`, { kind: 'info', timeout: 5000 }); revert(); return; }
+      void confirmDialog({ title: `Change the ${html ? 'page' : 'document'}’s text?`, message: h('span', null, 'Replace ', h('q', null, current.length > 160 ? `${current.slice(0, 160)}…` : current), ' with ', h('q', null, next.length > 160 ? `${next.slice(0, 160)}…` : next), '.'), confirmLabel: 'Replace' }).then((ok) => {
+        if (!ok) { revert(); return; }
+        const again = sourceRange(m); // the source may have moved while the dialog was up
+        if (!again) { toast('The text changed meanwhile; edit it in Source.', { kind: 'info' }); revert(); return; }
+        view.dispatch({ changes: { from: again.from, to: again.to, insert: next }, userEvent: 'input.page' });
+        toast('Changed.', { kind: 'success', timeout: 2000 });
+      });
+    },
+  };
   const onFrameMessage = (e: MessageEvent) => {
     if (e.source !== pageFrame.contentWindow) return;
     const m = e.data as { anima?: string; type?: string; id?: unknown; quote?: unknown; prefix?: unknown; suffix?: unknown; text?: unknown };
     if (!m || m.anima !== 'page') return;
     if (m.type === 'ready') { sendFrameConfig(); sendHighlights(); return; }
-    if (m.type === 'open-thread') { rail.setActive(String(m.id ?? ''), { scroll: true }); return; }
-    if (m.type === 'comment') {
-      if (!atLeast(role, 'commenter')) return;
-      const r = sourceRange(m);
-      if (!r) { toast('That text is not in the page’s source (the page may produce it when it runs); commenting on the document instead.', { kind: 'info', timeout: 5000 }); void rail.commentOnDocument(); return; }
-      view.dispatch({ selection: { anchor: r.from, head: r.to } });
-      rail.startDraft();
-      return;
-    }
-    if (m.type === 'edit') {
-      if (!canEdit() || suggesting()) { toast('Switch to Editing to change the page’s text.', { kind: 'info' }); return; }
-      const next = String(m.text ?? '');
-      const r = sourceRange(m);
-      const current = r ? view.state.doc.sliceString(r.from, r.to) : '';
-      if (!r || /<[^>]+>/.test(current)) { toast('That text is not a single run in the page’s source; edit it in Source.', { kind: 'info', timeout: 5000 }); return; }
-      void confirmDialog({ title: 'Change the page’s text?', message: h('span', null, 'Replace ', h('q', null, current.length > 160 ? `${current.slice(0, 160)}…` : current), ' with ', h('q', null, next.length > 160 ? `${next.slice(0, 160)}…` : next), '.'), confirmLabel: 'Replace' }).then((ok) => {
-        if (!ok) { frameKey = ''; renderPreview(); return; } // the page reverts
-        const again = sourceRange(m); // the source may have moved while the dialog was up
-        if (!again) { toast('The text changed meanwhile; edit it in Source.', { kind: 'info' }); return; }
-        view.dispatch({ changes: { from: again.from, to: again.to, insert: next }, userEvent: 'input.page' });
-        toast('Changed.', { kind: 'success', timeout: 2000 });
-      });
-    }
+    if (m.type === 'open-thread') proposals.openThread(String(m.id ?? ''));
+    else if (m.type === 'comment') proposals.comment(m);
+    else if (m.type === 'edit') proposals.edit(m, () => { frameKey = ''; renderPreview(); }); // the page reverts by reloading
   };
+  // The markdown preview is the app's own DOM: the same layer, wired directly.
+  previewAnnotations = annotationLayer(previewBody, {
+    openThread: (id) => proposals.openThread(id),
+    comment: (p) => proposals.comment(p),
+    edit: (p) => proposals.edit(p, () => renderPreview()),
+  });
+  cleanups.push(() => previewAnnotations?.destroy());
   // ⌘F / Ctrl-F anywhere on the page goes to the editor's search while the editor is on screen: the
   // browser's own find only sees the lines the editor has rendered, so it misses most of a long document.
   const onFindKey = (e: KeyboardEvent) => {
@@ -1076,6 +1106,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     const text = renderSource(binding.current);
     previewBody.replaceChildren(renderDocument(text));
     if (!text.length) previewBody.replaceChildren(h('p.preview-empty', null, 'This document is empty.'));
+    previewAnnotations?.refresh();
   };
   const schedulePreviewMd = debounce(renderPreview, 120);
   const schedulePreviewHtml = debounce(renderPreview, 900);
@@ -1093,7 +1124,8 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     openPageLink.hidden = !html;
     // A document that stops being a page drops its frame. One that is a page keeps it: a role change (the socket
     // confirming a reader's role, say) only changes what the annotation layer may do, not the page.
-    if (!html) { frameKey = ''; frameAdopts = false; } else sendFrameConfig();
+    if (!html) { frameKey = ''; frameAdopts = false; }
+    sendFrameConfig();
     // An HTML page opens as the page; the source is a click away (Edit or Split). Readers always get the page.
     if (html && (!canWrite() || !modeChosen) && mode !== 'preview') { setMode('preview'); return; }
     if (mode !== 'edit') renderPreview();

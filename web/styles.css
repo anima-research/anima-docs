@@ -1394,3 +1394,13 @@ dialog.lightbox figcaption { color: #e6e8ec; font: 14px var(--font-ui); }
 
 /* ⌘/Ctrl held: links in the source are followable */
 .cm-editor.cm-mod-held .tok-link, .cm-editor.cm-mod-held .tok-url { cursor: pointer; text-decoration: underline; }
+
+/* The preview's annotation layer (the same as a framed page's, in the app's own DOM) */
+.preview-body mark.anima-mark { background: color-mix(in srgb, #e8b400 40%, transparent); color: inherit; cursor: pointer; border-radius: 2px; box-shadow: 0 1px 0 color-mix(in srgb, #e8b400 60%, transparent); }
+.preview-body mark.anima-mark:hover { background: color-mix(in srgb, #e8b400 65%, transparent); }
+.preview-body mark.anima-mark.resolved { background: color-mix(in srgb, var(--text-3) 14%, transparent); box-shadow: none; }
+.anima-bar { position: fixed; z-index: 60; display: flex; align-items: center; gap: 8px; padding: 4px 6px; background: var(--text-1); color: var(--bg-1); border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,.25); font: 13px/1.2 var(--font-ui, system-ui, sans-serif); }
+.anima-bar button { font: inherit; color: #fff; background: var(--accent); border: 0; border-radius: 6px; padding: 5px 10px; cursor: pointer; }
+.anima-bar button:hover { filter: brightness(.92); }
+.anima-bar .anima-hint { opacity: .7; padding-right: 4px; }
+.preview-body .anima-edit { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 2px; background: color-mix(in srgb, var(--accent) 8%, transparent); }
