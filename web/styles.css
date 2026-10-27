@@ -1411,4 +1411,6 @@ dialog.lightbox figcaption { color: #e6e8ec; font: 14px var(--font-ui); }
 .thread-card.closed .card-quote { -webkit-line-clamp: 1; }
 .thread-card.closed .more-replies { margin-top: 8px; font-weight: 500; color: var(--text-2); }
 .thread-card.closed .more-replies:hover { color: var(--accent); }
+.thread-card.closed .sugg-diff { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.thread-card.closed .sugg-note, .thread-card.closed .sugg-hint, .thread-card.closed .card-banner.warn { display: none; }
 .collapse-btn svg { transform: rotate(180deg); }

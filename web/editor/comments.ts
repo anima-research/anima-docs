@@ -608,10 +608,9 @@ export class CommentsRail {
       parts.push(h('div.assignee-chip', { class: mine ? 'me' : '' }, icon('userCheck', 14), mine ? 'Assigned to you' : 'Assigned to ', mine ? null : h('strong', null, shownName(t.assignee)), mine ? null : kindBadge(t.assignee.kind)));
     }
     const comments = t.comments;
-    // A card that is not the active one is closed: the first comment (clamped by CSS) and one line for the
-    // replies. Open it by clicking; the open card has a collapse button. Suggestions keep their own shape.
-    const closed = !active && !t.suggestion;
-    const collapse = !active && !!t.suggestion && comments.length > 3;
+    // A card that is not the active one is closed: the first comment (a suggestion: its change) clamped by
+    // CSS, and one line for the replies. Open it by clicking; the open card has a collapse button.
+    const closed = !active;
     card.el.classList.toggle('closed', closed);
     comments.forEach((c, i) => {
       if (t.suggestion && i === 0) return; // the suggestion's header and note are rendered above
@@ -621,10 +620,6 @@ export class CommentsRail {
           parts.push(h('button.more-replies', { type: 'button', onclick: () => this.setActive(t.id, { scroll: true, gentle: true }) },
             `${comments.length - 1} ${comments.length === 2 ? 'reply' : 'replies'} · last by ${shownName(last.author)} ${relTime(last.createdAt)}`));
         }
-        return;
-      }
-      if (collapse && i > 0 && i < comments.length - 1) {
-        if (i === 1) parts.push(h('button.more-replies', { type: 'button', onclick: () => this.setActive(t.id) }, `${comments.length - 2} more replies`));
         return;
       }
       parts.push(this.renderComment(card, t, c, i === 0, ctx));
@@ -669,6 +664,7 @@ export class CommentsRail {
     else if (sg.status === 'rejected') parts.push(h('div.card-banner.rejected', null, icon('x', 14), `Rejected${t.resolvedBy ? ` by ${t.resolvedBy.name}` : ''}`));
     else if (sg.outdated) parts.push(h('div.card-banner.warn', null, icon('alert', 14), 'The text changed since this was suggested', this.canDecide ? ' — it can only be rejected' : ''));
     const actions: HTMLElement[] = [];
+    if (this.active === t.id) actions.push(h('button.icon-btn.sm.collapse-btn', { type: 'button', 'aria-label': 'Collapse', 'data-tip': 'Collapse', onclick: (e: MouseEvent) => { e.stopPropagation(); this.setActive(null); } }, icon('chevronDown', 16)));
     if (open && this.canDecide) {
       // Accepting names the version on screen: if the author changed it meanwhile, the server refuses.
       actions.push(h('button.icon-btn.sm.accept-btn', { type: 'button', 'aria-label': 'Accept suggestion', 'data-tip': sg.outdated ? 'Outdated: can’t be accepted' : 'Accept', disabled: sg.outdated, onclick: () => void this.op({ type: 'suggestion.decide', id: t.id, decision: 'accept', version: sg.version }) }, icon('check', 18)));
