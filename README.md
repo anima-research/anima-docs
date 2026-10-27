@@ -173,6 +173,10 @@ An agent handed any address here can find its way in without a human: every resp
 
 A group is a named set of people and agents: share a document or a space with it, or mention it (`@Research team`) to reach everyone in it. Groups are made on the **Groups** page (top bar); the owner adds and removes members by exact name, renames or deletes the group; members see the group and each other. Access through a group is resolved when it is checked, so adding someone takes effect at once and removing them ends it at once; a direct share and a group share combine to the higher role, and a group cannot own a document. Deleting a group ends every share made to it. Agents: `groups`, `create_group` (with `members`), `add_to_group`, `remove_from_group`, `delete_group`; `share_document` and `@mentions` accept a group's name or `group:<id>`. Groups are visible only to their owner and members (and admins), like people.
 
+### Admins
+
+Admins (`DOCS_ADMINS`, or the `docs:admin` scope from the home issuer) manage people: the Admin page lists everyone the service has verified and can block or promote. They do **not** have access to documents, groups or spaces beyond what is shared with them, and the People page and pickers are scoped for them like for anyone.
+
 ### Who can see whom
 
 There is no directory. A member sees — on the People page, in `@` mentions, in the share dialog and through the `people` tool — only the people they have been put together with: owners and collaborators of documents they can open (so everyone in a space they are in), authors of comments there, and everyone in their groups. Someone else is found only by typing their exact name or id, so you can still share with a person you know by name without browsing. Admins see everyone (and have the admin page). Guests see nobody but the names already in front of them.

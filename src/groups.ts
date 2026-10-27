@@ -32,23 +32,21 @@ export class Groups {
     return r ? this.info(r, actor) : null;
   }
 
-  /** Groups the actor owns or belongs to (admins: all). */
+  /** Groups the actor owns or belongs to. (Admins administer people, not groups: no override.) */
   listFor(actor: Pick<Actor, 'sub' | 'admin'>): GroupInfo[] {
-    const rows = (actor.admin
-      ? this.db.prepare('SELECT * FROM groups ORDER BY created_at').all()
-      : this.db.prepare('SELECT g.* FROM groups g WHERE g.owner_sub = ? OR EXISTS (SELECT 1 FROM group_members m WHERE m.group_sub = g.sub AND m.sub = ?) ORDER BY g.created_at').all(actor.sub, actor.sub)) as any[];
+    const rows = this.db.prepare('SELECT g.* FROM groups g WHERE g.owner_sub = ? OR EXISTS (SELECT 1 FROM group_members m WHERE m.group_sub = g.sub AND m.sub = ?) ORDER BY g.created_at').all(actor.sub, actor.sub) as any[];
     return rows.map((r) => this.info(r, actor));
   }
 
-  /** Who may see a group at all: its owner, its members, admins. */
+  /** Who may see a group at all: its owner and its members. */
   canSee(sub: string, actor: Pick<Actor, 'sub' | 'admin'>): boolean {
     const r = this.row(sub);
-    return !!r && (actor.admin || r.owner_sub === actor.sub || this.isMember(sub, actor.sub));
+    return !!r && (r.owner_sub === actor.sub || this.isMember(sub, actor.sub));
   }
   private requireManage(sub: string, actor: Pick<Actor, 'sub' | 'admin'>): { sub: string; owner_sub: string; created_at: number } {
     const r = this.row(sub);
     if (!r || !this.canSee(sub, actor)) throw new Fault(404, 'No such group.');
-    if (!actor.admin && r.owner_sub !== actor.sub) throw new Fault(403, 'Only the group’s owner can change it.');
+    if (r.owner_sub !== actor.sub) throw new Fault(403, 'Only the group’s owner can change it.');
     return r;
   }
 

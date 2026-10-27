@@ -927,7 +927,7 @@ export function createHttp(app: App) {
         if (path === '/api/people' && method === 'GET') {
           // No directory: members see the people they work with (plus an exact name or id they type in full); admins see everyone.
           const query = url.searchParams.get('q') ?? undefined;
-          const known = a.admin ? null : app.docs.collaborators(a);
+          const known: Set<string> | null = app.docs.collaborators(a); // admins too: /api/admin/principals is the directory
           const exact = query?.trim().toLowerCase();
           const visible = P.list({ query, limit: known ? 200 : 50 }).filter((p) => !known || known.has(p.sub) || (!!exact && (p.name.toLowerCase() === exact || p.sub.toLowerCase() === exact))).slice(0, 50);
           send(200, { people: visible.map((p) => ({ sub: p.sub, name: p.name, kind: p.kind, color: p.color, label: P.label(p.sub), issuer: p.issuer, role: p.role, lastSeen: p.lastSeen })) });

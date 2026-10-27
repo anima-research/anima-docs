@@ -437,7 +437,7 @@ test('static files: gzip at once, brotli once it has been made', async () => {
   assert.equal(image.headers['content-encoding'], undefined);
 });
 
-test('people are scoped: you see those you share documents or spaces with (or name exactly); admins see everyone', async () => {
+test('people are scoped: you see those you share documents or spaces with (or name exactly); admins too', async () => {
   // Fresh people: earlier tests already put Ann and Bob together.
   const ann = await signIn('Cara');
   const bob = await signIn('Dan');
@@ -451,8 +451,9 @@ test('people are scoped: you see those you share documents or spaces with (or na
   const d = await (await fetch(`${S.base}/api/docs`, { method: 'POST', headers: H({ Cookie: ann }), body: '{"title":"Together"}' })).json();
   await fetch(`${S.base}/api/docs/${d.id}/share`, { method: 'POST', headers: H({ Cookie: ann }), body: JSON.stringify({ who: 'human:test:dan', role: 'viewer' }) });
   assert.ok((await names(bob)).includes('Cara') && (await names(ann)).includes('Dan'), 'collaborators should see each other');
-  // Admins see everyone.
-  assert.ok((await names(root)).includes('Cara') && (await names(root)).includes('Dan'));
+  // Admins are scoped like anyone here; the admin page is their directory.
+  assert.ok(!(await names(root)).includes('Cara'), 'admin saw a stranger in the picker');
+  assert.ok(((await (await fetch(`${S.base}/api/admin/principals`, { headers: { Cookie: root } })).json()).principals as { name: string }[]).some((p) => p.name === 'Cara'), 'admin page lists everyone');
   // The tool is scoped the same way.
   const agent = S.token('Scout');
   await fetch(`${S.base}/api/operations/whoami`, { method: 'POST', headers: { Authorization: `Bearer ${agent}`, 'Content-Type': 'application/json' }, body: '{}' });

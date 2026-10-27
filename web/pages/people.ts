@@ -110,7 +110,7 @@ export function mountAdmin(root: HTMLElement, me: Me): () => void {
 
   const body = h('main.home', null,
     h('div.home-head', null,
-      h('div', null, h('h1', null, 'Admin'), h('p.home-sub', null, 'Everyone the service has verified. Admins own every document; blocked principals are signed out and refused.'),
+      h('div', null, h('h1', null, 'Admin'), h('p.home-sub', null, 'Everyone the service has verified. Admins manage people, not documents: they read only what is shared with them. Blocked principals are signed out and refused.'),
         h('p.home-sub.small#guests-hint', null, 'Guests opened an “anyone with the link” link without signing in. Block one to end their session everywhere.')),
       h('div.home-actions', null, guestsLabel, h('label.search', null, icon('search', 17), searchInput))),
     table);

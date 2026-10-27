@@ -131,7 +131,8 @@ export class Documents extends EventEmitter {
   baseRole(docId: string, actor: Pick<Actor, 'sub' | 'admin'>): Role | null {
     const d = this.get(docId);
     if (!d || isGuest(actor.sub)) return null;
-    if (actor.admin || d.ownerSub === actor.sub) return 'owner';
+    // Admins administer people, not documents: they read only what is shared with them, like anyone.
+    if (d.ownerSub === actor.sub) return 'owner';
     let best: Role | null = null;
     const acl = (this.db.prepare('SELECT role FROM doc_acl WHERE doc_id = ? AND sub = ?').get(docId, actor.sub) as { role: Role } | undefined)?.role ?? null;
     if (acl) best = acl;
@@ -257,13 +258,13 @@ export class Documents extends EventEmitter {
     const rows = this.db.prepare(`
       SELECT d.* FROM documents d
       WHERE d.deleted_at IS NULL AND d.title LIKE @q ${opts.sections ? '' : "AND d.title != ''"}
-        AND (@admin = 1 OR d.owner_sub = @sub OR (@guest = 0 AND d.general_access != 'restricted')
+        AND (d.owner_sub = @sub OR (@guest = 0 AND d.general_access != 'restricted')
              OR EXISTS (SELECT 1 FROM doc_acl a WHERE a.doc_id = d.id AND a.sub = @sub)
              OR EXISTS (SELECT 1 FROM doc_acl a JOIN group_members m ON m.group_sub = a.sub WHERE a.doc_id = d.id AND m.sub = @sub)
              OR EXISTS (SELECT 1 FROM link_holders h JOIN doc_links l ON l.id = h.link_id
                         WHERE h.doc_id = d.id AND h.sub = @sub AND l.revoked_at IS NULL AND (l.expires_at IS NULL OR l.expires_at > @now)))
       ORDER BY d.updated_at DESC LIMIT @limit
-    `).all({ q, sub: actor.sub, admin: actor.admin && !isGuest(actor.sub) ? 1 : 0, guest: isGuest(actor.sub) ? 1 : 0, now: Date.now(), limit: Math.min(opts.limit ?? 100, 500) }) as DocRow[];
+    `).all({ q, sub: actor.sub, guest: isGuest(actor.sub) ? 1 : 0, now: Date.now(), limit: Math.min(opts.limit ?? 100, 500) }) as DocRow[];
     return rows.map(meta)
       .map((d) => ({ ...d, role: this.role(d.id, actor)! }))
       .filter((d) => d.role && (opts.filter === 'owned' ? d.ownerSub === actor.sub : opts.filter === 'shared' ? d.ownerSub !== actor.sub : true));
