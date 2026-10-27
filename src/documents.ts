@@ -264,6 +264,22 @@ export class Documents extends EventEmitter {
       .filter((d) => d.role && (opts.filter === 'owned' ? d.ownerSub === actor.sub : opts.filter === 'shared' ? d.ownerSub !== actor.sub : true));
   }
 
+  /**
+   * The people this actor has been put together with: owners and shared-with principals of
+   * documents they can open (which includes every page of a space they are in), and the
+   * authors of comments there. A public service has no directory; this is who you may name.
+   */
+  collaborators(actor: Actor): Set<string> {
+    const ids = this.list(actor, { limit: 500, sections: true }).map((d) => d.id);
+    const out = new Set<string>([actor.sub]);
+    if (!ids.length) return out;
+    const marks = ids.map(() => '?').join(',');
+    for (const r of this.db.prepare(`SELECT owner_sub AS s FROM documents WHERE id IN (${marks})
+      UNION SELECT sub AS s FROM doc_acl WHERE doc_id IN (${marks})
+      UNION SELECT author_sub AS s FROM comments WHERE doc_id IN (${marks})`).all(...ids, ...ids, ...ids) as { s: string }[]) out.add(r.s);
+    return out;
+  }
+
   /** Full-text search over live content of accessible documents. */
   search(actor: Actor, query: string, limit = 20): { doc: DocMeta; line: number; snippet: string }[] {
     const needle = query.toLowerCase();

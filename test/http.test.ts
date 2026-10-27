@@ -436,3 +436,26 @@ test('static files: gzip at once, brotli once it has been made', async () => {
   const image = await rawGet(`${S.base}/og-default.png`, { 'Accept-Encoding': 'br, gzip' });
   assert.equal(image.headers['content-encoding'], undefined);
 });
+
+test('people are scoped: you see those you share documents or spaces with (or name exactly); admins see everyone', async () => {
+  // Fresh people: earlier tests already put Ann and Bob together.
+  const ann = await signIn('Cara');
+  const bob = await signIn('Dan');
+  const root = await signIn('Root');
+  const names = async (cookie: string, q?: string) => ((await (await fetch(`${S.base}/api/people${q ? `?q=${encodeURIComponent(q)}` : ''}`, { headers: { Cookie: cookie } })).json()).people as { name: string }[]).map((p) => p.name);
+  // Strangers: Bob does not see Ann by browsing or by a partial name — only by her exact name.
+  assert.ok(!(await names(bob)).includes('Cara'), 'directory leaked');
+  assert.ok(!(await names(bob, 'Car')).includes('Cara'), 'partial name leaked');
+  assert.ok((await names(bob, 'cara')).includes('Cara'), 'exact name should resolve');
+  // Shared a document: now they know each other.
+  const d = await (await fetch(`${S.base}/api/docs`, { method: 'POST', headers: H({ Cookie: ann }), body: '{"title":"Together"}' })).json();
+  await fetch(`${S.base}/api/docs/${d.id}/share`, { method: 'POST', headers: H({ Cookie: ann }), body: JSON.stringify({ who: 'human:test:dan', role: 'viewer' }) });
+  assert.ok((await names(bob)).includes('Cara') && (await names(ann)).includes('Dan'), 'collaborators should see each other');
+  // Admins see everyone.
+  assert.ok((await names(root)).includes('Cara') && (await names(root)).includes('Dan'));
+  // The tool is scoped the same way.
+  const agent = S.token('Scout');
+  await fetch(`${S.base}/api/operations/whoami`, { method: 'POST', headers: { Authorization: `Bearer ${agent}`, 'Content-Type': 'application/json' }, body: '{}' });
+  const seen = (await (await fetch(`${S.base}/api/operations/people`, { method: 'POST', headers: { Authorization: `Bearer ${agent}`, 'Content-Type': 'application/json' }, body: '{}' })).json()).content[0].text as string;
+  assert.ok(!seen.includes('Cara') && !seen.includes('Dan'), `agent saw strangers: ${seen}`);
+});

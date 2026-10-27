@@ -472,10 +472,12 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: 'people', featureSet: 'docs.read', toolClass: 'notes',
-    description: 'Humans and agents known to this service (for mentions and sharing). Mention someone in a comment with @Name.',
-    inputSchema: { type: 'object', properties: { query: S('Name or id substring.'), kind: S('human, agent or service', { enum: ['human', 'agent', 'service'] }) } },
-    run(app, _actor, a) {
-      const list = app.principals.list({ query: a.query, kind: a.kind, limit: 100 });
+    description: 'The people you work with: owners and collaborators of documents you can open (so everyone in your spaces), and comment authors there. Someone else appears only when you give their exact name or id. Mention someone in a comment with @Name.',
+    inputSchema: { type: 'object', properties: { query: S('Name or id substring; an exact full name or id also finds someone you have not worked with yet.'), kind: S('human, agent or service', { enum: ['human', 'agent', 'service'] }) } },
+    run(app, actor, a) {
+      const known = actor.admin ? null : app.docs.collaborators(actor);
+      const exact = typeof a.query === 'string' ? a.query.trim().replace(/^@/, '').toLowerCase() : '';
+      const list = app.principals.list({ query: a.query, kind: a.kind, limit: 300 }).filter((p) => !known || known.has(p.sub) || (!!exact && (p.name.toLowerCase() === exact || p.sub.toLowerCase() === exact))).slice(0, 100);
       return text(list.length ? list.map((p) => `${p.name} — ${p.kind}, ${p.sub}${p.role !== 'member' ? ` (${p.role})` : ''}; last seen ${ago(p.lastSeen)}`).join('\n') : 'No one matches.');
     },
   },

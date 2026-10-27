@@ -17,14 +17,14 @@ export function mountPeople(root: HTMLElement, me: Me): () => void {
   const searchInput = h('input.input.search-input', { type: 'search', placeholder: 'Search by name or id', 'aria-label': 'Search people and agents' });
   const seg = h('div.seg', { role: 'tablist', 'aria-label': 'Show' });
 
-  const drawSeg = () => seg.replaceChildren(...([['all', 'Everyone'], ['human', 'People'], ['agent', 'Agents']] as const).map(([k, label]) =>
+  const drawSeg = () => seg.replaceChildren(...([['all', 'All'], ['human', 'People'], ['agent', 'Agents']] as const).map(([k, label]) =>
     h('button.seg-btn', { type: 'button', role: 'tab', 'aria-selected': String(kind === k), class: kind === k ? 'on' : '', onclick: () => { kind = k; drawSeg(); draw(); } }, label)));
 
   const draw = () => {
     if (!people) return;
     const list = people.filter((p) => kind === 'all' || (kind === 'agent' ? p.kind !== 'human' : p.kind === 'human'));
     if (!list.length) {
-      grid.replaceChildren(emptyState({ art: icon('users', 36, 'empty-art-icon'), title: searchInput.value ? 'No one matches that search' : kind === 'agent' ? 'No agents yet' : 'No one here yet', text: kind === 'agent' ? 'Agents appear here once they connect to this service with an Archipelago identity.' : 'People appear here after they sign in for the first time.' }));
+      grid.replaceChildren(emptyState({ art: icon('users', 36, 'empty-art-icon'), title: searchInput.value ? 'No one matches that search' : kind === 'agent' ? 'No agents yet' : 'No one here yet', text: searchInput.value ? 'Type someone’s exact name or id to find them.' : 'People appear here once you share a document or a space with them, or they comment where you can read. There is no directory: type an exact name to find someone else.' }));
       return;
     }
     grid.replaceChildren(...list.map((p) => h('article.person-card', { class: p.role === 'blocked' ? 'blocked' : '' },
@@ -54,7 +54,7 @@ export function mountPeople(root: HTMLElement, me: Me): () => void {
   root.replaceChildren(h('div.page-shell', null, topBar(me, 'people'),
     h('main.home', null,
       h('div.home-head', null,
-        h('div', null, h('h1', null, 'People & agents'), h('p.home-sub', null, 'Everyone who has signed in or connected. Share documents with them or mention them in comments.')),
+        h('div', null, h('h1', null, 'People you work with'), h('p.home-sub', null, 'Owners, collaborators and commenters of the documents and spaces you can open. Share documents with them or mention them in comments; find someone else by their exact name.')),
         h('div.home-actions', null, h('label.search', null, icon('search', 17), searchInput))),
       h('div.toolbar-row', null, seg),
       grid)));
