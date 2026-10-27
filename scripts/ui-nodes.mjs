@@ -705,6 +705,36 @@ try {
     await alice.locator('.seg-btn[data-mode=edit]').click();
   });
 
+  await step('clicking a comment brings its anchor into view: far down a long document in the editor, and the highlight in Preview', async () => {
+    const paras = Array.from({ length: 160 }, (_, i) => `Paragraph ${i + 1} of the long report, with enough words to take a line or two on screen.`);
+    const d = (await api(alice, 'POST', '/api/docs', { title: 'Long report', content: `# Long report\n\n${paras.join('\n\n')}\n` })).json;
+    await openDoc(alice, d.id);
+    await alice.locator('.seg-btn[data-mode=edit]').click();
+    // Comment on the last paragraph (selection set in the editor; the rail's composer).
+    await alice.evaluate(() => { const { view, rail } = window.__anima; const t = view.state.doc.toString(); const i = t.indexOf('Paragraph 160'); view.dispatch({ selection: { anchor: i, head: i + 13 }, scrollIntoView: true }); rail.startDraft(); });
+    const composer = alice.locator('textarea.comment-input').first();
+    await composer.waitFor({ timeout: 8000 });
+    await composer.fill('Last one.');
+    await composer.press('Meta+Enter');
+    await alice.waitForFunction(() => window.__anima.nodes.allThreads().some((t) => t.quote === 'Paragraph 160'), null, { timeout: 8000 });
+    const onScreen = () => alice.evaluate(() => { const v = window.__anima.view; const i = v.state.doc.toString().indexOf('Paragraph 160'); const c = v.coordsAtPos(i); if (!c) return false; const s = document.querySelector('.edit-pane').getBoundingClientRect(); return c.top >= s.top && c.bottom <= s.bottom; });
+    // Scroll to the top, open the list of comments and click the card: the anchor comes back on screen.
+    await alice.evaluate(() => { document.querySelector('.edit-pane').scrollTop = 0; window.__anima.view.dispatch({ selection: { anchor: 0 } }); });
+    await alice.waitForFunction(() => document.querySelector('.edit-pane').scrollTop === 0);
+    assert(!(await onScreen()), 'the anchor should be off screen after scrolling to the top');
+    await alice.locator('button.comments-btn').click();
+    await alice.locator('.comment-rail.drawer .thread-card', { hasText: 'Last one.' }).click();
+    await alice.waitForFunction(() => { const v = window.__anima.view; const i = v.state.doc.toString().indexOf('Paragraph 160'); const c = v.coordsAtPos(i); if (!c) return false; const s = document.querySelector('.edit-pane').getBoundingClientRect(); return c.top >= s.top && c.bottom <= s.bottom; }, null, { timeout: 8000 });
+    // In Preview the highlight is what scrolls into view.
+    await alice.locator('.seg-btn[data-mode=preview]').click();
+    await alice.locator('.preview-body mark.anima-mark[data-thread]').waitFor({ timeout: 8000 });
+    await alice.evaluate(() => { document.querySelector('.preview-pane').scrollTop = 0; });
+    await alice.locator('.comment-rail.drawer .thread-card', { hasText: 'Last one.' }).click();
+    await alice.waitForFunction(() => { const m = document.querySelector('.preview-body mark.anima-mark[data-thread]'); const r = m.getBoundingClientRect(); return r.top >= 0 && r.bottom <= window.innerHeight; }, null, { timeout: 8000 });
+    await alice.locator('button.comments-btn').click();
+    await alice.locator('.seg-btn[data-mode=edit]').click();
+  });
+
   await step('a document with an anyone-with-the-link link shows that link as its address, and the link address reloads to the document', async () => {
     const d = (await api(alice, 'POST', '/api/docs', { title: 'Open notes', content: '# Open notes\n\nShared with the world.\n' })).json;
     const link = (await api(alice, 'POST', `/api/docs/${d.id}/links`, { role: 'viewer', who: 'anyone' })).json;

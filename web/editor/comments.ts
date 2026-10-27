@@ -61,6 +61,8 @@ export class CommentsRail {
 
   constructor(private deps: {
     provider: DocProvider; view: () => EditorView | null; me: Me; role: () => Role | null; docId: string;
+    /** Bring a thread's anchor into view on a surface other than the editor (the preview, a framed page); true if handled. */
+    reveal?: (id: string, range: { from: number; to: number } | null) => boolean;
     /** Every node in the view (the root's provider is `provider`); threads carry their node. */
     nodes: NodeStore;
     /** The current flattening, for node ↔ view positions. */
@@ -282,19 +284,25 @@ export class CommentsRail {
     return best?.id ?? null;
   }
 
-  setActive(id: string | null, opts: { scroll?: boolean; focusReply?: boolean } = {}) {
+  setActive(id: string | null, opts: { scroll?: boolean; focusReply?: boolean; gentle?: boolean } = {}) {
     if (id === this.active && !opts.scroll && !opts.focusReply) return;
     this.active = id;
     for (const [tid, card] of this.cards) card.el.classList.toggle('active', tid === id);
     this.render();
     this.pushHighlights();
     if (id && opts.scroll) {
-      const r = this.anchors.get(id);
-      const view = this.deps.view();
-      if (r && view) view.dispatch({ effects: EditorView.scrollIntoView(r.from, { y: 'center' }) });
-      requestAnimationFrame(() => this.cards.get(id)?.el.scrollIntoView({ block: 'nearest', behavior: 'smooth' }));
+      this.revealAnchor(id, !!opts.gentle);
+      if (this.layout === 'drawer') requestAnimationFrame(() => this.cards.get(id)?.el.scrollIntoView({ block: 'nearest', behavior: 'smooth' }));
     }
     if (id && opts.focusReply) requestAnimationFrame(() => this.cards.get(id)?.replyInput?.focus({ preventScroll: true }));
+  }
+
+  /** Bring a thread's anchor into view; `gentle` leaves the view alone when the anchor is already on screen. */
+  private revealAnchor(id: string, gentle: boolean) {
+    const r = this.anchors.get(id) ?? null;
+    if (this.deps.reveal?.(id, r)) return;
+    const view = this.deps.view();
+    if (view && r) scrollViewTo(view, r.from, gentle);
   }
 
   /** From a toast or a link: reveal a thread wherever it is. */
@@ -549,7 +557,11 @@ export class CommentsRail {
       dataset: { id: t.id }, tabindex: '-1',
       onmousedown: (e: MouseEvent) => {
         if ((e.target as HTMLElement).closest('button, textarea, input, a, .menu')) return;
-        if (this.active !== t.id) this.setActive(t.id, { scroll: this.layout === 'drawer' });
+        // Beside the text, a card usually sits by its anchor; cards pushed down by their neighbours may not, so the
+        // anchor is brought into view only when it is off screen. In the drawer the anchor is always shown.
+        // The card may already be the active one (just posted, or clicked before): it still shows its anchor.
+        if (this.active !== t.id) this.setActive(t.id, { scroll: true, gentle: this.layout === 'margin' });
+        else this.revealAnchor(t.id, this.layout === 'margin');
       },
     }, body);
     return { el, body, reply: null, replyInput: null, editing: new Map(), revising: null, sig: '' };
@@ -938,4 +950,35 @@ export function suggestionDiff(original: string, text: string): HTMLElement {
     return h('div.sugg-diff-wrap', null, box, more);
   }
   return box;
+}
+
+/**
+ * Scroll the editor so `pos` is centred, and make sure it got there: CodeMirror estimates the
+ * height of lines it has not drawn, so one scroll towards a far position often lands beside the
+ * target once the real heights are measured. `gentle` does nothing while the position is on screen.
+ */
+export function scrollViewTo(view: EditorView, pos: number, gentle = false) {
+  const at = Math.min(pos, view.state.doc.length);
+  // The editor's own scroller may not be the one that scrolls (here the pane around it does).
+  const box = () => {
+    for (let el: HTMLElement | null = view.scrollDOM; el; el = el.parentElement) {
+      const o = getComputedStyle(el).overflowY;
+      if ((o === 'auto' || o === 'scroll') && el.scrollHeight > el.clientHeight) return el.getBoundingClientRect();
+    }
+    return { top: 0, bottom: window.innerHeight };
+  };
+  const onScreen = () => {
+    const c = view.coordsAtPos(at);
+    if (!c) return false;
+    const s = box();
+    return c.top >= s.top + 24 && c.bottom <= s.bottom - 24;
+  };
+  if (gentle && onScreen()) return;
+  const go = () => view.dispatch({ effects: EditorView.scrollIntoView(at, { y: 'center' }) });
+  go();
+  // Checked after the browser has laid out and CodeMirror has measured — never from inside a
+  // measure cycle, where a dispatch is not allowed.
+  let tries = 0;
+  const check = () => { if (tries++ >= 3 || onScreen()) return; go(); setTimeout(check, 60); };
+  setTimeout(check, 60);
 }

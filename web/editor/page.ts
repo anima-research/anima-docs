@@ -395,7 +395,13 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   const suggestSync = (s: SuggestSession) => [s.extension(), history(), keymap.of(historyKeymap)];
   let view!: EditorView;
 
-  const rail = new CommentsRail({ provider, nodes, layout: () => binding.current, view: () => view ?? null, me, role: () => role, docId, coords, session: () => session });
+  const rail = new CommentsRail({ provider, nodes, layout: () => binding.current, view: () => view ?? null, me, role: () => role, docId, coords, session: () => session,
+    // Where the text is on screen depends on the mode: the editor, the preview, or both.
+    reveal: (id) => {
+      if (mode === 'preview') { if (isHtml()) toFrame({ type: 'reveal', id }); else previewAnnotations?.reveal(id); return true; }
+      if (mode === 'split' && !isHtml()) previewAnnotations?.reveal(id);
+      return false; // the editor scrolls too
+    } });
   rail.onSuggestionsChange = (n) => {
     reviewBtn.hidden = n === 0;
     reviewLabel.textContent = `${n} suggestion${n === 1 ? '' : 's'}`;
@@ -1180,7 +1186,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   // For tests and debugging: the live editor objects of the open page.
   applyDocType();
   cleanups.push(nodes.onMeta((id) => { if (id === docId && app.classList.contains('html-doc') !== isHtml()) applyDocType(); }));
-  (window as unknown as { __anima?: unknown }).__anima = { view, binding, nodes, nav: () => nav, docId };
+  (window as unknown as { __anima?: unknown }).__anima = { view, binding, nodes, nav: () => nav, docId, rail };
   cleanups.push(() => { delete (window as unknown as { __anima?: unknown }).__anima; });
 
   // Split mode: keep the preview roughly in step with the source.

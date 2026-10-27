@@ -18,6 +18,8 @@ export interface AnnotationLayer {
   setHighlights(threads: { id: string; quote: string; prefix?: string | null; suffix?: string | null; resolved?: boolean }[]): void;
   /** The root was re-rendered: put the highlights back. */
   refresh(): void;
+  /** Scroll a thread's highlight into view (if it is on the page). */
+  reveal(id: string): boolean;
   destroy(): void;
 }
 
@@ -195,6 +197,12 @@ export function annotationLayer(root: HTMLElement, sink: AnnotationSink): Annota
     setConfig(c) { config = { ...c }; root.classList.toggle('anima-annotatable', config.canComment); if (!config.canComment) hideBar(); },
     setHighlights(threads) { highlights = threads; applyHighlights(); },
     refresh() { applyHighlights(); },
+    reveal(id) {
+      const m = root.querySelector(`mark.anima-mark[data-thread="${CSS.escape(id)}"]`);
+      if (!m) return false;
+      m.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      return true;
+    },
     destroy() {
       if (editing) endEdit(false);
       document.removeEventListener('click', onClick, true);

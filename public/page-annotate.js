@@ -187,6 +187,7 @@
     var m = e.data; if (!m || m.anima !== 'app') return;
     if (m.type === 'config') { config = { canComment: !!m.canComment, canEdit: !!m.canEdit }; document.documentElement.classList.toggle('anima-annotatable', config.canComment); }
     else if (m.type === 'highlights') applyHighlights(m.threads || []);
+    else if (m.type === 'reveal') { var mk = document.querySelector('mark.anima-mark[data-thread="' + String(m.id || '').replace(/["\\]/g, '') + '"]'); if (mk) mk.scrollIntoView({ block: 'center', behavior: 'smooth' }); }
   });
 
   var style = document.createElement('style');
