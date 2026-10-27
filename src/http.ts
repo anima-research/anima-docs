@@ -909,6 +909,21 @@ export function createHttp(app: App) {
             return;
           }
         }
+        // ------------------------------------------------ groups
+        const groupView = (g: import('./groups.js').GroupInfo) => ({ ...g, name: g.name, members: app.groups.members(g.sub).map((m) => ({ sub: m.sub, name: m.name, kind: m.kind, color: m.color, label: P.label(m.sub) })) });
+        if (path === '/api/groups' && method === 'GET') { send(200, { groups: app.groups.listFor(a).map(groupView) }); return; }
+        if (path === '/api/groups' && method === 'POST') { const b = await json(req); send(201, groupView(app.groups.create(a, String(b.name ?? '')))); return; }
+        const gm = /^\/api\/groups\/([^/]+)(\/members)?$/.exec(path);
+        if (gm) {
+          const gsub = decodeURIComponent(gm[1]); // clients encode the colon in group:<id>
+          if (!/^group:[A-Za-z0-9]+$/.test(gsub)) throw new Fault(404, 'No such group.');
+          if (!app.groups.canSee(gsub, a)) throw new Fault(404, 'No such group.');
+          if (!gm[2] && method === 'GET') { send(200, groupView(app.groups.get(gsub, a)!)); return; }
+          if (!gm[2] && method === 'PATCH') { const b = await json(req); send(200, groupView(app.groups.rename(a, gsub, String(b.name ?? '')))); return; }
+          if (!gm[2] && method === 'DELETE') { app.groups.remove(a, gsub); send(200, { ok: true }); return; }
+          if (gm[2] && method === 'POST') { const b = await json(req); const who = P.resolve(String(b.who ?? '')); send(200, groupView(app.groups.addMember(a, gsub, who.sub))); return; }
+          if (gm[2] && method === 'DELETE') { const b = await json(req); const who = P.resolve(String(b.who ?? '')); send(200, groupView(app.groups.removeMember(a, gsub, who.sub))); return; }
+        }
         if (path === '/api/people' && method === 'GET') {
           // No directory: members see the people they work with (plus an exact name or id they type in full); admins see everyone.
           const query = url.searchParams.get('q') ?? undefined;
@@ -983,7 +998,7 @@ export function createHttp(app: App) {
         sendShell(res, d ? docMeta(d, `${app.config.origin}${path}`, true) : { ...GENERIC, url: `${app.config.origin}${path}` });
         return;
       }
-      if (path === '/' || path === '/auth/callback' || path === '/admin' || path === '/people') {
+      if (path === '/' || path === '/auth/callback' || path === '/admin' || path === '/people' || path === '/groups') {
         sendShell(res, { ...GENERIC, url: `${app.config.origin}${path === '/auth/callback' ? '/' : path}` });
         return;
       }

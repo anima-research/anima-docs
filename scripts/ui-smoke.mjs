@@ -218,7 +218,7 @@ try {
     await alice.locator('.share-btn').click();
     const dlg = alice.locator('dialog.share-dialog');
     await dlg.waitFor();
-    await dlg.getByLabel('Add people or agents').fill('Bob');
+    await dlg.getByLabel('Add people, agents or groups').fill('Bob');
     await dlg.locator('.picker-option', { hasText: 'Bob Rivera' }).click();
     await dlg.locator('.share-row', { hasText: 'Bob Rivera' }).waitFor();
     await shot(alice, '04-share-dialog-light');

@@ -53,7 +53,7 @@ export function plural(n: number, one: string, many = `${one}s`) {
 }
 
 export function kindLabel(kind: string | undefined): string {
-  return kind === 'agent' ? 'Agent' : kind === 'service' ? 'Service' : kind === 'guest' ? 'Guest' : 'Human';
+  return kind === 'agent' ? 'Agent' : kind === 'service' ? 'Service' : kind === 'guest' ? 'Guest' : kind === 'group' ? 'Group' : 'Human';
 }
 
 const GUEST_SUFFIX = ' (guest)';

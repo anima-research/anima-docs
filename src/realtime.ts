@@ -653,7 +653,7 @@ export function publicActor(a: Actor) { return { sub: a.sub, name: a.name, kind:
 
 const MASK_KEY = randomBytes(32);
 /** Principal ids wherever they appear in a string, including @{sub} and @[name](sub) mentions inside comment bodies. */
-const EMBEDDED_ID = /\b(?:human|agent|service|guest):[^\s)}\]"'<>,]+/g;
+const EMBEDDED_ID = /\b(?:human|agent|service|group|guest):[^\s)}\]"'<>,]+/g;
 
 export function maskSub(sub: string): string {
   return `anon:${createHmac('sha256', MASK_KEY).update(sub).digest('base64url').slice(0, 16)}`;

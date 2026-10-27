@@ -150,8 +150,8 @@ export function renderComment(body: string, ctx: MentionContext): DocumentFragme
   const say = (name: string) => { used.push({ name }); return `@${name}`; };
   const fallback = (sub: string) => (sub.startsWith('anon:') ? 'someone' : sub);
   const named = body
-    .replace(/@\[([^\]]*)\]\(((?:human|agent|service|guest|anon):[^)\s]+)\)/g, (_, name: string, sub: string) => say(ctx.nameOf(sub) ?? (name || fallback(sub))))
-    .replace(/@\{((?:human|agent|service|guest|anon):[^}\s]+)\}/g, (_, sub: string) => say(ctx.nameOf(sub) ?? fallback(sub)));
+    .replace(/@\[([^\]]*)\]\(((?:human|agent|service|group|guest|anon):[^)\s]+)\)/g, (_, name: string, sub: string) => say(ctx.nameOf(sub) ?? (name || fallback(sub))))
+    .replace(/@\{((?:human|agent|service|group|guest|anon):[^}\s]+)\}/g, (_, sub: string) => say(ctx.nameOf(sub) ?? fallback(sub)));
   const frag = purify(commentMd.render(named));
   const known = new Set(ctx.names.map((n) => n.name.toLowerCase()));
   highlightMentions(frag, [...ctx.names, ...used.filter((u) => !known.has(u.name.toLowerCase()))]);

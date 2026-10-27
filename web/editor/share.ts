@@ -78,8 +78,8 @@ export function openShareDialog(opts: { docId: string; me: Me; title: string; on
   };
 
   const picker = peoplePicker({
-    placeholder: 'Add people or agents by name',
-    label: 'Add people or agents',
+    placeholder: 'Add people, agents or groups by name',
+    label: 'Add people, agents or groups',
     exclude: () => new Set([...(doc?.acl.map((a) => a.sub) ?? []), doc?.owner.sub ?? '']),
     onPick: (p: Person) => void share(p.sub, addRole, p.name),
     onRaw: (text) => void share(text, addRole, text.replace(/^@/, '')),

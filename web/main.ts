@@ -9,6 +9,7 @@ import { navigate, startRouter } from './router';
 import { handleCallback, rememberReturn, renderSignIn, takeReturn } from './pages/signin';
 import { mountHome } from './pages/home';
 import { mountAdmin, mountPeople } from './pages/people';
+import { mountGroups } from './pages/groups';
 import { mountLinkPage } from './pages/link';
 import { topBar } from './pages/shell';
 import { mountDocPage, type DocPage } from './editor/page';
@@ -54,8 +55,9 @@ function render(path: string) {
   }
   const doc = /^\/[dp]\/([A-Za-z0-9]+)$/.exec(path);
   if (doc) cleanup = mountDocPage(root, me, doc[1]);
-  else if ((path === '/people' || path === '/admin') && isGuestMe(me)) renderMembersOnly(me);
+  else if ((path === '/people' || path === '/groups' || path === '/admin') && isGuestMe(me)) renderMembersOnly(me);
   else if (path === '/people') cleanup = mountPeople(root, me);
+  else if (path === '/groups') cleanup = mountGroups(root, me);
   else if (path === '/admin') cleanup = mountAdmin(root, me);
   else if (path === '/' || path === '/auth/callback') cleanup = mountHome(root, me);
   else {

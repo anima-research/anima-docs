@@ -47,6 +47,7 @@ export function userMenuButton(me: Me, opts: { compact?: boolean } = {}): HTMLBu
       { heading: me.sub },
       { label: 'All documents', icon: 'file', onSelect: () => navigate('/') },
       { label: 'People & agents', icon: 'users', onSelect: () => navigate('/people') },
+      { label: 'Groups', icon: 'users', onSelect: () => navigate('/groups') },
       ...(me.admin ? [{ label: 'Admin', icon: 'shield', onSelect: () => navigate('/admin') }] : []),
       { label: 'Agent notifications', icon: 'bell', onSelect: () => void showWatches() },
       'separator',
@@ -75,7 +76,7 @@ export function guestSignInButton(opts: { compact?: boolean } = {}): HTMLButtonE
   return h('button.btn.guest-signin', { type: 'button', class: opts.compact ? 'sm' : '', 'aria-label': 'Sign in', 'data-tip': 'Sign in with Archipelago to create, share and keep documents', onclick: () => startSignIn() }, icon('login', 16), h('span.signin-label', null, 'Sign in'));
 }
 
-export function topBar(me: Me, active: 'docs' | 'people' | 'admin'): HTMLElement {
+export function topBar(me: Me, active: 'docs' | 'people' | 'groups' | 'admin'): HTMLElement {
   const link = (href: string, label: string, ic: string, key: string) =>
     h('a.nav-link', { href, 'data-link': '', class: active === key ? 'active' : '', 'aria-current': active === key ? 'page' : undefined }, icon(ic, 17), h('span', null, label));
   const guest = isGuestMe(me);
@@ -84,6 +85,7 @@ export function topBar(me: Me, active: 'docs' | 'people' | 'admin'): HTMLElement
     h('nav.nav', { 'aria-label': 'Main' },
       link('/', 'Documents', 'file', 'docs'),
       guest ? null : link('/people', 'People', 'users', 'people'),
+      guest ? null : link('/groups', 'Groups', 'users', 'groups'),
       me.admin && !guest ? link('/admin', 'Admin', 'shield', 'admin') : null),
     h('div.topbar-right', null, guest ? guestSignInButton() : null, userMenuButton(me)));
 }

@@ -6,7 +6,7 @@ import { dirname } from 'node:path';
 
 export type DB = Database.Database;
 
-const SCHEMA_VERSION = 9;
+const SCHEMA_VERSION = 10;
 
 export function openDatabase(file: string): DB {
   if (file !== ':memory:') mkdirSync(dirname(file), { recursive: true });
@@ -410,8 +410,47 @@ export function openDatabase(file: string): DB {
         updated_by  TEXT NOT NULL,
         PRIMARY KEY (doc_id, path)
       )`);
-      db.pragma(`user_version = ${SCHEMA_VERSION}`);
+      db.pragma('user_version = 9');
     })();
+  }
+  if ((db.pragma('user_version', { simple: true }) as number) < 10) {
+    // v10: groups — a principal of kind 'group' with members; shares and mentions name it like anyone.
+    // Widening the kind CHECK means rebuilding principals (the v2 precedent); foreign_keys only changes outside a transaction.
+    db.pragma('foreign_keys = OFF');
+    try {
+      db.exec(`
+      BEGIN;
+      CREATE TABLE principals_v3 (
+        sub         TEXT PRIMARY KEY,
+        name        TEXT NOT NULL,
+        kind        TEXT NOT NULL CHECK (kind IN ('human','agent','service','guest','group')),
+        issuer      TEXT NOT NULL,
+        role        TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('member','admin','blocked')),
+        color       TEXT NOT NULL,
+        first_seen  INTEGER NOT NULL,
+        last_seen   INTEGER NOT NULL
+      );
+      INSERT INTO principals_v3 SELECT sub, name, kind, issuer, role, color, first_seen, last_seen FROM principals;
+      DROP TABLE principals;
+      ALTER TABLE principals_v3 RENAME TO principals;
+      CREATE INDEX principals_name ON principals(name COLLATE NOCASE);
+      CREATE TABLE IF NOT EXISTS groups (
+        sub         TEXT PRIMARY KEY REFERENCES principals(sub),
+        owner_sub   TEXT NOT NULL,
+        created_at  INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS group_members (
+        group_sub   TEXT NOT NULL REFERENCES groups(sub),
+        sub         TEXT NOT NULL REFERENCES principals(sub),
+        added_by    TEXT NOT NULL,
+        added_at    INTEGER NOT NULL,
+        PRIMARY KEY (group_sub, sub)
+      );
+      CREATE INDEX IF NOT EXISTS group_members_sub ON group_members(sub);
+      PRAGMA user_version = 10;
+      COMMIT;
+      `);
+    } finally { db.pragma('foreign_keys = ON'); }
   }
   return db;
 }

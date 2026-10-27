@@ -6,7 +6,7 @@ import type { DB } from './db.js';
 import { Fault, type Identity, type PrincipalKind } from './auth.js';
 
 /** Guests are people who opened an "anyone with the link" share link without signing in. */
-export type Kind = PrincipalKind | 'guest';
+export type Kind = PrincipalKind | 'guest' | 'group';
 export const isGuest = (sub: string) => sub.startsWith('guest:');
 const GUEST_SUFFIX = ' (guest)';
 const ANIMALS = ['Otter', 'Heron', 'Lynx', 'Marten', 'Ibis', 'Fox', 'Hare', 'Wren', 'Badger', 'Kestrel', 'Newt', 'Moth', 'Seal', 'Crane', 'Vole', 'Finch', 'Gecko', 'Owl', 'Stoat', 'Tern'];
@@ -133,6 +133,19 @@ export class Principals extends EventEmitter {
     return rows.map(fromRow);
   }
 
+  /** A group's principal row (kind 'group'): named like anyone, never signs in. */
+  createGroup(sub: string, name: string): Principal {
+    const now = Date.now();
+    this.db.prepare(`INSERT INTO principals (sub, name, kind, issuer, color, first_seen, last_seen) VALUES (?, ?, 'group', 'group', ?, ?, ?)`).run(sub, name, colorFor(sub), now, now);
+    return this.get(sub)!;
+  }
+  rename(sub: string, name: string): void {
+    this.db.prepare('UPDATE principals SET name = ? WHERE sub = ?').run(name, sub);
+  }
+  remove(sub: string): void {
+    this.db.prepare('DELETE FROM principals WHERE sub = ?').run(sub);
+  }
+
   setRole(sub: string, role: Principal['role']): Principal {
     if (!['member', 'admin', 'blocked'].includes(role)) throw new Fault(400, 'role must be member, admin or blocked');
     if (role === 'admin' && isGuest(sub)) throw new Fault(400, 'Guests cannot be admins.');
@@ -150,7 +163,7 @@ export class Principals extends EventEmitter {
    */
   resolve(ref: string): Principal {
     const s = ref.trim().replace(/^@/, '');
-    if (/^(human|agent|service):/.test(s)) {
+    if (/^(human|agent|service|group):/.test(s)) {
       const p = this.get(s);
       if (!p) throw new Fault(404, `Unknown principal ${s}. They must sign in (or connect) once before they can be named.`);
       return p;
@@ -168,7 +181,7 @@ export class Principals extends EventEmitter {
    */
   findMentions(text: string): Principal[] {
     const found = new Map<string, Principal>();
-    for (const m of text.matchAll(/@\[[^\]]*\]\(((?:human|agent|service):[^)\s]+)\)|@\{((?:human|agent|service):[^}\s]+)\}/g)) {
+    for (const m of text.matchAll(/@\[[^\]]*\]\(((?:human|agent|service|group):[^)\s]+)\)|@\{((?:human|agent|service|group):[^}\s]+)\}/g)) {
       const p = this.get(m[1] ?? m[2]);
       if (p) found.set(p.sub, p);
     }

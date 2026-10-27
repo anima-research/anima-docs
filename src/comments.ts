@@ -284,7 +284,7 @@ export class Comments extends EventEmitter {
     const addressed = [
       // A suggestion asks the owner for a decision (first: an @mention of the owner in the note doesn't replace it).
       ...(sugg && doc.ownerSub !== actor.sub ? [{ sub: doc.ownerSub, reason: 'suggestion' as const }] : []),
-      ...mentions.filter((m) => m.sub !== actor.sub).map((m) => ({ sub: m.sub, reason: 'mention' as const })),
+      ...this.fanOut(mentions.filter((m) => m.sub !== actor.sub).map((m) => m.sub), actor.sub).map((sub) => ({ sub, reason: 'mention' as const })),
       ...(assignee && assignee.sub !== actor.sub ? [{ sub: assignee.sub, reason: 'assigned' as const }] : []),
     ];
     this.record(docId, id, id, 'created', actor.sub, dedupe(addressed));
@@ -379,7 +379,7 @@ export class Comments extends EventEmitter {
     if (note) {
       eventComment = newId();
       const { mentions } = this.mentionsIn(root.docId, note, actor);
-      for (const m of mentions) if (m.sub !== actor.sub && m.sub !== root.author) mentioned.push({ sub: m.sub, reason: 'mention' });
+      for (const sub of this.fanOut(mentions.map((m) => m.sub), actor.sub)) if (sub !== root.author) mentioned.push({ sub, reason: 'mention' });
       this.db.prepare('INSERT INTO comments (id, doc_id, thread_id, author_sub, body, mentions, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
         .run(eventComment, root.docId, root.id, actor.sub, note, JSON.stringify(mentions.map((m) => m.sub)), now);
     }
@@ -463,7 +463,7 @@ export class Comments extends EventEmitter {
     this.db.prepare(`INSERT INTO comments (id, doc_id, thread_id, author_sub, body, mentions, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
       .run(id, target.docId, root.id, actor.sub, body, JSON.stringify(mentions.map((m) => m.sub)), now);
     this.record(target.docId, id, root.id, 'replied', actor.sub,
-      mentions.filter((m) => m.sub !== actor.sub).map((m) => ({ sub: m.sub, reason: 'mention' as const })));
+      this.fanOut(mentions.filter((m) => m.sub !== actor.sub).map((m) => m.sub), actor.sub).map((sub) => ({ sub, reason: 'mention' as const })));
     if (!root.suggestion) {
       if (opts.resolve && !root.resolvedAt) this.resolve(root.id, actor, true);
       if (opts.reopen && root.resolvedAt) this.resolve(root.id, actor, false);
@@ -483,7 +483,7 @@ export class Comments extends EventEmitter {
     // Wake only people newly mentioned by the edit; existing mentions are re-delivered as a replacement.
     const before = new Set(c.mentions);
     this.record(c.docId, c.id, c.threadId, 'edited', actor.sub,
-      mentions.filter((m) => m.sub !== actor.sub && !before.has(m.sub)).map((m) => ({ sub: m.sub, reason: 'mention' as const })));
+      this.fanOut(mentions.filter((m) => m.sub !== actor.sub && !before.has(m.sub)).map((m) => m.sub), actor.sub).map((sub) => ({ sub, reason: 'mention' as const })));
     return { comment: this.get(c.id)!, warnings };
   }
 
@@ -661,6 +661,14 @@ export class Comments extends EventEmitter {
     const b = String(body ?? '').trim();
     if (b.length > MAX_BODY) throw new Fault(413, `Note is too long (max ${MAX_BODY} chars).`);
     return b;
+  }
+
+  /** Group membership lookup (set by the app); a mention of a group addresses each member. */
+  membersOf: (groupSub: string) => string[] = () => [];
+  private fanOut(subs: string[], actor: string): string[] {
+    const out = new Set<string>();
+    for (const s of subs) { if (s.startsWith('group:')) for (const m of this.membersOf(s)) { if (m !== actor) out.add(m); } else out.add(s); }
+    return [...out];
   }
 
   private mentionsIn(docId: string, body: string, actor: Actor): { mentions: Principal[]; warnings: string[] } {

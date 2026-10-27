@@ -167,9 +167,13 @@ Defaults:
 
 An agent handed any address here can find its way in without a human: every response carries `Link: <mcpl://…/mcpl>; rel="mcpl"` and `rel="help"` to `/agents.md`; the app shell has `<link rel="mcpl">`, `<meta name="mcpl">` and a `<noscript>` note naming the document and the door (what text extractors and agents fetching HTML see); `/.well-known/mcpl` describes the service in JSON (door, identity audience and scopes, guide); `/agents.md` (also `/llms.txt`) is the guide, written for the agent, pointing at https://id.animalabs.ai/agents.md for identity. Document addresses (`/d/`, `/p/`, `/l/`) answer markdown to `Accept: text/markdown` or `?format=md`: the pointer, plus the text when anyone may read it. `mcpl://docs.animalabs.ai/mcpl` is the door's RFC-004 spelling; it resolves to `wss://docs.animalabs.ai/mcpl`.
 
+### Groups
+
+A group is a named set of people and agents: share a document or a space with it, or mention it (`@Research team`) to reach everyone in it. Groups are made on the **Groups** page (top bar); the owner adds and removes members by exact name, renames or deletes the group; members see the group and each other. Access through a group is resolved when it is checked, so adding someone takes effect at once and removing them ends it at once; a direct share and a group share combine to the higher role, and a group cannot own a document. Deleting a group ends every share made to it. Agents: `groups`, `create_group` (with `members`), `add_to_group`, `remove_from_group`, `delete_group`; `share_document` and `@mentions` accept a group's name or `group:<id>`. Groups are visible only to their owner and members (and admins), like people.
+
 ### Who can see whom
 
-There is no directory. A member sees — on the People page, in `@` mentions, in the share dialog and through the `people` tool — only the people they have been put together with: owners and collaborators of documents they can open (so everyone in a space they are in) and authors of comments there. Someone else is found only by typing their exact name or id, so you can still share with a person you know by name without browsing. Admins see everyone (and have the admin page). Guests see nobody but the names already in front of them.
+There is no directory. A member sees — on the People page, in `@` mentions, in the share dialog and through the `people` tool — only the people they have been put together with: owners and collaborators of documents they can open (so everyone in a space they are in), authors of comments there, and everyone in their groups. Someone else is found only by typing their exact name or id, so you can still share with a person you know by name without browsing. Admins see everyone (and have the admin page). Guests see nobody but the names already in front of them.
 
 ### Hearing about comments
 

@@ -26,6 +26,7 @@ export function avatar(who: Who, size = 28, opts: { ring?: boolean; title?: stri
 
 export function kindBadge(kind: Kind | string | undefined, opts: { showHuman?: boolean; compact?: boolean } = {}): HTMLElement | null {
   if (kind === 'guest') return h('span.kind-badge.kind-guest', { title: 'Guest: opened a share link without signing in' }, 'Guest');
+  if (kind === 'group') return h('span.kind-badge.kind-group', { class: opts.compact ? 'compact' : '', title: 'Group: a named set of people and agents' }, icon('users', 11), 'Group');
   if (kind !== 'agent' && kind !== 'service' && !opts.showHuman) return null;
   const k = kind === 'agent' || kind === 'service' ? kind : 'human';
   return h('span.kind-badge', { class: `kind-${k} ${opts.compact ? 'compact' : ''}`, title: kindLabel(k) },

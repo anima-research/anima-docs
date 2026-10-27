@@ -1,6 +1,6 @@
 // JSON API client and the shapes the server returns.
 
-export type Kind = 'human' | 'agent' | 'service' | 'guest';
+export type Kind = 'human' | 'agent' | 'service' | 'guest' | 'group';
 export type Role = 'viewer' | 'commenter' | 'editor' | 'owner';
 export type GeneralAccess = 'restricted' | 'viewer' | 'commenter' | 'editor';
 
@@ -58,6 +58,8 @@ export interface TreeView {
 export interface AclEntry { sub: string; role: Role; label: string; kind?: Kind; name?: string; grantedBy: string; grantedAt: number }
 export interface DocDetail extends DocSummary { acl: AclEntry[] }
 
+export interface GroupMember { sub: string; name: string; kind: Kind; color: string; label: string }
+export interface Group { sub: string; name: string; ownerSub: string; createdAt: number; members: GroupMember[]; you: 'owner' | 'member' | null }
 export interface Person { sub: string; name: string; kind: Kind; color: string; label: string; issuer: string; role: 'member' | 'admin' | 'blocked'; lastSeen: number }
 export interface AdminPrincipal extends Person { firstSeen: number; docs: number; watches: number }
 
@@ -227,6 +229,14 @@ export const api = {
   renameGuest: (name: string) => call<{ you: Me }>('POST', '/api/guest/name', { name }),
 
   people: (query?: string) => call<{ people: Person[] }>('GET', `/api/people${q({ q: query })}`),
+  /** Groups: named sets of people and agents to share with and to mention. */
+  groups: () => call<{ groups: Group[] }>('GET', '/api/groups'),
+  group: (sub: string) => call<Group>('GET', `/api/groups/${encodeURIComponent(sub)}`),
+  createGroup: (name: string) => call<Group>('POST', '/api/groups', { name }),
+  renameGroup: (sub: string, name: string) => call<Group>('PATCH', `/api/groups/${encodeURIComponent(sub)}`, { name }),
+  deleteGroup: (sub: string) => call<{ ok: true }>('DELETE', `/api/groups/${encodeURIComponent(sub)}`),
+  addToGroup: (sub: string, who: string) => call<Group>('POST', `/api/groups/${encodeURIComponent(sub)}/members`, { who }),
+  removeFromGroup: (sub: string, who: string) => call<Group>('DELETE', `/api/groups/${encodeURIComponent(sub)}/members`, { who }),
   watches: () => call<{ watches: { docId: string; settings: Record<string, unknown>; updatedAt: number }[]; defaults: Record<string, unknown> }>('GET', '/api/watches'),
   adminPrincipals: (opts: { guests?: boolean } = {}) => call<{ principals: AdminPrincipal[] }>('GET', `/api/admin/principals${q({ guests: opts.guests ? '1' : undefined })}`),
   setPrincipalRole: (sub: string, role: 'member' | 'admin' | 'blocked') => call<Person>('POST', `/api/admin/principals/${encodeURIComponent(sub)}`, { role }),

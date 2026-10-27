@@ -881,15 +881,70 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: 'share_document', featureSet: 'docs.share', toolClass: 'control',
-    description: 'Give a person or agent access to a document (viewer, commenter, editor; owners can also transfer ownership or remove access with none). They are notified.',
+    description: 'Give a person, an agent or a group access to a document (viewer, commenter, editor; owners can also transfer ownership to a person, or remove access with none). They are notified; a group’s members each hear of it, and membership changes apply at once.',
     inputSchema: { type: 'object', required: ['document', 'with', 'role'], properties: {
-      ...docArg, with: S('@Name or principal id.'), role: S('viewer | commenter | editor | owner | none', { enum: ['viewer', 'commenter', 'editor', 'owner', 'none'] }),
+      ...docArg, with: S('@Name, principal id, or a group (@Group name or group:<id>).'), role: S('viewer | commenter | editor | owner | none', { enum: ['viewer', 'commenter', 'editor', 'owner', 'none'] }),
     } },
     run(app, actor, a) {
       const id = need(a, 'document');
       const p = app.principals.resolve(need(a, 'with'));
       app.docs.share(id, actor, p.sub, roleArg(a.role, true));
       return text(a.role === 'none' ? `Removed ${p.name}'s access.` : `${p.name} (${p.kind}) is now ${a.role}.`);
+    },
+  },
+  {
+    name: 'groups', featureSet: 'docs.read', toolClass: 'notes',
+    description: 'Groups you own or belong to, with their members. Share a document with a group (share_document with: "@Group") or mention one (@Group) to reach everyone in it.',
+    inputSchema: { type: 'object', properties: {} },
+    run(app, actor) {
+      const gs = app.groups.listFor(actor);
+      return text(gs.length ? gs.map((g) => `${g.sub}  “${g.name}” — ${g.you ?? 'admin view'}; owner ${app.principals.label(g.ownerSub)}; ${g.members} member${g.members === 1 ? '' : 's'}: ${app.groups.members(g.sub).map((m) => m.name).join(', ')}`).join('\n') : 'No groups yet. create_group makes one.');
+    },
+  },
+  {
+    name: 'create_group', featureSet: 'docs.share', toolClass: 'control',
+    description: 'Make a group (you own it and are its first member). Add people with add_to_group; share documents or spaces with it; mention it to reach everyone in it.',
+    inputSchema: { type: 'object', required: ['name'], properties: { name: S('Group name, e.g. "Research team".'), members: { type: 'array', items: S('@Name or principal id'), description: 'People to add at once.' } } },
+    run(app, actor, a) {
+      const g = app.groups.create(actor, need(a, 'name'));
+      const notes: string[] = [];
+      for (const who of Array.isArray(a.members) ? a.members : []) {
+        try { const p = app.principals.resolve(String(who)); app.groups.addMember(actor, g.sub, p.sub); notes.push(p.name); }
+        catch (e) { notes.push(`${who}: ${(e as Error).message}`); }
+      }
+      return text(`Created group “${g.name}” (${g.sub}).${notes.length ? ` Added: ${notes.join('; ')}.` : ''} Share with it: share_document {"document": …, "with": "${g.sub}", "role": "viewer"}.`);
+    },
+  },
+  {
+    name: 'add_to_group', featureSet: 'docs.share', toolClass: 'control',
+    description: 'Add a person or agent to a group you own. They gain whatever the group has been given, at once.',
+    inputSchema: { type: 'object', required: ['group', 'who'], properties: { group: S('Group name or group:<id>.'), who: S('@Name or principal id.') } },
+    run(app, actor, a) {
+      const g = app.principals.resolve(need(a, 'group'));
+      const p = app.principals.resolve(need(a, 'who'));
+      const r = app.groups.addMember(actor, g.sub, p.sub);
+      return text(`${p.name} is in “${r.name}” (${r.members} member${r.members === 1 ? '' : 's'}).`);
+    },
+  },
+  {
+    name: 'remove_from_group', featureSet: 'docs.share', toolClass: 'control',
+    description: 'Remove a person or agent from a group you own. They lose what the group gave them, at once.',
+    inputSchema: { type: 'object', required: ['group', 'who'], properties: { group: S('Group name or group:<id>.'), who: S('@Name or principal id.') } },
+    run(app, actor, a) {
+      const g = app.principals.resolve(need(a, 'group'));
+      const p = app.principals.resolve(need(a, 'who'));
+      const r = app.groups.removeMember(actor, g.sub, p.sub);
+      return text(`${p.name} is no longer in “${r.name}” (${r.members} member${r.members === 1 ? '' : 's'}).`);
+    },
+  },
+  {
+    name: 'delete_group', featureSet: 'docs.share', toolClass: 'control',
+    description: 'Delete a group you own. Every share made to it ends.',
+    inputSchema: { type: 'object', required: ['group'], properties: { group: S('Group name or group:<id>.') } },
+    run(app, actor, a) {
+      const g = app.principals.resolve(need(a, 'group'));
+      app.groups.remove(actor, g.sub);
+      return text(`Deleted group “${g.name}”.`);
     },
   },
   {

@@ -8,6 +8,7 @@ import { Documents } from './documents.js';
 import { Comments } from './comments.js';
 import { Media } from './media.js';
 import { DocFiles, PageKeys } from './files.js';
+import { Groups } from './groups.js';
 import { Attention } from './attention.js';
 import { History, type HistoryOptions } from './history.js';
 import { Nodes } from './nodes.js';
@@ -25,6 +26,7 @@ export interface App {
   media: Media;
   files: DocFiles;
   pageKeys: PageKeys;
+  groups: Groups;
   attention: Attention;
   history: History;
   nodes: Nodes;
@@ -43,6 +45,8 @@ export function createApp(config: Config, issuers: Map<string, KeyObject>, opts:
   const principals = new Principals(db, { admins: config.admins, homeIssuer });
   const docs = new Documents(db, principals, { defaultAccess: config.defaultAccess });
   const comments = new Comments(db, docs, principals);
+  const groups = new Groups(db, principals);
+  comments.membersOf = (g) => groups.memberSubs(g);
   const media = new Media(db, config.dataDir === ':memory:' ? join(process.cwd(), 'data') : config.dataDir);
   const files = new DocFiles(db, media);
   const pageKeys = new PageKeys(config.dataDir === ':memory:' ? null : config.dataDir);
@@ -51,7 +55,7 @@ export function createApp(config: Config, issuers: Map<string, KeyObject>, opts:
   const nodes = new Nodes(db, docs);
   nodes.attachComments(comments);
   const trees = new Trees(db, docs, nodes);
-  const partial = { config, db, principals, docs, comments, media, files, pageKeys, attention, history, nodes, trees } as unknown as App;
+  const partial = { config, db, principals, docs, comments, media, files, pageKeys, groups, attention, history, nodes, trees } as unknown as App;
   const wiki = new Wiki(partial);
   let devIssuer: DevIssuer | null = null;
   if (config.devIssuer) {
@@ -73,7 +77,7 @@ export function createApp(config: Config, issuers: Map<string, KeyObject>, opts:
   }, 5 * 60_000);
   maintenance.unref();
   return {
-    config, db, principals, docs, comments, media, files, pageKeys, attention, history, nodes, trees, wiki, issuers, devIssuer,
+    config, db, principals, docs, comments, media, files, pageKeys, groups, attention, history, nodes, trees, wiki, issuers, devIssuer,
     jti: new JtiCache(),
     verify: (token: string) => verifyAid1(token, verifierOpts),
     close() { clearInterval(maintenance); history.shutdown(); attention.close(); db.close(); },

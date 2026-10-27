@@ -135,6 +135,10 @@ export class Documents extends EventEmitter {
     let best: Role | null = null;
     const acl = (this.db.prepare('SELECT role FROM doc_acl WHERE doc_id = ? AND sub = ?').get(docId, actor.sub) as { role: Role } | undefined)?.role ?? null;
     if (acl) best = acl;
+    // Shares made to a group the actor belongs to count as the actor's own (resolved now, so membership changes apply at once).
+    for (const g of this.db.prepare('SELECT a.role FROM doc_acl a JOIN group_members m ON m.group_sub = a.sub WHERE a.doc_id = ? AND m.sub = ?').all(docId, actor.sub) as { role: Role }[]) {
+      if (g.role !== 'owner' && (!best || RANK[g.role] > RANK[best])) best = g.role;
+    }
     if (d.generalAccess !== 'restricted' && (!best || RANK[d.generalAccess as Role] > RANK[best])) best = d.generalAccess as Role;
     return best;
   }
@@ -255,6 +259,7 @@ export class Documents extends EventEmitter {
       WHERE d.deleted_at IS NULL AND d.title LIKE @q ${opts.sections ? '' : "AND d.title != ''"}
         AND (@admin = 1 OR d.owner_sub = @sub OR (@guest = 0 AND d.general_access != 'restricted')
              OR EXISTS (SELECT 1 FROM doc_acl a WHERE a.doc_id = d.id AND a.sub = @sub)
+             OR EXISTS (SELECT 1 FROM doc_acl a JOIN group_members m ON m.group_sub = a.sub WHERE a.doc_id = d.id AND m.sub = @sub)
              OR EXISTS (SELECT 1 FROM link_holders h JOIN doc_links l ON l.id = h.link_id
                         WHERE h.doc_id = d.id AND h.sub = @sub AND l.revoked_at IS NULL AND (l.expires_at IS NULL OR l.expires_at > @now)))
       ORDER BY d.updated_at DESC LIMIT @limit
@@ -272,11 +277,15 @@ export class Documents extends EventEmitter {
   collaborators(actor: Actor): Set<string> {
     const ids = this.list(actor, { limit: 500, sections: true }).map((d) => d.id);
     const out = new Set<string>([actor.sub]);
+    // Groups you own or belong to, and everyone in them.
+    for (const r of this.db.prepare(`SELECT g.sub AS s FROM groups g WHERE g.owner_sub = ? OR EXISTS (SELECT 1 FROM group_members m WHERE m.group_sub = g.sub AND m.sub = ?)
+      UNION SELECT m2.sub AS s FROM group_members m2 WHERE m2.group_sub IN (SELECT g.sub FROM groups g WHERE g.owner_sub = ? OR EXISTS (SELECT 1 FROM group_members m WHERE m.group_sub = g.sub AND m.sub = ?))`).all(actor.sub, actor.sub, actor.sub, actor.sub) as { s: string }[]) out.add(r.s);
     if (!ids.length) return out;
     const marks = ids.map(() => '?').join(',');
     for (const r of this.db.prepare(`SELECT owner_sub AS s FROM documents WHERE id IN (${marks})
       UNION SELECT sub AS s FROM doc_acl WHERE doc_id IN (${marks})
-      UNION SELECT author_sub AS s FROM comments WHERE doc_id IN (${marks})`).all(...ids, ...ids, ...ids) as { s: string }[]) out.add(r.s);
+      UNION SELECT m.sub AS s FROM doc_acl a JOIN group_members m ON m.group_sub = a.sub WHERE a.doc_id IN (${marks})
+      UNION SELECT author_sub AS s FROM comments WHERE doc_id IN (${marks})`).all(...ids, ...ids, ...ids, ...ids) as { s: string }[]) out.add(r.s);
     return out;
   }
 
@@ -314,6 +323,7 @@ export class Documents extends EventEmitter {
     }
     if (granteeSub === actor.sub && mine !== 'owner') throw new Fault(403, 'You cannot change your own access. Ask an owner.');
     if (granteeSub === doc.ownerSub) throw new Fault(400, 'The owner always has owner access.');
+    if (granteeSub.startsWith('group:') && role === 'owner') throw new Fault(400, 'A group cannot own a document; make a person the owner.');
     if (role !== 'none' && !['viewer', 'commenter', 'editor', 'owner'].includes(role)) throw new Fault(400, 'role must be viewer, commenter, editor, owner or none');
     // Editors may share up to editor; only owners grant ownership or remove people.
     if (mine !== 'owner' && (role === 'owner' || role === 'none')) throw new Fault(403, 'Only an owner can grant ownership or remove access.');
@@ -332,6 +342,10 @@ export class Documents extends EventEmitter {
         .run(docId, granteeSub, role, actor.sub, Date.now());
     }
     this.emit('share', { docId, sub: granteeSub, role, by: actor.sub });
+    // Everyone in a group hears about a share made to it.
+    if (granteeSub.startsWith('group:')) {
+      for (const m of this.db.prepare('SELECT sub FROM group_members WHERE group_sub = ?').all(granteeSub) as { sub: string }[]) if (m.sub !== actor.sub) this.emit('share', { docId, sub: m.sub, role, by: actor.sub });
+    }
   }
 
   setGeneralAccess(docId: string, actor: Actor, access: GeneralAccess): void {

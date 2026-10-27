@@ -715,6 +715,32 @@ try {
     await alice.keyboard.press('Escape');
   });
 
+  await step('groups: made on the Groups page, a member added by exact name, a document shared with the group from the share dialog; the member can open it', async () => {
+    const d = (await api(alice, 'POST', '/api/docs', { title: 'Team notes', content: '# Team notes\n\nfor the team\n' })).json;
+    const bobCookie = (await bob.context().cookies()).map((c) => `${c.name}=${c.value}`).join('; ');
+    assert((await fetch(`${ORIGIN}/api/docs/${d.id}`, { headers: { Cookie: bobCookie } })).status === 404, 'Bob should not see it yet');
+    await alice.goto(`${ORIGIN}/groups`);
+    await alice.locator('button.btn.primary', { hasText: 'New group' }).click();
+    const inp = alice.locator('dialog.dialog input.input');
+    await inp.waitFor(); await inp.fill('Research team');
+    await alice.locator('dialog.dialog button.btn.primary').click();
+    await alice.locator('.group-detail h2', { hasText: 'Research team' }).waitFor({ timeout: 8000 });
+    const add = alice.locator('.group-add input.picker-input');
+    await add.click(); await alice.keyboard.type('Bob');
+    await alice.locator('.picker-option .po-name', { hasText: 'Bob' }).first().click({ timeout: 5000 }).catch(async () => { await add.press('Enter'); });
+    await alice.locator('.member-row .share-name', { hasText: 'Bob' }).waitFor({ timeout: 8000 });
+    // Share the document with the group from its Share dialog.
+    await openDoc(alice, d.id);
+    await alice.locator('.doc-header-right .share-btn').click();
+    const who = alice.locator('dialog.dialog input.picker-input');
+    await who.waitFor(); await who.click(); await alice.keyboard.type('Research team');
+    await alice.locator('.picker-option .po-name', { hasText: 'Research team' }).first().click({ timeout: 5000 }).catch(async () => { await who.press('Enter'); });
+    await alice.locator('dialog.dialog .share-row .share-name', { hasText: 'Research team' }).waitFor({ timeout: 8000 });
+    assert((await alice.locator('dialog.dialog .share-row', { hasText: 'Research team' }).locator('.kind-group').count()) === 1, 'no group badge in the ACL');
+    await alice.keyboard.press('Escape');
+    assert((await fetch(`${ORIGIN}/api/docs/${d.id}`, { headers: { Cookie: bobCookie } })).status === 200, 'the member cannot open the shared document');
+  });
+
   await step('home lists the tree', async () => {
     await alice.goto(`${ORIGIN}/`);
     await alice.locator('.home-trees a.tree-card', { hasText: 'Paper' }).waitFor({ timeout: 8000 });

@@ -22,7 +22,7 @@ export function mountPeople(root: HTMLElement, me: Me): () => void {
 
   const draw = () => {
     if (!people) return;
-    const list = people.filter((p) => kind === 'all' || (kind === 'agent' ? p.kind !== 'human' : p.kind === 'human'));
+    const list = people.filter((p) => p.kind !== 'group').filter((p) => kind === 'all' || (kind === 'agent' ? p.kind !== 'human' : p.kind === 'human'));
     if (!list.length) {
       grid.replaceChildren(emptyState({ art: icon('users', 36, 'empty-art-icon'), title: searchInput.value ? 'No one matches that search' : kind === 'agent' ? 'No agents yet' : 'No one here yet', text: searchInput.value ? 'Type someone’s exact name or id to find them.' : 'People appear here once you share a document or a space with them, or they comment where you can read. There is no directory: type an exact name to find someone else.' }));
       return;
