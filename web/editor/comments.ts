@@ -54,6 +54,11 @@ export class CommentsRail {
   /** Search in the drawer: matches any comment's text, author or quoted text. */
   private query = '';
   private searchEl: HTMLInputElement;
+  // The header's parts that re-render live in their own slots, so the search box is never detached (which blurs it).
+  private filterSlot = h('div.rail-filter-slot');
+  private searchWrap: HTMLElement;
+  private searchClear: HTMLButtonElement;
+  private extraSlot = h('div.rail-extra-slot');
   private hlSig = '';
   private synced = false;
   private seenEvents = new Set<string>();
@@ -77,8 +82,11 @@ export class CommentsRail {
   }) {
     this.headEl = h('div.rail-head');
     this.searchEl = h('input.input.sm.rail-search-input', { type: 'search', placeholder: 'Search comments', 'aria-label': 'Search comments', autocomplete: 'off' });
-    this.searchEl.addEventListener('input', () => { this.query = this.searchEl.value.trim(); this.renderHead(); this.render(); });
-    this.searchEl.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.preventDefault(); this.searchEl.value = ''; this.query = ''; this.renderHead(); this.render(); this.searchEl.blur(); } });
+    const setQuery = (q: string) => { this.query = q.trim(); this.searchClear.hidden = !this.query; this.render(); };
+    this.searchEl.addEventListener('input', () => setQuery(this.searchEl.value));
+    this.searchEl.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.preventDefault(); this.searchEl.value = ''; setQuery(''); this.searchEl.blur(); } });
+    this.searchClear = h('button.icon-btn.sm.rail-search-clear', { type: 'button', 'aria-label': 'Clear search', hidden: true, onclick: () => { this.searchEl.value = ''; setQuery(''); this.searchEl.focus(); } }, icon('x', 14));
+    this.searchWrap = h('div.rail-search', null, icon('search', 15), this.searchEl, this.searchClear);
     this.cardsEl = h('div.rail-cards');
     this.emptyEl = emptyState({
       art: icon('comment', 36, 'empty-art-icon'),
@@ -473,14 +481,16 @@ export class CommentsRail {
         h('button.link-btn', { type: 'button', onclick: () => void this.decideAll('accept') }, 'Accept all'),
         h('button.link-btn.danger', { type: 'button', onclick: () => void this.decideAll('reject') }, 'Reject all'))
       : null;
-    this.headEl.replaceChildren(
-      h('div.rail-title', null, h('h2', null, 'Comments'), h('button.icon-btn.sm.rail-close', { type: 'button', 'aria-label': 'Close comments', onclick: () => this.setDrawer(false) }, icon('x', 18))),
-      h('div.seg.rail-filter', { role: 'tablist', 'aria-label': 'Show comments' }, tabs.map(([f, label]) => h('button.seg-btn', {
-        type: 'button', role: 'tab', 'aria-selected': String(this.filter === f), class: this.filter === f ? 'on' : '',
-        onclick: () => { this.filter = f; this.renderHead(); this.render(); },
-      }, label))),
-      h('div.rail-search', null, icon('search', 15), this.searchEl,
-        this.query ? h('button.icon-btn.sm.rail-search-clear', { type: 'button', 'aria-label': 'Clear search', onclick: () => { this.searchEl.value = ''; this.query = ''; this.renderHead(); this.render(); this.searchEl.focus(); } }, icon('x', 14)) : null),
+    if (!this.headEl.firstChild) {
+      this.headEl.replaceChildren(
+        h('div.rail-title', null, h('h2', null, 'Comments'), h('button.icon-btn.sm.rail-close', { type: 'button', 'aria-label': 'Close comments', onclick: () => this.setDrawer(false) }, icon('x', 18))),
+        this.filterSlot, this.searchWrap, this.extraSlot);
+    }
+    this.filterSlot.replaceChildren(h('div.seg.rail-filter', { role: 'tablist', 'aria-label': 'Show comments' }, tabs.map(([f, label]) => h('button.seg-btn', {
+      type: 'button', role: 'tab', 'aria-selected': String(this.filter === f), class: this.filter === f ? 'on' : '',
+      onclick: () => { this.filter = f; this.renderHead(); this.render(); },
+    }, label))));
+    this.extraSlot.replaceChildren(
       ...(review ? [review] : []),
       ...(this.canComment ? [h('button.btn.ghost.sm.rail-doc-comment', { type: 'button', onclick: () => void this.commentOnDocument() }, icon('plus', 16), 'Comment on document')] : []));
     this.headEl.classList.toggle('has-review', !!review);
@@ -534,6 +544,19 @@ export class CommentsRail {
       if (m) return m;
     }
     return probe(t.quote) ?? probe(t.suggestion?.text) ?? probe(t.suggestion?.original) ?? null;
+  }
+
+  /** Open suggestions and where they sit in the shared text (for the preview). Outdated ones are left out. */
+  openSuggestionEdits(toShared: (pos: number, assoc?: -1 | 1) => number): { id: string; from: number; to: number; original: string; text: string; point: boolean }[] {
+    const out: { id: string; from: number; to: number; original: string; text: string; point: boolean }[] = [];
+    for (const t of this.threads) {
+      const sg = t.suggestion;
+      if (!sg || sg.status !== 'open' || sg.outdated) continue;
+      const r = this.anchors.get(t.id);
+      if (!r) continue;
+      out.push({ id: t.id, from: toShared(r.from, 1), to: toShared(r.to, -1), original: sg.original, text: sg.text, point: sg.point });
+    }
+    return out;
   }
 
   /** Role changed: permissions in cards and header. */

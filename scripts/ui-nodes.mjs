@@ -761,7 +761,8 @@ try {
     await api(alice, 'POST', '/api/operations/list_comments', { document: d.id }).then(async (r) => { const id = /\[(c\w+)\]/.exec(r.json.content[0].text)[1]; await api(alice, 'POST', '/api/operations/reply_comment', { comment: id, text: 'A reply mentioning the zebra budget.' }); });
     await alice.locator('button.comments-btn').click();
     const search = alice.locator('.comment-rail.drawer .rail-search-input');
-    await search.fill('Thread 20:');
+    await search.click(); await alice.keyboard.type('Thread 20:'); // typed key by key: focus must survive every re-render
+    assert((await search.inputValue()) === 'Thread 20:', `typing lost focus: ${await search.inputValue()}`);
     await alice.waitForFunction(() => document.querySelectorAll('.comment-rail.drawer .thread-card').length === 1, null, { timeout: 5000 });
     assert((await alice.locator('.comment-rail.drawer .thread-card').innerText()).includes('Thread 20:'), 'the matching card');
     await search.fill('zebra');
@@ -772,6 +773,25 @@ try {
     await search.press('Escape');
     await alice.waitForFunction(() => document.querySelectorAll('.comment-rail.drawer .thread-card').length === 20, null, { timeout: 5000 });
     await alice.locator('button.comments-btn').click();
+  });
+
+  await step('Preview shows open suggestions as applied: the insertion highlighted, the deletion struck; the bar hides and shows them', async () => {
+    const d = (await api(alice, 'POST', '/api/docs', { title: 'Fruit', content: '# Fruit\n\nIntro about apples and figs.\n' })).json;
+    const bobSub = (await api(bob, 'GET', '/api/me')).json.you.sub;
+    assert((await api(alice, 'POST', `/api/docs/${d.id}/share`, { who: bobSub, role: 'commenter' })).status === 200, 'share with Bob');
+    const s = await api(bob, 'POST', '/api/operations/suggest_edit', { document: d.id, edits: [{ old_text: 'apples', new_text: 'pears' }] });
+    assert(!s.json.isError, `suggest_edit: ${JSON.stringify(s.json).slice(0, 200)}`);
+    await openDoc(alice, d.id);
+    await alice.locator('.seg-btn[data-mode=preview]').click();
+    await alice.locator('.preview-body ins.sugg-ins', { hasText: 'pears' }).waitFor({ timeout: 8000 });
+    await alice.locator('.preview-body del.sugg-del', { hasText: 'apples' }).waitFor({ timeout: 8000 });
+    assert((await alice.locator('.preview-sugg-bar').innerText()).includes('1 open suggestion shown as applied'), 'the bar counts');
+    await alice.locator('.preview-sugg-bar button', { hasText: 'Hide' }).click();
+    await alice.locator('.preview-body ins.sugg-ins').waitFor({ state: 'detached', timeout: 5000 });
+    assert((await alice.locator('.preview-body').innerText()).includes('Intro about apples and figs.'), 'the text as it is');
+    await alice.locator('.preview-sugg-bar button', { hasText: 'Show as applied' }).click();
+    await alice.locator('.preview-body ins.sugg-ins', { hasText: 'pears' }).waitFor({ timeout: 5000 });
+    await alice.locator('.seg-btn[data-mode=edit]').click();
   });
 
   await step('a document with an anyone-with-the-link link shows that link as its address, and the link address reloads to the document', async () => {

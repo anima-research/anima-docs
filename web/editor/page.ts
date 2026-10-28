@@ -369,7 +369,10 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   const canvas = h('div.doc-canvas', null, pageWrap);
   const editPane = h('div.doc-scroll.edit-pane', { tabindex: '-1' }, canvas);
   const previewBody = h('article.prose.preview-body');
-  const previewPage = h('div.page.preview-page', null, previewBody);
+  // Open suggestions are shown in the preview as if applied (insertions highlighted, deletions struck), unless hidden here.
+  let showApplied = (() => { try { return localStorage.getItem('docs.previewApplied') !== '0'; } catch { return true; } })();
+  const previewSuggBar = h('div.preview-sugg-bar', { hidden: true });
+  const previewPage = h('div.page.preview-page', null, previewSuggBar, previewBody);
   const previewCanvas = h('div.doc-canvas', null, previewPage);
   // An HTML page previews as itself, in a sandboxed frame (opaque origin: its scripts cannot reach this app).
   const pageFrame = h('iframe.page-frame', { title: 'Page preview', sandbox: 'allow-scripts allow-forms allow-popups allow-modals allow-downloads allow-pointer-lock allow-presentation', hidden: true });
@@ -915,7 +918,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     if (ctx.restoreScroll) requestAnimationFrame(() => { editPane.scrollTop = ctx.restoreScroll!; });
     if (canEdit() && provider.ytext.length === 0) view.focus();
   });
-  cleanups.push(nodes.onThreads((threads, ev) => { session?.onThreads(threads); rail.setThreads(threads, ev); latestThreads = threads; sendHighlights(); }));
+  cleanups.push(nodes.onThreads((threads, ev) => { session?.onThreads(threads); rail.setThreads(threads, ev); latestThreads = threads; sendHighlights(); if (mode !== 'edit' && !isHtml()) schedulePreview(); }));
 
   // ------------------------------------------------------------------ the page's annotation layer
   // The framed page (opaque origin) runs /page-annotate.js and talks over postMessage. It only ever
@@ -1074,18 +1077,75 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   // ------------------------------------------------------------------ modes & layout
 
   /** The flattened text for rendering: latex and text nodes wrapped by type (markdown as is). */
-  function renderSource(L: Layout): string {
+  // Sentinels around applied suggestions in the preview's source; after rendering they become ins / del.
+  const S_INS0 = '\uE010', S_INS1 = '\uE011', S_DEL0 = '\uE012', S_DEL1 = '\uE013';
+  type PreviewEdit = { from: number; to: number; original: string; text: string; point: boolean };
+  function renderSource(L: Layout, edits: PreviewEdit[] = []): string {
     const typeOf = (id: string) => labelOf(id)?.type ?? 'markdown';
     let text = L.text;
+    // Everything is a replacement of a range of the original text; applied from the end, earlier offsets stay valid.
+    const ops: { from: number; to: number; depth: number; replace: (slice: string) => string }[] = [];
     const wrapped: Mount[] = [];
-    // Deepest and latest first, so earlier offsets stay valid and an outer wrap covers inner ones.
+    // Deepest and latest first, so an outer wrap covers inner ones.
     for (const m of [...L.mounts].sort((a, b) => b.from - a.from || b.depth - a.depth)) {
       if (m.collapsed || !m.loaded || typeOf(m.child) === 'markdown') continue;
       if (wrapped.some((w) => w.from <= m.from && m.to <= w.to)) continue;
-      text = text.slice(0, m.from) + wrapByType(text.slice(m.from, m.to), typeOf(m.child)) + text.slice(m.to);
+      ops.push({ from: m.from, to: m.to, depth: m.depth, replace: (slice) => wrapByType(slice, typeOf(m.child)) });
       wrapped.push(m);
     }
+    for (const e of edits) {
+      let { from, to } = e;
+      if (!e.point) {
+        // The anchor must still cover the original text; otherwise look for it nearby, else leave the suggestion out.
+        if (text.slice(from, to) !== e.original) {
+          const near = text.indexOf(e.original, Math.max(0, from - 2000));
+          if (near < 0 || near > from + 2000 || !e.original) continue;
+          from = near; to = near + e.original.length;
+        }
+      } else to = from;
+      if (wrapped.some((w) => from < w.to && to > w.from)) continue; // inside a node of another type: not shown
+      ops.push({ from, to, depth: 1e9, replace: () => `${e.original ? S_DEL0 + e.original + S_DEL1 : ''}${e.text ? S_INS0 + e.text + S_INS1 : ''}` });
+    }
+    ops.sort((a, b) => b.from - a.from || b.depth - a.depth);
+    let lastFrom = Infinity;
+    for (const op of ops) {
+      if (op.to > lastFrom) continue; // overlapping an op already applied
+      text = text.slice(0, op.from) + op.replace(text.slice(op.from, op.to)) + text.slice(op.to);
+      lastFrom = op.from;
+    }
     return wrapByType(text, typeOf(docId));
+  }
+  /** Turn the sentinels left in the rendered preview into highlighted insertions and struck deletions. */
+  function markApplied(root: HTMLElement) {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const nodes: Text[] = [];
+    let n: Node | null; while ((n = walker.nextNode())) nodes.push(n as Text);
+    let mode: 'ins' | 'del' | null = null;
+    const re = /[\uE010-\uE013]/g;
+    for (const node of nodes) {
+      const data = node.data;
+      if (!re.test(data) && !mode) { re.lastIndex = 0; continue; }
+      re.lastIndex = 0;
+      const frag = document.createDocumentFragment();
+      let last = 0;
+      const emit = (piece: string) => { if (!piece) return; frag.append(mode ? h(mode === 'ins' ? 'ins.sugg-ins' : 'del.sugg-del', null, piece) : piece); };
+      for (const m of data.matchAll(re)) {
+        emit(data.slice(last, m.index));
+        const c = m[0];
+        mode = c === S_INS0 ? 'ins' : c === S_DEL0 ? 'del' : null;
+        last = m.index! + 1;
+      }
+      emit(data.slice(last));
+      node.replaceWith(frag);
+    }
+  }
+  function renderSuggBar(n: number) {
+    previewSuggBar.hidden = n === 0;
+    if (!n) return;
+    previewSuggBar.replaceChildren(
+      icon('pencil', 14),
+      h('span', null, showApplied ? `${n} open ${n === 1 ? 'suggestion' : 'suggestions'} shown as applied` : `${n} open ${n === 1 ? 'suggestion' : 'suggestions'} not shown`),
+      h('button.link-btn', { type: 'button', onclick: () => { showApplied = !showApplied; try { localStorage.setItem('docs.previewApplied', showApplied ? '1' : '0'); } catch { /* fine */ } renderPreview(); } }, showApplied ? 'Hide' : 'Show as applied'));
   }
   /** What the framed page was loaded from: a key over the text ('' = not loaded). */
   let frameKey = '';
@@ -1109,9 +1169,12 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
       if (key !== frameKey) { frameKey = key; loadFrame(); }
       return;
     }
-    const text = renderSource(binding.current);
+    const edits = rail.openSuggestionEdits((p, a) => coords().toShared(p, a));
+    const text = renderSource(binding.current, showApplied ? edits : []);
     previewBody.replaceChildren(renderDocument(text));
     if (!text.length) previewBody.replaceChildren(h('p.preview-empty', null, 'This document is empty.'));
+    if (showApplied && edits.length) markApplied(previewBody);
+    renderSuggBar(edits.length);
     previewAnnotations?.refresh();
   };
   const schedulePreviewMd = debounce(renderPreview, 120);
