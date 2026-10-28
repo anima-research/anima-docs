@@ -1424,3 +1424,11 @@ dialog.lightbox figcaption { color: #e6e8ec; font: 14px var(--font-ui); }
 .share-groups-none { color: var(--text-3); }
 .group-chip { display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px 4px 8px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-2); color: var(--text-strong); font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer; }
 .group-chip:hover { border-color: var(--accent); background: var(--hover); }
+
+/* Search in the comments drawer */
+.rail-search { display: flex; align-items: center; gap: 6px; margin-top: 8px; padding: 0 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); color: var(--text-3); }
+.rail-search:focus-within { border-color: var(--accent); }
+.rail-search .rail-search-input { flex: 1; min-width: 0; border: 0; background: none; padding: 6px 0; font-size: 13px; color: var(--text); outline: none; }
+.rail-search .rail-search-input::-webkit-search-cancel-button { display: none; }
+.card-match { margin: 6px 0 0 40px; font-size: 12.5px; color: var(--text-2); overflow-wrap: anywhere; }
+.card-match mark { background: color-mix(in srgb, #e8b400 45%, transparent); color: inherit; border-radius: 2px; padding: 0 1px; }

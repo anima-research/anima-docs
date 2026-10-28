@@ -757,6 +757,21 @@ try {
     await alice.locator('.thread-card.active .collapse-btn').click();
     await alice.locator('.comment-rail.margin .thread-card.closed', { hasText: 'Thread 20:' }).waitFor({ timeout: 5000 });
     assert((await alice.locator('.thread-card.active').count()) === 0, 'no card should be active after collapsing');
+    // Search in the drawer: by text, then by something only a reply says.
+    await api(alice, 'POST', '/api/operations/list_comments', { document: d.id }).then(async (r) => { const id = /\[(c\w+)\]/.exec(r.json.content[0].text)[1]; await api(alice, 'POST', '/api/operations/reply_comment', { comment: id, text: 'A reply mentioning the zebra budget.' }); });
+    await alice.locator('button.comments-btn').click();
+    const search = alice.locator('.comment-rail.drawer .rail-search-input');
+    await search.fill('Thread 20:');
+    await alice.waitForFunction(() => document.querySelectorAll('.comment-rail.drawer .thread-card').length === 1, null, { timeout: 5000 });
+    assert((await alice.locator('.comment-rail.drawer .thread-card').innerText()).includes('Thread 20:'), 'the matching card');
+    await search.fill('zebra');
+    await alice.waitForFunction(() => document.querySelectorAll('.comment-rail.drawer .thread-card').length === 1, null, { timeout: 5000 });
+    await alice.locator('.comment-rail.drawer .thread-card .card-match mark', { hasText: 'zebra' }).waitFor({ timeout: 5000 });
+    await search.fill('nothing like this');
+    await alice.locator('.comment-rail.drawer .empty-state', { hasText: 'No comments match' }).waitFor({ timeout: 5000 });
+    await search.press('Escape');
+    await alice.waitForFunction(() => document.querySelectorAll('.comment-rail.drawer .thread-card').length === 20, null, { timeout: 5000 });
+    await alice.locator('button.comments-btn').click();
   });
 
   await step('a document with an anyone-with-the-link link shows that link as its address, and the link address reloads to the document', async () => {

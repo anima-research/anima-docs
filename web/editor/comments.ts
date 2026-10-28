@@ -51,6 +51,9 @@ export class CommentsRail {
   layout: 'margin' | 'drawer' = 'margin';
   drawerOpen = false;
   private filter: Filter = 'open';
+  /** Search in the drawer: matches any comment's text, author or quoted text. */
+  private query = '';
+  private searchEl: HTMLInputElement;
   private hlSig = '';
   private synced = false;
   private seenEvents = new Set<string>();
@@ -73,6 +76,9 @@ export class CommentsRail {
     session?: () => SuggestSession | null;
   }) {
     this.headEl = h('div.rail-head');
+    this.searchEl = h('input.input.sm.rail-search-input', { type: 'search', placeholder: 'Search comments', 'aria-label': 'Search comments', autocomplete: 'off' });
+    this.searchEl.addEventListener('input', () => { this.query = this.searchEl.value.trim(); this.renderHead(); this.render(); });
+    this.searchEl.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.preventDefault(); this.searchEl.value = ''; this.query = ''; this.renderHead(); this.render(); this.searchEl.blur(); } });
     this.cardsEl = h('div.rail-cards');
     this.emptyEl = emptyState({
       art: icon('comment', 36, 'empty-art-icon'),
@@ -473,6 +479,8 @@ export class CommentsRail {
         type: 'button', role: 'tab', 'aria-selected': String(this.filter === f), class: this.filter === f ? 'on' : '',
         onclick: () => { this.filter = f; this.renderHead(); this.render(); },
       }, label))),
+      h('div.rail-search', null, icon('search', 15), this.searchEl,
+        this.query ? h('button.icon-btn.sm.rail-search-clear', { type: 'button', 'aria-label': 'Clear search', onclick: () => { this.searchEl.value = ''; this.query = ''; this.renderHead(); this.render(); this.searchEl.focus(); } }, icon('x', 14)) : null),
       ...(review ? [review] : []),
       ...(this.canComment ? [h('button.btn.ghost.sm.rail-doc-comment', { type: 'button', onclick: () => void this.commentOnDocument() }, icon('plus', 16), 'Comment on document')] : []));
     this.headEl.classList.toggle('has-review', !!review);
@@ -506,6 +514,7 @@ export class CommentsRail {
     if (this.layout === 'margin') list = list.filter((t) => !t.resolved);
     else if (this.filter === 'open') list = list.filter((t) => !t.resolved);
     else if (this.filter === 'resolved') list = list.filter((t) => t.resolved);
+    if (this.layout === 'drawer' && this.query) list = list.filter((t) => !!this.matchIn(t));
     const pos = (t: Thread) => this.anchors.get(t.id)?.from ?? -1;
     return [...list].sort((a, b) => {
       const pa = pos(a), pb = pos(b);
@@ -513,6 +522,18 @@ export class CommentsRail {
       if (pa !== pb) return pa - pb;
       return a.comments[0].createdAt - b.comments[0].createdAt;
     });
+  }
+
+  /** The first place the search matches in a thread: a comment's text, its author, the quoted text, a suggestion's text. */
+  private matchIn(t: Thread): { text: string; at: number } | null {
+    const q = this.query.toLowerCase();
+    if (!q) return null;
+    const probe = (text: string | null | undefined) => { if (!text) return null; const at = text.toLowerCase().indexOf(q); return at < 0 ? null : { text, at }; };
+    for (const c of t.comments) {
+      const m = probe(c.body) ?? probe(c.author.name) ?? probe(shownName(c.author));
+      if (m) return m;
+    }
+    return probe(t.quote) ?? probe(t.suggestion?.text) ?? probe(t.suggestion?.original) ?? null;
   }
 
   /** Role changed: permissions in cards and header. */
@@ -544,7 +565,9 @@ export class CommentsRail {
       prev = el;
     }
     this.emptyEl.hidden = !(this.layout === 'drawer' && this.synced && !visible.length && !this.draft);
-    if (this.layout === 'drawer' && this.filter !== 'open' && !visible.length) {
+    if (this.layout === 'drawer' && this.query && !visible.length) {
+      this.emptyEl.querySelector('.empty-title')!.textContent = `No comments match “${this.query}”`;
+    } else if (this.layout === 'drawer' && this.filter !== 'open' && !visible.length) {
       this.emptyEl.querySelector('.empty-title')!.textContent = this.filter === 'resolved' ? 'No resolved comments' : 'No comments yet';
     } else this.emptyEl.querySelector('.empty-title')!.textContent = 'No comments yet';
     this.el.classList.toggle('has-cards', ordered.length > 0);
@@ -583,7 +606,7 @@ export class CommentsRail {
     const active = this.active === t.id;
     const orphan = this.isOrphan(t);
     const inSession = !!this.deps.session?.()?.ids.has(t.id);
-    const sig = JSON.stringify([t, active, orphan, this.layout, [...card.editing.keys()], !!card.revising, inSession, this.deps.role(), Math.floor(Date.now() / 60_000)]);
+    const sig = JSON.stringify([t, active, orphan, this.layout, [...card.editing.keys()], !!card.revising, inSession, this.deps.role(), Math.floor(Date.now() / 60_000), this.layout === 'drawer' ? this.query : '']);
     card.el.classList.toggle('active', active);
     card.el.classList.toggle('resolved', t.resolved);
     card.el.classList.toggle('orphaned', orphan && !t.suggestion);
@@ -624,6 +647,12 @@ export class CommentsRail {
       }
       parts.push(this.renderComment(card, t, c, i === 0, ctx));
     });
+    // While searching, a closed card shows where it matched (the match may be in a reply, or below the clamp).
+    const m = closed && this.layout === 'drawer' ? this.matchIn(t) : null;
+    if (m) {
+      const from = Math.max(0, m.at - 40), to = Math.min(m.text.length, m.at + this.query.length + 60);
+      parts.push(h('div.card-match', null, from > 0 ? '…' : '', m.text.slice(from, m.at), h('mark', null, m.text.slice(m.at, m.at + this.query.length)), m.text.slice(m.at + this.query.length, to), to < m.text.length ? '…' : ''));
+    }
     card.body.replaceChildren(...parts.filter(Boolean) as HTMLElement[]);
     // Reply box: persistent element so drafts survive live updates.
     if (active && this.canComment) {
