@@ -1,6 +1,6 @@
 // Share dialog: add people, people with access, general access, and share links.
 
-import { api, atLeast, ROLE_LABEL, ROLE_VERB, type DocDetail, type GeneralAccess, type LinkRole, type LinkWho, type Me, type Person, type Role, type ShareLink } from '../lib/api';
+import { api, atLeast, ROLE_LABEL, ROLE_VERB, type DocDetail, type GeneralAccess, type Group, type LinkRole, type LinkWho, type Me, type Person, type Role, type ShareLink } from '../lib/api';
 import { h, replaceChildren } from '../lib/dom';
 import { icon } from '../lib/icons';
 import { plural, splitLabel, untilTime } from '../lib/format';
@@ -39,6 +39,8 @@ export function openShareDialog(opts: { docId: string; me: Me; title: string; on
   let links: ShareLink[] | null = null;
   let linksError: string | null = null;
   let addRole: Role = 'editor';
+  let myGroups: Group[] = [];
+  const groupsEl = h('div.share-groups-wrap');
   const errorEl = h('div.form-error', { role: 'alert', hidden: true });
   const listEl = h('div.share-list', { 'aria-label': 'People with access' }, h('div.share-loading', null, spinner(20)));
   const generalEl = h('div.share-general');
@@ -53,6 +55,7 @@ export function openShareDialog(opts: { docId: string; me: Me; title: string; on
     try {
       if (!primed) { primed = true; await searchPeople('').catch(() => undefined); }
       doc = await api.doc(opts.docId);
+      myGroups = (await api.groups().catch(() => ({ groups: [] }))).groups;
       render();
       opts.onChanged?.(doc);
     } catch (e) { showError(errorMessage(e)); }
@@ -111,7 +114,17 @@ export function openShareDialog(opts: { docId: string; me: Me; title: string; on
       sel.addEventListener('change', () => { addRole = sel.value as Role; });
       addRow.replaceChildren(picker.el, sel);
       addRow.hidden = false;
-    } else addRow.hidden = true;
+      // Your groups, one click each: the fast way to share with the people you work with.
+      const onList = new Set(doc.acl.map((a) => a.sub));
+      const chips = myGroups.filter((g) => !onList.has(g.sub)).map((g) => h('button.group-chip', {
+        type: 'button', title: `Share with everyone in ${g.name} (${g.members.length})`, onclick: () => void share(g.sub, addRole, g.name),
+      }, icon('users', 14), g.name));
+      groupsEl.replaceChildren(
+        myGroups.length
+          ? h('div.share-groups', null, h('span.share-groups-label', null, 'Your groups:'), ...(chips.length ? chips : [h('span.share-groups-none', null, 'all on the list')]))
+          : h('div.share-groups.hint', null, icon('users', 14), 'Groups make sharing with the same people one click. ', h('a', { href: '/groups' }, 'Make one')));
+      groupsEl.hidden = false;
+    } else { addRow.hidden = true; groupsEl.hidden = true; }
 
     // People with access
     const ownerName = splitLabel(doc.owner.label).name;
@@ -143,24 +156,18 @@ export function openShareDialog(opts: { docId: string; me: Me; title: string; on
     }
     listEl.replaceChildren(h('h3.share-section', null, 'People with access'), ...rows);
 
-    // General access: Archipelago members only (guests come in through links)
-    const g = GENERAL.find((x) => x.value === doc!.generalAccess) ?? GENERAL[0];
-    const gIcon = h('span.ga-icon', { class: g.value === 'restricted' ? 'restricted' : 'open' }, icon(g.value === 'restricted' ? 'lock' : 'users', 18));
-    let control: HTMLElement;
-    if (isOwner) {
-      const sel = h('select.select.ga-select', { 'aria-label': 'General access' }, GENERAL.map((x) => h('option', { value: x.value, selected: x.value === g.value }, x.label)));
-      sel.addEventListener('change', async () => {
-        showError(null);
-        d.setBusy(true);
-        try {
-          await api.patchDoc(opts.docId, { generalAccess: sel.value as GeneralAccess });
-          await reload();
-        } catch (e) { showError(errorMessage(e)); sel.value = g.value; } finally { d.setBusy(false); }
-      });
-      control = sel;
-    } else control = h('div.ga-text', null, g.label);
-    generalEl.replaceChildren(h('h3.share-section', null, 'General access'),
-      h('div.ga-row', null, gIcon, h('div.ga-main', null, control, h('div.ga-help', null, g.help, isOwner ? null : ' · Only the owner can change this.'))));
+    // Access for everyone on Archipelago is no longer offered (the service's users are too varied for it to mean
+    // much; groups are the fast way). A document that still has it shows it, with a way to turn it off.
+    const g = GENERAL.find((x) => x.value === doc!.generalAccess);
+    if (g && g.value !== 'restricted') {
+      const off = isOwner ? h('button.btn.ghost.sm', { type: 'button', onclick: async () => {
+        showError(null); d.setBusy(true);
+        try { await api.patchDoc(opts.docId, { generalAccess: 'restricted' as GeneralAccess }); await reload(); } catch (e) { showError(errorMessage(e)); } finally { d.setBusy(false); }
+      } }, 'Turn off') : null;
+      generalEl.replaceChildren(h('h3.share-section', null, 'General access'),
+        h('div.ga-row', null, h('span.ga-icon.open', null, icon('users', 18)), h('div.ga-main', null, h('div.ga-text', null, g.label), h('div.ga-help', null, g.help, isOwner ? null : ' · Only the owner can change this.')), off));
+      generalEl.hidden = false;
+    } else generalEl.hidden = true;
     // Links depend on the role only; re-rendering them on every reload would cut the new-link highlight short.
     if (linksRole !== mine) { linksRole = mine; renderLinks(); }
   }
@@ -300,7 +307,7 @@ export function openShareDialog(opts: { docId: string; me: Me; title: string; on
     label: `Share ${opts.title}`,
     size: 'md',
     className: 'share-dialog',
-    body: [addRow, errorEl, listEl, generalEl, linksEl],
+    body: [addRow, groupsEl, errorEl, listEl, generalEl, linksEl],
     footer: [copy, h('span.spacer'), h('button.btn.primary', { type: 'button', onclick: () => d.close() }, 'Done')],
   });
   void Promise.all([reload(), reloadLinks()]).then(() => { if (!addRow.hidden) picker.input.focus(); });

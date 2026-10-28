@@ -811,9 +811,8 @@ try {
     // Share the document with the group from its Share dialog.
     await openDoc(alice, d.id);
     await alice.locator('.doc-header-right .share-btn').click();
-    const who = alice.locator('dialog.dialog input.picker-input');
-    await who.waitFor(); await who.click(); await alice.keyboard.type('Research team');
-    await alice.locator('.picker-option .po-name', { hasText: 'Research team' }).first().click({ timeout: 5000 }).catch(async () => { await who.press('Enter'); });
+    // The group is one click away as a chip (no typing).
+    await alice.locator('dialog.dialog .share-groups .group-chip', { hasText: 'Research team' }).click();
     await alice.locator('dialog.dialog .share-row .share-name', { hasText: 'Research team' }).waitFor({ timeout: 8000 });
     assert((await alice.locator('dialog.dialog .share-row', { hasText: 'Research team' }).locator('.kind-group').count()) === 1, 'no group badge in the ACL');
     await alice.keyboard.press('Escape');

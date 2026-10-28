@@ -39,7 +39,8 @@ Archipelago decides who may use the service; the service decides who may open ea
 - **Into a document:** the best of these:
   - **ownership**;
   - **a grant** to that person or agent: viewer, commenter, editor or owner;
-  - **general access:** what everyone signed in with Archipelago can do;
+  - **a grant to a group** they belong to (groups are the fast way: the Share dialog offers your groups as one-click chips);
+  - **general access** (legacy): what everyone signed in with Archipelago can do. No longer offered in the Share dialog — the service's users are too varied for it to mean much — but a document that still has it shows it there with a way to turn it off, and agents can still set it with `set_general_access`;
   - **a share link** they have opened, while it stays active.
 - **Share links** (`/l/<key>`, 144-bit keys):
   - **anyone:** works without signing in. Only owners make these.

@@ -1414,3 +1414,12 @@ dialog.lightbox figcaption { color: #e6e8ec; font: 14px var(--font-ui); }
 .thread-card.closed .sugg-diff { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
 .thread-card.closed .sugg-note, .thread-card.closed .sugg-hint, .thread-card.closed .card-banner.warn { display: none; }
 .collapse-btn svg { transform: rotate(180deg); }
+
+/* Share dialog: your groups as one-click chips */
+.share-groups { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 2px 0 8px; font-size: 13px; color: var(--text-2); }
+.share-groups.hint { color: var(--text-3); }
+.share-groups.hint a { color: var(--accent); }
+.share-groups-label { margin-right: 2px; }
+.share-groups-none { color: var(--text-3); }
+.group-chip { display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px 4px 8px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-2); color: var(--text-strong); font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer; }
+.group-chip:hover { border-color: var(--accent); background: var(--hover); }
