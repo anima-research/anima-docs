@@ -958,16 +958,23 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: 'create_link', featureSet: 'docs.share', toolClass: 'control',
-    description: 'Make a share link for a document. who: "anyone" — works without signing in (visitors appear as guests; owners only); "members" — anyone signed in with Archipelago who has the link. Access through a link lasts while the link is active; revoke_link ends it for everyone who used it.',
+    description: 'Make a share link for a document. who: "anyone" — works without signing in (visitors appear as guests; owners only); "group" — members of one of your groups, signed in (editors may make these); "members" — any Archipelago sign-in (legacy). Links grant viewer, commenter or editor; revoke_link ends one for everyone who used it.',
     inputSchema: { type: 'object', required: ['document', 'role', 'who'], properties: {
       ...docArg,
       role: S('What the link lets people do.', { enum: ['viewer', 'commenter', 'editor'] }),
-      who: S('anyone (no sign-in needed) or members (Archipelago sign-in needed).', { enum: ['anyone', 'members'] }),
+      who: S('anyone (no sign-in needed), group (members of one of your groups), or members (any Archipelago sign-in; legacy).', { enum: ['anyone', 'group', 'members'] }),
+      group: S('With who: "group" — the group’s name or id. You must belong to it.'),
       label: S('Optional note to remember what the link is for, e.g. "for the reading group".'),
       expires_in_days: { type: 'number', minimum: 0.05, maximum: 365, description: 'Optional; the link stops working after this many days.' },
     } },
     run(app, actor, a) {
-      const l = app.docs.createLink(need(a, 'document'), actor, { role: roleArg(a.role) as Role, audience: a.who, label: a.label ?? null, expiresInDays: a.expires_in_days ?? null });
+      let groupSub: string | null = null;
+      if (a.who === 'group') {
+        const g = a.group ? app.principals.resolve(String(a.group)) : null;
+        if (!g || g.kind !== 'group') throw new Fault(400, 'With who: "group", give a group you belong to (its name or id; see groups).');
+        groupSub = g.sub;
+      }
+      const l = app.docs.createLink(need(a, 'document'), actor, { role: roleArg(a.role) as Role, audience: a.who, groupSub, label: a.label ?? null, expiresInDays: a.expires_in_days ?? null });
       return text(`Link ${l.id}: ${linkUrl(app, l.key)}\n${linkLine(app, l)}`);
     },
   },

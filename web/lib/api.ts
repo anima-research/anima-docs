@@ -107,13 +107,16 @@ export interface ThreadSuggestion {
   version: string;
 }
 
-export type LinkWho = 'anyone' | 'members';
+/** anyone: no sign-in; group: members of one group; members: any Archipelago sign-in (legacy, no longer offered). */
+export type LinkWho = 'anyone' | 'members' | 'group';
 export type LinkRole = 'viewer' | 'commenter' | 'editor';
 export interface ShareLink {
   id: string;
   url: string;
   role: LinkRole;
   who: LinkWho;
+  /** For a group link: the group it is for. */
+  group: { sub: string; name: string } | null;
   label: string | null;
   createdBy: { sub: string; label: string };
   createdAt: number;
@@ -122,7 +125,7 @@ export interface ShareLink {
   holders: number;
   active: boolean;
 }
-export interface LinkPeek { active: boolean; audience?: LinkWho; role?: LinkRole; title?: string; signedIn: boolean; guest: boolean }
+export interface LinkPeek { active: boolean; audience?: LinkWho; role?: LinkRole; title?: string; groupName?: string; signedIn: boolean; guest: boolean }
 export interface Redeemed { docId: string; title: string; role: Role; guest: boolean; you: Me }
 
 export interface DocFile { path: string; mime: string; size: number; mediaId: string; updatedAt: number; updatedBy: string; url: string }
@@ -220,7 +223,7 @@ export const api = {
   movePage: (root: string, parent: string, child: string, dir: 'up' | 'down') => call<TreeView>('POST', `/api/trees/${encodeURIComponent(root)}/move`, { parent, child, dir }),
 
   links: (id: string) => call<{ links: ShareLink[] }>('GET', `/api/docs/${encodeURIComponent(id)}/links`),
-  createLink: (id: string, opts: { role: LinkRole; who: LinkWho; label?: string; expiresInDays?: number }) => call<ShareLink>('POST', `/api/docs/${encodeURIComponent(id)}/links`, opts),
+  createLink: (id: string, opts: { role: LinkRole; who: LinkWho; group?: string; label?: string; expiresInDays?: number }) => call<ShareLink>('POST', `/api/docs/${encodeURIComponent(id)}/links`, opts),
   revokeLink: (id: string, linkId: string) => call<ShareLink>('DELETE', `/api/docs/${encodeURIComponent(id)}/links/${encodeURIComponent(linkId)}`),
   /** What a share link leads to (no sign-in needed). */
   peekLink: (key: string) => call<LinkPeek>('GET', `/api/links/${encodeURIComponent(key)}`),

@@ -716,6 +716,7 @@ export function createHttp(app: App) {
         const a = actor;
         const P = app.principals;
         const linkView = (l: import('./documents.js').ShareLink) => ({ id: l.id, url: `${app.config.origin}/l/${l.key}`, role: l.role, who: l.audience, label: l.label,
+          group: l.groupSub ? { sub: l.groupSub, name: l.groupName ?? l.groupSub } : null,
           createdBy: { sub: l.createdBy, label: P.label(l.createdBy) }, createdAt: l.createdAt, expiresAt: l.expiresAt, holders: l.holders, active: l.active });
         const docView = (id: string) => {
           const d = app.docs.get(id)!;
@@ -835,7 +836,7 @@ export function createHttp(app: App) {
           }
           if (rest === '/links' && method === 'POST') {
             const b = await json(req);
-            const l = app.docs.createLink(id, a, { role: b.role, audience: b.who, label: typeof b.label === 'string' ? b.label : null, expiresInDays: typeof b.expiresInDays === 'number' ? b.expiresInDays : null });
+            const l = app.docs.createLink(id, a, { role: b.role, audience: b.who, groupSub: typeof b.group === 'string' ? b.group : null, label: typeof b.label === 'string' ? b.label : null, expiresInDays: typeof b.expiresInDays === 'number' ? b.expiresInDays : null });
             send(201, linkView(l));
             return;
           }

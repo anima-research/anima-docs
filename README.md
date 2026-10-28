@@ -44,7 +44,8 @@ Archipelago decides who may use the service; the service decides who may open ea
   - **a share link** they have opened, while it stays active.
 - **Share links** (`/l/<key>`, 144-bit keys):
   - **anyone:** works without signing in. Only owners make these.
-  - **members:** needs an Archipelago sign-in. Editors may make these, just as they may share.
+  - **group:** for the members of one of your groups, signed in; leaving the group ends it. Editors may make these, just as they may share.
+  - **members** (legacy): any Archipelago sign-in. No longer offered in the dialog; existing ones keep working and agents may still make them.
   - Each link grants viewer, commenter or editor, with an optional label and expiry.
   - Opening a link records you as its holder, so the document's normal address keeps working for you.
   - Revoking the link removes that access from every holder at once, including open sockets.

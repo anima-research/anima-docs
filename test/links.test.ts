@@ -263,7 +263,7 @@ test('schema v2 migration keeps a v1 database intact', async () => {
   db0.pragma('user_version = 1');
   db0.close();
   const db = openDatabase(file);
-  assert.equal(db.pragma('user_version', { simple: true }), 10);
+  assert.equal(db.pragma('user_version', { simple: true }), 11);
   assert.equal((db.prepare('SELECT title FROM documents WHERE id = ?').get('dmig') as any).title, 'T');
   db.prepare(`INSERT INTO principals (sub, name, kind, issuer, color, first_seen, last_seen) VALUES ('guest:q', 'Q (guest)', 'guest', 'guest', '#000', 1, 1)`).run();
   assert.equal((db.pragma('foreign_key_check') as unknown[]).length, 0);
@@ -307,4 +307,36 @@ test('guest limiter: a burst of new guests from one address is refused', async (
   const statuses: number[] = [];
   for (let i = 0; i < 25; i++) statuses.push((await api('POST', '/api/links/redeem', null, { key })).status);
   assert.ok(statuses.includes(429), `expected a 429 in ${statuses.join(',')}`);
+});
+
+test('HTTP: a group link works for the group’s members only, and stops when they leave', async () => {
+  const ann = await signIn('Ann'), bob = await signIn('Bob'), cam = await signIn('Cam');
+  const d = (await api('POST', '/api/docs', ann, { title: 'Team notes' })).json;
+  const g = (await api('POST', '/api/groups', ann, { name: 'Link team' })).json;
+  assert.equal((await api('POST', `/api/groups/${encodeURIComponent(g.sub)}/members`, ann, { who: 'Bob' })).status, 200);
+  // A link for a group you are not in is refused; one for your own group is fine.
+  assert.equal((await api('POST', `/api/docs/${d.id}/links`, cam, { role: 'viewer', who: 'group', group: g.sub })).status, 404); // Cam can't even see the doc
+  const l = (await api('POST', `/api/docs/${d.id}/links`, ann, { role: 'commenter', who: 'group', group: g.sub })).json;
+  assert.equal(l.who, 'group'); assert.equal(l.group.name, 'Link team');
+  const key = l.url.split('/l/')[1];
+  const peek = (await api('GET', `/api/links/${key}`, null)).json;
+  assert.equal(peek.audience, 'group'); assert.equal(peek.groupName, 'Link team'); assert.equal(peek.title, undefined);
+  assert.equal((await api('POST', '/api/links/redeem', null, { key })).status, 401, 'needs a sign-in');
+  const refused = await api('POST', '/api/links/redeem', cam, { key });
+  assert.equal(refused.status, 403); assert.match(refused.json.error ?? JSON.stringify(refused.json), /members of “Link team”/);
+  assert.equal((await api('POST', '/api/links/redeem', bob, { key })).json.role, 'commenter');
+  assert.equal((await api('GET', `/api/docs/${d.id}`, bob)).json.role, 'commenter');
+  // Leaving the group ends the access the link gave.
+  assert.equal((await api('DELETE', `/api/groups/${encodeURIComponent(g.sub)}/members`, ann, { who: 'Bob' })).status, 200);
+  assert.equal((await api('GET', `/api/docs/${d.id}`, bob)).status, 404);
+  const listed = (await api('GET', '/api/docs', bob)).json; const arr: any[] = listed.docs ?? listed.documents ?? listed;
+  assert.ok(!arr.some((x: any) => x.id === d.id), 'not listed either');
+  // Agents: create_link with who: group and the group's name.
+  const host = await rawHost(`ws://127.0.0.1:${S.port}/mcpl?token=${S.token('Linker')}`);
+  try {
+    S.app.docs.share(d.id, S.app.principals.get('human:test:ann') as any, 'agent:linker@test.local', 'editor');
+    const r = await host.tool('create_link', { document: d.id, role: 'viewer', who: 'group', group: 'Link team' });
+    assert.equal(r.isError, true, 'an agent outside the group cannot make a link for it');
+    assert.match(r.text, /groups you belong to/);
+  } finally { host.close(); }
 });

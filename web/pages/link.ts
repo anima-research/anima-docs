@@ -50,7 +50,9 @@ export function mountLinkPage(root: HTMLElement, opts: { key: string; me: Me | n
     frame(
       h('div.link-art', { 'aria-hidden': 'true' }, icon('users', 26)),
       h('h1', null, 'Sign in with Archipelago to open this document'),
-      h('p.signin-lede', null, `This link is for Archipelago members. Once you’re signed in it opens right away, and you can ${ROLE_VERB[peek.role ?? 'viewer']}.`),
+      h('p.signin-lede', null, peek.audience === 'group'
+        ? `This link is for members of ${peek.groupName ? `“${peek.groupName}”` : 'a group'}. Once you’re signed in it opens right away, and you can ${ROLE_VERB[peek.role ?? 'viewer']}.`
+        : `This link is for Archipelago members. Once you’re signed in it opens right away, and you can ${ROLE_VERB[peek.role ?? 'viewer']}.`),
       signInButton(true),
       peek.guest && opts.me ? h('p.signin-fine', null, 'You’re browsing as ', h('strong', null, opts.me.name), '. Guests can’t open members-only links.') : null);
   };

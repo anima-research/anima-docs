@@ -6,7 +6,7 @@ import { dirname } from 'node:path';
 
 export type DB = Database.Database;
 
-const SCHEMA_VERSION = 10;
+const SCHEMA_VERSION = 11;
 
 export function openDatabase(file: string): DB {
   if (file !== ':memory:') mkdirSync(dirname(file), { recursive: true });
@@ -448,6 +448,37 @@ export function openDatabase(file: string): DB {
       );
       CREATE INDEX IF NOT EXISTS group_members_sub ON group_members(sub);
       PRAGMA user_version = 10;
+      COMMIT;
+      `);
+    } finally { db.pragma('foreign_keys = ON'); }
+  }
+  if ((db.pragma('user_version', { simple: true }) as number) < 11) {
+    // v11: share links for a group — audience 'group', with the group the link is for. Widening the CHECK
+    // means rebuilding doc_links (link_holders references it by name, which the rename keeps).
+    db.pragma('foreign_keys = OFF');
+    try {
+      db.exec(`
+      BEGIN;
+      CREATE TABLE doc_links_v2 (
+        id          TEXT PRIMARY KEY,
+        doc_id      TEXT NOT NULL REFERENCES documents(id),
+        key         TEXT NOT NULL UNIQUE,
+        role        TEXT NOT NULL CHECK (role IN ('viewer','commenter','editor')),
+        audience    TEXT NOT NULL CHECK (audience IN ('anyone','members','group')),
+        group_sub   TEXT,
+        label       TEXT,
+        created_by  TEXT NOT NULL,
+        created_at  INTEGER NOT NULL,
+        expires_at  INTEGER,
+        revoked_at  INTEGER,
+        revoked_by  TEXT
+      );
+      INSERT INTO doc_links_v2 (id, doc_id, key, role, audience, label, created_by, created_at, expires_at, revoked_at, revoked_by)
+        SELECT id, doc_id, key, role, audience, label, created_by, created_at, expires_at, revoked_at, revoked_by FROM doc_links;
+      DROP TABLE doc_links;
+      ALTER TABLE doc_links_v2 RENAME TO doc_links;
+      CREATE INDEX doc_links_doc ON doc_links(doc_id);
+      PRAGMA user_version = 11;
       COMMIT;
       `);
     } finally { db.pragma('foreign_keys = ON'); }

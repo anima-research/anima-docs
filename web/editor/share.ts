@@ -15,7 +15,8 @@ const GENERAL: { value: GeneralAccess; label: string; help: string }[] = [
   { value: 'editor', label: 'Archipelago members can edit', help: 'Anyone signed in with Archipelago can make changes' },
 ];
 
-const WHO_LABEL: Record<LinkWho, string> = { anyone: 'Anyone with the link', members: 'Archipelago members with the link' };
+const WHO_LABEL: Record<LinkWho, string> = { anyone: 'Anyone with the link', members: 'Archipelago members with the link', group: 'Members of a group' };
+const whoLabel = (l: ShareLink) => (l.who === 'group' ? `Members of ${l.group?.name ?? 'a group'}` : WHO_LABEL[l.who]);
 const EXPIRY: { value: string; label: string; days: number | null }[] = [
   { value: 'never', label: 'Never expires', days: null },
   { value: '1', label: 'Expires in 1 day', days: 1 },
@@ -193,7 +194,7 @@ export function openShareDialog(opts: { docId: string; me: Me; title: string; on
     else if (!links) body = [h('div.share-loading.sm', null, spinner(18))];
     else if (!links.length) body = formEl ? [] : [h('p.link-empty', null, isOwner
       ? 'Make a link for people who aren’t on the list, including people without an Archipelago account. Turn it off any time.'
-      : 'Make a link for Archipelago members who aren’t on the list. Turn it off any time.')];
+      : 'Make a link for a group of yours, or for anyone. Turn it off any time.')];
     else body = [h('div.link-list', null, links.map(linkRow))];
     replaceChildren(linksEl, head, formEl, ...body);
   }
@@ -206,18 +207,21 @@ export function openShareDialog(opts: { docId: string; me: Me; title: string; on
     meta.push(`Made by ${by}`);
     meta.push(l.holders ? `Opened by ${plural(l.holders, 'person', 'people')}` : 'Not opened yet');
     if (l.expiresAt) meta.push(h('span.link-expiry', null, icon('clock', 12), `Expires ${untilTime(l.expiresAt)}`));
-    const what = `${WHO_LABEL[l.who]} can ${ROLE_VERB[l.role]}`;
+    const what = `${whoLabel(l)} can ${ROLE_VERB[l.role]}`;
     return h('div.link-row', { class: l.id === flashId ? 'new' : '', dataset: { link: l.id, who: l.who } },
       h('span.link-icon', { class: anyone ? 'anyone' : 'members' }, icon(anyone ? 'globe' : 'users', 17)),
       h('div.link-main', null,
-        h('div.link-title', null, WHO_LABEL[l.who], h('span.link-role', null, ` · can ${ROLE_VERB[l.role]}`)),
+        h('div.link-title', null, whoLabel(l), h('span.link-role', null, ` · can ${ROLE_VERB[l.role]}`)),
         h('div.link-meta', null, meta.flatMap((m, i) => (i ? [h('span.dot-sep', { 'aria-hidden': 'true' }, '·'), m] : [m])))),
       h('button.btn.sm.link-copy', { type: 'button', 'aria-label': `Copy link: ${what}`, onclick: () => void copyWithToast(l.url, 'Link copied') }, icon('copy', 15), 'Copy'),
       h('button.icon-btn.sm.link-revoke', { type: 'button', 'aria-label': `Revoke link: ${what}`, 'data-tip': 'Turn off this link', onclick: () => void revoke(l) }, icon('trash', 16)));
   }
 
   function openForm(isOwner: boolean) {
-    let who: LinkWho = 'members';
+    // Links are for anyone, or for a group of yours. (Any-Archipelago-member links are no longer offered.)
+    let who: LinkWho = myGroups.length ? 'group' : 'anyone';
+    const groupSel = h('select.select.sm', { 'aria-label': 'Group' },
+      myGroups.length ? myGroups.map((g) => h('option', { value: g.sub }, `${g.name} (${g.members.length})`)) : [h('option', { value: '' }, 'You’re in no groups yet')]);
     const roleSel = h('select.select.sm', { 'aria-label': 'Link access' },
       (['viewer', 'commenter', 'editor'] as LinkRole[]).map((r) => h('option', { value: r, selected: r === 'viewer' }, `Can ${ROLE_VERB[r]}`)));
     const expirySel = h('select.select.sm', { 'aria-label': 'Link expiry' }, EXPIRY.map((x) => h('option', { value: x.value }, x.label)));
@@ -225,7 +229,7 @@ export function openShareDialog(opts: { docId: string; me: Me; title: string; on
     const help = h('p.link-help');
     const seg = h('div.seg.link-who', { role: 'radiogroup', 'aria-label': 'Who can use the link' });
     const drawWho = () => {
-      seg.replaceChildren(...(['anyone', 'members'] as LinkWho[]).map((w) => {
+      seg.replaceChildren(...(['anyone', 'group'] as LinkWho[]).map((w) => {
         const disabled = w === 'anyone' && !isOwner;
         return h('button.seg-btn', {
           type: 'button', role: 'radio', 'aria-checked': String(who === w), class: `${who === w ? 'on' : ''} ${disabled ? 'is-disabled' : ''}`,
@@ -234,11 +238,15 @@ export function openShareDialog(opts: { docId: string; me: Me; title: string; on
             if (disabled) { help.classList.remove('nudge'); void help.offsetWidth; help.classList.add('nudge'); return; }
             who = w; drawWho();
           },
-        }, icon(w === 'anyone' ? 'globe' : 'users', 15), w === 'anyone' ? 'Anyone with the link' : 'Archipelago members');
+        }, icon(w === 'anyone' ? 'globe' : 'users', 15), w === 'anyone' ? 'Anyone with the link' : 'A group');
       }));
+      groupSel.hidden = who !== 'group';
+      groupSel.disabled = !myGroups.length;
       help.replaceChildren(...(who === 'anyone'
         ? [icon('info', 14), h('span', null, 'Works without signing in. Visitors who aren’t signed in join as guests, like “Anonymous Heron (guest)”.')]
-        : [icon('info', 14), h('span', null, 'Works for anyone signed in with Archipelago. ', isOwner ? 'Guests can’t use it.' : `${ANYONE_OWNER_ONLY}.`)]));
+        : myGroups.length
+          ? [icon('info', 14), h('span', null, 'Works for the group’s members, signed in with Archipelago; leaving the group ends it. ', isOwner ? 'Guests can’t use it.' : `${ANYONE_OWNER_ONLY}.`)]
+          : [icon('info', 14), h('span', null, 'You’re in no groups yet. ', h('a', { href: '/groups' }, 'Make one'), ' and its members can use the link.')]));
     };
     drawWho();
     const create = h('button.btn.primary.sm', { type: 'button' }, 'Create link');
@@ -250,14 +258,15 @@ export function openShareDialog(opts: { docId: string; me: Me; title: string; on
       try {
         const days = EXPIRY.find((x) => x.value === expirySel.value)?.days ?? null;
         const label = labelIn.value.trim();
-        const l = await api.createLink(opts.docId, { who, role: roleSel.value as LinkRole, ...(label ? { label } : {}), ...(days ? { expiresInDays: days } : {}) });
+        if (who === 'group' && !groupSel.value) { showError('Pick a group, or make one on the Groups page.'); return; }
+        const l = await api.createLink(opts.docId, { who, ...(who === 'group' ? { group: groupSel.value } : {}), role: roleSel.value as LinkRole, ...(label ? { label } : {}), ...(days ? { expiresInDays: days } : {}) });
         formEl = null;
         flashId = l.id;
         setTimeout(() => { if (flashId === l.id) flashId = null; }, 2500);
         links = [...(links ?? []).filter((x) => x.id !== l.id), l];
         renderLinks();
         const copied = await copyText(l.url);
-        const what = `${l.who === 'anyone' ? 'Anyone' : 'Archipelago members'} with it can ${ROLE_VERB[l.role]}.`;
+        const what = `${l.who === 'anyone' ? 'Anyone' : l.who === 'group' ? `Members of ${l.group?.name ?? 'the group'}` : 'Archipelago members'} with it can ${ROLE_VERB[l.role]}.`;
         toast(copied ? h('span', null, h('strong', null, 'Link created and copied. '), what) : h('span', null, 'Link created. ', what, ' ', h('code.toast-url', null, l.url)), { kind: 'success', timeout: copied ? 4500 : 12000 });
         void reload();
       } catch (e) {
@@ -268,7 +277,7 @@ export function openShareDialog(opts: { docId: string; me: Me; title: string; on
     create.addEventListener('click', () => void submit());
     labelIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); void submit(); } });
     formEl = h('div.link-form', { role: 'group', 'aria-label': 'New share link' },
-      seg, help,
+      seg, groupSel, help,
       h('div.link-form-row', null, roleSel, expirySel, labelIn),
       h('div.link-form-actions', null, cancel, create));
     renderLinks();

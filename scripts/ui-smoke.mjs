@@ -617,21 +617,25 @@ try {
     assert(status === 403, `people API refuses guests (${status})`);
   });
 
-  await step('a “members” link asks a signed-out visitor to sign in, then opens', async () => {
+  await step('a group link asks a signed-out visitor to sign in; it opens for the group’s members only', async () => {
+    // Alice makes a group; links are for a group by default once you have one.
+    const group = await alice.evaluate(async () => (await (await fetch('/api/groups', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Launch team' }) })).json()));
     await alice.locator('.share-btn').click();
     const dlg = alice.locator('dialog.share-dialog');
     await dlg.locator('.link-row').first().waitFor();
     await dlg.getByRole('button', { name: 'Create link' }).click();
     const form = dlg.locator('.link-form');
-    assert((await form.getByRole('radio', { name: 'Archipelago members' }).getAttribute('aria-checked')) === 'true', 'members is the default');
+    assert((await form.getByRole('radio', { name: 'A group' }).getAttribute('aria-checked')) === 'true', 'a group is the default');
+    assert((await form.getByLabel('Group').inputValue()) === group.sub, 'the group is preselected');
     await form.getByLabel('Link access').selectOption('editor');
     await form.getByLabel('Link expiry').selectOption('7');
     await form.getByRole('button', { name: 'Create link' }).click();
-    const row = dlg.locator('.link-row[data-who="members"]');
+    const row = dlg.locator('.link-row[data-who="group"]');
     await row.waitFor();
+    assert((await row.innerText()).includes('Members of Launch team'), 'names the group');
     assert(/Expires (in \d+ hours|[A-Z][a-z]{2} \d+)/.test(await row.innerText()), `expiry shown (${await row.innerText()})`);
     membersUrl = await alice.evaluate(() => navigator.clipboard.readText());
-    assert(membersUrl !== anyoneUrl && /\/l\//.test(membersUrl), 'members link copied');
+    assert(membersUrl !== anyoneUrl && /\/l\//.test(membersUrl), 'group link copied');
     assert((await dlg.locator('.link-row[data-who="anyone"]').innerText()).includes('Opened by 1 person'), 'opened count');
     await shot(alice, '37-share-dialog-two-links-light');
     await dlg.getByRole('button', { name: 'Done' }).click();
@@ -641,11 +645,17 @@ try {
     watch(v, 'visitor');
     await v.goto(membersUrl);
     await v.locator('.link-card h1', { hasText: 'Sign in with Archipelago to open this document' }).waitFor();
-    assert(!(await v.locator('.link-card').innerText()).includes('Q4 Launch Plan'), 'members links don’t reveal the title');
+    const card = await v.locator('.link-card').innerText();
+    assert(!card.includes('Q4 Launch Plan'), 'group links don’t reveal the title');
+    assert(card.includes('members of “Launch team”'), 'names the group');
     await shot(v, '38-link-members-signin-light');
     await v.getByRole('button', { name: 'Sign in with Archipelago' }).click();
     await v.getByLabel('Your name').fill('Carol Diaz');
     await v.getByRole('button', { name: 'Continue' }).click();
+    // Carol is not in the group: refused, with the reason. Alice adds her; the link then opens.
+    await v.locator('.link-card', { hasText: 'members of “Launch team”' }).waitFor();
+    await alice.evaluate(async (sub) => { const r = await fetch(`/api/groups/${encodeURIComponent(sub)}/members`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ who: 'Carol Diaz' }) }); if (!r.ok) throw new Error(await r.text()); }, group.sub);
+    await v.goto(membersUrl);
     await v.waitForURL(`${ORIGIN}/d/${docId}`);
     await v.locator('.role-pill', { hasText: 'Editing' }).waitFor();
     // An editor (not the owner) sees only their own links and can't make "anyone" links.
@@ -658,7 +668,7 @@ try {
     assert((await anyoneOpt.getAttribute('aria-disabled')) === 'true', '“Anyone” is owner-only');
     assert((await anyoneOpt.getAttribute('data-tip')).includes('Only the owner'), 'explains why');
     await anyoneOpt.click({ force: true }); // aria-disabled: a click only nudges the explanation
-    assert((await vdlg.locator('.link-form').getByRole('radio', { name: 'Archipelago members' }).getAttribute('aria-checked')) === 'true', 'stays on members');
+    assert((await vdlg.locator('.link-form').getByRole('radio', { name: 'A group' }).getAttribute('aria-checked')) === 'true', 'stays on the group');
     await shot(v, '38b-share-links-editor');
     await visitorCtx.close();
     // A guest can't use a members link.

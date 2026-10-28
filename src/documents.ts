@@ -29,14 +29,17 @@ export interface DocMeta {
   rev: number;
 }
 
-export type LinkAudience = 'anyone' | 'members';
+/** anyone: no sign-in; members: any Archipelago sign-in (legacy, no longer offered); group: members of one group. */
+export type LinkAudience = 'anyone' | 'members' | 'group';
 export interface ShareLink {
   id: string; docId: string; key: string; role: Role; audience: LinkAudience; label: string | null;
+  /** For a group link: the group it is for, and its name. */
+  groupSub: string | null; groupName: string | null;
   createdBy: string; createdAt: number; expiresAt: number | null; revokedAt: number | null;
   /** How many people (or agents) have opened it. */
   holders: number; active: boolean;
 }
-type LinkRow = { id: string; doc_id: string; key: string; role: Role; audience: LinkAudience; label: string | null; created_by: string; created_at: number; expires_at: number | null; revoked_at: number | null };
+type LinkRow = { id: string; doc_id: string; key: string; role: Role; audience: LinkAudience; group_sub: string | null; label: string | null; created_by: string; created_at: number; expires_at: number | null; revoked_at: number | null };
 
 /** Transaction origin carried on every change so listeners know who did it. */
 export interface ChangeOrigin {
@@ -163,7 +166,7 @@ export class Documents extends EventEmitter {
     let best: Role | null = base;
     const held = this.db.prepare(`SELECT l.* FROM link_holders h JOIN doc_links l ON l.id = h.link_id
         WHERE h.sub = ? AND h.doc_id = ? AND l.revoked_at IS NULL AND (l.expires_at IS NULL OR l.expires_at > ?)`).all(actor.sub, docId, Date.now()) as LinkRow[];
-    for (const l of held) if ((!best || RANK[l.role] > RANK[best]) && this.linkBacked(l)) best = l.role;
+    for (const l of held) if ((!best || RANK[l.role] > RANK[best]) && this.linkBacked(l) && this.linkFor(l, actor.sub)) best = l.role;
     if (best === 'editor' || !this.parents || depth >= DERIVE_DEPTH) return best;
     seen.add(docId);
     for (const p of this.parents(docId)) {
@@ -181,7 +184,7 @@ export class Documents extends EventEmitter {
     if (this.baseRole(docId, actor)) return false;
     const held = this.db.prepare(`SELECT l.* FROM link_holders h JOIN doc_links l ON l.id = h.link_id
         WHERE h.sub = ? AND h.doc_id = ? AND l.revoked_at IS NULL AND (l.expires_at IS NULL OR l.expires_at > ?)`).all(actor.sub, docId, Date.now()) as LinkRow[];
-    return !held.some((l) => this.linkBacked(l)) && !!this.role(docId, actor);
+    return !held.some((l) => this.linkBacked(l) && this.linkFor(l, actor.sub)) && !!this.role(docId, actor);
   }
 
   /**
@@ -189,11 +192,20 @@ export class Documents extends EventEmitter {
    * "anyone" links, an editor for "members" links (by base role, and not
    * blocked). Removing someone's access therefore also ends their links.
    */
-  private linkBacked(l: Pick<LinkRow, 'doc_id' | 'created_by' | 'audience'>): boolean {
+  private linkBacked(l: Pick<LinkRow, 'doc_id' | 'created_by' | 'audience' | 'group_sub'>): boolean {
+    if (l.audience === 'group' && (!l.group_sub || !this.db.prepare('SELECT 1 FROM groups WHERE sub = ?').get(l.group_sub))) return false; // the group is gone
     const p = this.principals.get(l.created_by);
     const standing = p ? this.principals.standing(p.sub, [], p.issuer) : null;
     if (!standing) return false;
     return atLeast(this.baseRole(l.doc_id, { sub: p!.sub, admin: standing.admin }), l.audience === 'anyone' ? 'owner' : 'editor');
+  }
+
+  /** A group link counts for its holder only while they are in the group. */
+  private linkFor(l: Pick<LinkRow, 'audience' | 'group_sub'>, sub: string): boolean {
+    return l.audience !== 'group' || (!!l.group_sub && this.inGroup(l.group_sub, sub));
+  }
+  private inGroup(groupSub: string, sub: string): boolean {
+    return !!this.db.prepare('SELECT 1 FROM group_members WHERE group_sub = ? AND sub = ?').get(groupSub, sub);
   }
 
   /** Throws 404 for no access (absent and inaccessible look the same), 403 for too little. */
@@ -262,7 +274,8 @@ export class Documents extends EventEmitter {
              OR EXISTS (SELECT 1 FROM doc_acl a WHERE a.doc_id = d.id AND a.sub = @sub)
              OR EXISTS (SELECT 1 FROM doc_acl a JOIN group_members m ON m.group_sub = a.sub WHERE a.doc_id = d.id AND m.sub = @sub)
              OR EXISTS (SELECT 1 FROM link_holders h JOIN doc_links l ON l.id = h.link_id
-                        WHERE h.doc_id = d.id AND h.sub = @sub AND l.revoked_at IS NULL AND (l.expires_at IS NULL OR l.expires_at > @now)))
+                        WHERE h.doc_id = d.id AND h.sub = @sub AND l.revoked_at IS NULL AND (l.expires_at IS NULL OR l.expires_at > @now)
+                          AND (l.audience != 'group' OR EXISTS (SELECT 1 FROM group_members gm WHERE gm.group_sub = l.group_sub AND gm.sub = @sub))))
       ORDER BY d.updated_at DESC LIMIT @limit
     `).all({ q, sub: actor.sub, guest: isGuest(actor.sub) ? 1 : 0, now: Date.now(), limit: Math.min(opts.limit ?? 100, 500) }) as DocRow[];
     return rows.map(meta)
@@ -363,11 +376,17 @@ export class Documents extends EventEmitter {
    * become guests) and only owners make them; "members" links need an
    * Archipelago sign-in and editors may make them, as they may share.
    */
-  createLink(docId: string, actor: Actor, opts: { role: Role; audience: LinkAudience; label?: string | null; expiresInDays?: number | null }): ShareLink {
+  createLink(docId: string, actor: Actor, opts: { role: Role; audience: LinkAudience; groupSub?: string | null; label?: string | null; expiresInDays?: number | null }): ShareLink {
     if (isGuest(actor.sub)) throw new Fault(403, 'Sign in with Archipelago to make share links.');
     if (!['viewer', 'commenter', 'editor'].includes(opts.role)) throw new Fault(400, 'A link can grant viewer, commenter or editor.');
-    if (opts.audience !== 'anyone' && opts.audience !== 'members') throw new Fault(400, 'who must be anyone or members.');
+    if (!['anyone', 'members', 'group'].includes(opts.audience)) throw new Fault(400, 'who must be anyone, group or members.');
     const { doc, role } = this.require(docId, actor, 'viewer');
+    let groupSub: string | null = null;
+    if (opts.audience === 'group') {
+      groupSub = String(opts.groupSub ?? '').trim();
+      if (!/^group:[A-Za-z0-9]+$/.test(groupSub) || !this.db.prepare('SELECT 1 FROM groups WHERE sub = ?').get(groupSub)) throw new Fault(400, 'A group link needs the group it is for (its id, like group:…).');
+      if (!this.inGroup(groupSub, actor.sub)) throw new Fault(403, 'You can make links only for groups you belong to.');
+    }
     const need: Role = opts.audience === 'anyone' ? 'owner' : 'editor';
     if (!atLeast(this.baseRole(docId, actor), need)) {
       throw new Fault(403, need === 'owner' ? 'Only an owner can make links that work without signing in.'
@@ -382,8 +401,8 @@ export class Documents extends EventEmitter {
     const key = randomBytes(18).toString('base64url');
     const now = Date.now();
     const label = (opts.label ?? '').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 80) || null;
-    this.db.prepare(`INSERT INTO doc_links (id, doc_id, key, role, audience, label, created_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(id, doc.id, key, opts.role, opts.audience, label, actor.sub, now, days === null ? null : now + Math.round(days * 86400_000));
+    this.db.prepare(`INSERT INTO doc_links (id, doc_id, key, role, audience, group_sub, label, created_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(id, doc.id, key, opts.role, opts.audience, groupSub, label, actor.sub, now, days === null ? null : now + Math.round(days * 86400_000));
     this.emit('share', { docId, sub: null, role: `link:${opts.role}`, by: actor.sub });
     return this.linkById(id)!;
   }
@@ -419,10 +438,11 @@ export class Documents extends EventEmitter {
   }
 
   /** What a link leads to, for a visitor who hasn't opened it yet. Titles are shown for "anyone" links only. */
-  peekLink(key: string): { active: boolean; audience?: LinkAudience; role?: Role; title?: string; docId?: string } {
+  peekLink(key: string): { active: boolean; audience?: LinkAudience; role?: Role; title?: string; docId?: string; groupName?: string } {
     const r = this.db.prepare('SELECT * FROM doc_links WHERE key = ?').get(String(key)) as LinkRow | undefined;
     if (!r || !this.linkActive(r) || !this.get(r.doc_id)) return { active: false };
-    return { active: true, audience: r.audience, role: r.role, ...(r.audience === 'anyone' ? { title: this.get(r.doc_id)!.title, docId: r.doc_id } : {}) };
+    return { active: true, audience: r.audience, role: r.role, ...(r.audience === 'anyone' ? { title: this.get(r.doc_id)!.title, docId: r.doc_id } : {}),
+      ...(r.audience === 'group' && r.group_sub ? { groupName: this.principals.get(r.group_sub)?.name ?? 'a group' } : {}) };
   }
 
   /**
@@ -433,7 +453,8 @@ export class Documents extends EventEmitter {
     const r = this.db.prepare('SELECT * FROM doc_links WHERE key = ?').get(String(key)) as LinkRow | undefined;
     const doc = r ? this.get(r.doc_id) : null;
     if (!r || !doc || !this.linkActive(r)) throw new Fault(404, 'This link no longer works. It may have expired or been turned off; ask whoever sent it for a new one.');
-    if (r.audience === 'members' && isGuest(actor.sub)) throw new Fault(401, 'Sign in with Archipelago to open this link.');
+    if (r.audience !== 'anyone' && isGuest(actor.sub)) throw new Fault(401, 'Sign in with Archipelago to open this link.');
+    if (r.audience === 'group' && !this.linkFor(r, actor.sub)) throw new Fault(403, `This link is for members of “${this.principals.get(r.group_sub ?? '')?.name ?? 'a group'}”. Ask whoever sent it to add you to the group, or to share the document with you.`);
     const now = Date.now();
     this.db.prepare(`INSERT INTO link_holders (link_id, sub, doc_id, first_at, last_at) VALUES (?, ?, ?, ?, ?)
       ON CONFLICT(link_id, sub) DO UPDATE SET last_at = excluded.last_at`).run(r.id, actor.sub, r.doc_id, now, now);
@@ -462,6 +483,7 @@ export class Documents extends EventEmitter {
   private linkView(r: LinkRow): ShareLink {
     const holders = (this.db.prepare('SELECT count(*) AS n FROM link_holders WHERE link_id = ?').get(r.id) as { n: number }).n;
     return { id: r.id, docId: r.doc_id, key: r.key, role: r.role, audience: r.audience, label: r.label, createdBy: r.created_by, createdAt: r.created_at,
+      groupSub: r.group_sub ?? null, groupName: r.group_sub ? this.principals.get(r.group_sub)?.name ?? null : null,
       expiresAt: r.expires_at, revokedAt: r.revoked_at, holders, active: this.linkActive(r) };
   }
 
