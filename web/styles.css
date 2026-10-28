@@ -1406,12 +1406,13 @@ dialog.lightbox figcaption { color: #e6e8ec; font: 14px var(--font-ui); }
 .preview-body .anima-edit { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 2px; background: color-mix(in srgb, var(--accent) 8%, transparent); }
 
 /* Closed cards: a fixed-size block — the first comment clamped — until opened by a click */
-.thread-card.closed .comment.root .comment-body { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
-.thread-card.closed .comment.root .comment-body > * + * { display: none; }
+/* A hard cap on height, not a line clamp: lists, code and quotes inside a comment defeat -webkit-line-clamp. */
+.thread-card.closed .comment.root .comment-body { max-height: 3.1em; overflow: hidden; -webkit-mask-image: linear-gradient(#000 55%, transparent); mask-image: linear-gradient(#000 55%, transparent); }
+.thread-card.closed .comment.root .comment-body > * { margin-top: 0; }
 .thread-card.closed .card-quote { -webkit-line-clamp: 1; }
 .thread-card.closed .more-replies { margin-top: 8px; font-weight: 500; color: var(--text-2); }
 .thread-card.closed .more-replies:hover { color: var(--accent); }
-.thread-card.closed .sugg-diff { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.thread-card.closed .sugg-diff { max-height: 3.1em; overflow: hidden; -webkit-mask-image: linear-gradient(#000 55%, transparent); mask-image: linear-gradient(#000 55%, transparent); }
 .thread-card.closed .sugg-note, .thread-card.closed .sugg-hint, .thread-card.closed .card-banner.warn { display: none; }
 .collapse-btn svg { transform: rotate(180deg); }
 
