@@ -47,6 +47,13 @@ export function createApp(config: Config, issuers: Map<string, KeyObject>, opts:
   const comments = new Comments(db, docs, principals);
   const groups = new Groups(db, principals);
   comments.membersOf = (g) => groups.memberSubs(g);
+  groups.agentGuard = (actor, g) => {
+    for (const r of db.prepare('SELECT doc_id FROM doc_acl WHERE sub = ?').all(g) as { doc_id: string }[]) {
+      const why = docs.agentBarrier(r.doc_id, actor);
+      if (why) return `This group has documents shared with it. ${why}`;
+    }
+    return null;
+  };
   const media = new Media(db, config.dataDir === ':memory:' ? join(process.cwd(), 'data') : config.dataDir);
   const files = new DocFiles(db, media);
   const pageKeys = new PageKeys(config.dataDir === ':memory:' ? null : config.dataDir);

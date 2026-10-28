@@ -721,6 +721,7 @@ export function createHttp(app: App) {
         const docView = (id: string) => {
           const d = app.docs.get(id)!;
           return { id: d.id, title: d.title, section: d.title === '', type: d.type, owner: { sub: d.ownerSub, label: P.label(d.ownerSub), kind: P.get(d.ownerSub)?.kind, color: P.get(d.ownerSub)?.color }, generalAccess: d.generalAccess,
+            agentsBy: app.docs.agentsBy(id), canInvolveAgents: app.docs.agentBarrier(id, a) === null,
             publicLink: app.docs.hasPublicLink(id),
             role: app.docs.role(id, a), rev: d.rev, updatedAt: d.updatedAt, createdAt: d.createdAt, openComments: app.comments.openCount(id), present: realtime.presence(id) };
         };
@@ -779,6 +780,7 @@ export function createHttp(app: App) {
             if (typeof b.title === 'string') app.docs.rename(id, a, b.title);
             if (typeof b.type === 'string') app.docs.setType(id, a, b.type);
             if (typeof b.generalAccess === 'string') app.docs.setGeneralAccess(id, a, b.generalAccess);
+            if (typeof b.agentsBy === 'string') app.docs.setAgentsBy(id, a, b.agentsBy as any);
             send(200, docView(id));
             return;
           }
@@ -860,7 +862,8 @@ export function createHttp(app: App) {
           // ---------------------------------------------------------- pings
           if (rest === '/agents' && method === 'GET') {
             app.docs.require(id, a, 'commenter');
-            send(200, { agents: app.attention.pingable(id) });
+            const why = app.docs.agentBarrier(id, a);
+            send(200, why ? { agents: [], why } : { agents: app.attention.pingable(id) });
             return;
           }
           if (rest === '/ping' && method === 'POST') {

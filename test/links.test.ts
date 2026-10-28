@@ -53,16 +53,16 @@ test('who may make which links, and who sees them', () => {
   assert.ok(docs.hasPublicLink(d.id));
 });
 
-test('guests: link access only — no general access, no naming, no sharing', () => {
+test('guests: link access only — no naming, no sharing', () => {
   const { docs, principals, actor } = core();
   const ann = actor('Ann');
-  const open = docs.create(ann, 'Open to members');
-  docs.setGeneralAccess(open.id, ann, 'editor');
+  const open = docs.create(ann, 'Shared with a member');
+  docs.share(open.id, ann, actor('Bo').sub, 'editor');
   const d = docs.create(ann, 'Public');
   const g = principals.guestActor(principals.createGuest('Ann').sub, Date.now() + 1e6)!;
   assert.ok(isGuest(g.sub));
   assert.equal(g.name, 'Ann (guest)', 'a guest name can never pass for a member');
-  assert.equal(docs.role(open.id, g), null, '"anyone signed in" means Archipelago members, not guests');
+  assert.equal(docs.role(open.id, g), null, 'a guest reaches only what a link gives them');
   const members = docs.createLink(d.id, ann, { role: 'viewer', audience: 'members' });
   assert.throws(() => docs.redeemLink(members.key, g), /Sign in/);
   const pub = docs.createLink(d.id, ann, { role: 'commenter', audience: 'anyone' });
@@ -227,6 +227,7 @@ test('agents: guest activity is delivered quietly unless the agent opts in with 
   try {
     const d = (await api('POST', '/api/docs', ann, { title: 'Public draft', content: 'para\n' })).json;
     await api('POST', `/api/docs/${d.id}/share`, ann, { who: '@Watcher', role: 'editor' });
+    await api('PATCH', `/api/docs/${d.id}`, ann, { agentsBy: 'everyone' }); // commenters (guests too) may reach agents here
     const l = (await api('POST', `/api/docs/${d.id}/links`, ann, { role: 'commenter', who: 'anyone' })).json;
     const red = await api('POST', '/api/links/redeem', null, { key: l.url.split('/l/')[1] });
     const guest = await browserClient(S, `docs_session=${red.cookie}`, d.id);
@@ -263,7 +264,7 @@ test('schema v2 migration keeps a v1 database intact', async () => {
   db0.pragma('user_version = 1');
   db0.close();
   const db = openDatabase(file);
-  assert.equal(db.pragma('user_version', { simple: true }), 11);
+  assert.equal(db.pragma('user_version', { simple: true }), 12);
   assert.equal((db.prepare('SELECT title FROM documents WHERE id = ?').get('dmig') as any).title, 'T');
   db.prepare(`INSERT INTO principals (sub, name, kind, issuer, color, first_seen, last_seen) VALUES ('guest:q', 'Q (guest)', 'guest', 'guest', '#000', 1, 1)`).run();
   assert.equal((db.pragma('foreign_key_check') as unknown[]).length, 0);

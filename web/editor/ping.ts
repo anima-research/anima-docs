@@ -58,6 +58,7 @@ export function openPingDialog(opts: { docId: string; selection: { text: string;
     footer: [h('span.kbd-hint', null, `${modKey}Enter`), h('button.btn.ghost', { type: 'button', onclick: () => d.close() }, 'Cancel'), send],
   });
   void api.agents(opts.docId).then((r) => {
+    if (r.why) { list.replaceChildren(emptyState({ art: icon('lock', 30, 'empty-art-icon'), title: 'You can’t ping agents here', text: r.why })); return; }
     agents = r.agents;
     if (chosen && !agents.some((a) => a.sub === chosen)) chosen = null;
     if (!chosen && agents.length === 1) chosen = agents[0].sub;

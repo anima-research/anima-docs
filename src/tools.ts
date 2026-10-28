@@ -518,7 +518,6 @@ export const TOOLS: ToolDef[] = [
       type: S('markdown (default), html, latex or text.', { enum: ['markdown', 'html', 'latex', 'text'] }),
       companion: S('For an html page: a markdown description of the page (what it shows, where its data lives) stored as its index.md; read_document returns it instead of the HTML, and /p/<id>?format=md serves it.'),
       share_with: { type: 'array', items: { type: 'object', required: ['who', 'role'], properties: { who: S('@Name or principal id'), role: S('viewer, commenter or editor', { enum: ['viewer', 'commenter', 'editor'] }) } } },
-      general_access: S('Access for everyone signed in: restricted (default), viewer, commenter, editor.', { enum: ['restricted', 'viewer', 'commenter', 'editor'] }),
     } },
     run(app, actor, a) {
       const d = app.docs.create(actor, need(a, 'title'), typeof a.content === 'string' ? a.content : '', typeof a.type === 'string' ? a.type : 'markdown');
@@ -527,7 +526,7 @@ export const TOOLS: ToolDef[] = [
         try { const p = app.principals.resolve(String(s.who)); app.docs.share(d.id, actor, p.sub, roleArg(s.role)); notes.push(`shared with ${p.name} as ${s.role}`); }
         catch (e) { notes.push(`could not share with ${s.who}: ${(e as Error).message}`); }
       }
-      if (a.general_access) { app.docs.setGeneralAccess(d.id, actor, a.general_access); notes.push(`general access: ${a.general_access}`); }
+      if (a.general_access && a.general_access !== 'restricted') notes.push('general access is retired; share with people or groups, or make a link');
       app.attention.setWatch(actor.sub, d.id, {}, { preset: true });
       app.attention.markRead(actor.sub, d.id, { comments: true });
       if (typeof a.companion === 'string' && a.companion.trim()) { app.files.put(d.id, COMPANION, Buffer.from(a.companion, 'utf8'), actor.sub, { maxBytes: app.config.uploadMaxBytes }); notes.push('companion index.md attached'); }
@@ -867,14 +866,15 @@ export const TOOLS: ToolDef[] = [
   // ------------------------------------------------------------------ docs.share
   {
     name: 'list_access', featureSet: 'docs.share', toolClass: 'control',
-    description: 'Who can access a document, and the access everyone signed in has.',
+    description: 'Who can access a document, and who may bring agents into it.',
     inputSchema: { type: 'object', required: ['document'], properties: { ...docArg } },
     run(app, actor, a) {
       const id = need(a, 'document');
       const { doc } = app.docs.require(id, actor, 'viewer');
       const acl = app.docs.acl(id);
       const links = app.docs.links(id, actor);
-      return text([`“${doc.title}”: owner ${app.principals.label(doc.ownerSub)}; everyone signed in: ${doc.generalAccess === 'restricted' ? 'no access' : doc.generalAccess}.`,
+      const by = app.docs.agentsBy(id);
+      return text([`“${doc.title}”: owner ${app.principals.label(doc.ownerSub)}; agents can be brought in by ${by === 'owner' ? 'the owner only' : by === 'editors' ? 'the owner and editors' : 'everyone with access'}.`,
         ...acl.map((x) => `  ${app.principals.label(x.sub)} (${app.principals.get(x.sub)?.kind ?? '?'}) — ${x.role}`),
         ...(links.length ? ['Share links (yours, or all of them if you own it):', ...links.map((l) => `  ${linkLine(app, l)}`)] : [])].join('\n'));
     },
@@ -948,12 +948,12 @@ export const TOOLS: ToolDef[] = [
     },
   },
   {
-    name: 'set_general_access', featureSet: 'docs.share', toolClass: 'control',
-    description: 'Set what everyone signed in to this service can do with a document (owners only).',
-    inputSchema: { type: 'object', required: ['document', 'access'], properties: { ...docArg, access: S('restricted | viewer | commenter | editor', { enum: ['restricted', 'viewer', 'commenter', 'editor'] }) } },
+    name: 'set_agent_access', featureSet: 'docs.share', toolClass: 'control',
+    description: 'Choose who may bring agents into a document — share it with them, mention, assign or ping them (owners only). owner: only you; editors: you and editors (the default); everyone: anyone with access.',
+    inputSchema: { type: 'object', required: ['document', 'by'], properties: { ...docArg, by: S('owner | editors | everyone', { enum: ['owner', 'editors', 'everyone'] }) } },
     run(app, actor, a) {
-      app.docs.setGeneralAccess(need(a, 'document'), actor, a.access);
-      return text(`General access is now ${a.access}.`);
+      app.docs.setAgentsBy(need(a, 'document'), actor, a.by);
+      return text(`Agents can now be brought in by ${a.by === 'owner' ? 'the owner only' : a.by === 'editors' ? 'the owner and editors' : 'everyone with access'}.`);
     },
   },
   {

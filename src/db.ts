@@ -483,5 +483,29 @@ export function openDatabase(file: string): DB {
       `);
     } finally { db.pragma('foreign_keys = ON'); }
   }
+  if ((db.pragma('user_version', { simple: true }) as number) < 12) {
+    // v12: (1) "everyone signed in" access is retired. A document that had it keeps working for the
+    // people who actually used it there (edited, commented): each gets that role as their own share.
+    // (2) Per document, who may bring agents in (share with them, mention, assign, reply to, ping):
+    // the owner, the owner and editors (default), or everyone with access.
+    db.transaction(() => {
+      const open = db.prepare(`SELECT id, owner_sub, general_access FROM documents WHERE general_access != 'restricted'`).all() as
+        { id: string; owner_sub: string; general_access: string }[];
+      const grant = db.prepare(`INSERT OR IGNORE INTO doc_acl (doc_id, sub, role, granted_by, granted_at) VALUES (?, ?, ?, ?, ?)`);
+      for (const d of open) {
+        const users = db.prepare(`SELECT sub FROM doc_activity WHERE doc_id = ? UNION SELECT author_sub FROM comments WHERE doc_id = ?`).all(d.id, d.id) as { sub: string }[];
+        let kept = 0;
+        for (const u of users) {
+          if (u.sub === d.owner_sub || u.sub.startsWith('guest:')) continue;
+          kept += grant.run(d.id, u.sub, d.general_access, d.owner_sub, Date.now()).changes;
+        }
+        console.log(`[db] v12: ${d.id} had general access ${d.general_access} → restricted; ${kept} who used it keep it as their own share`);
+      }
+      db.exec(`UPDATE documents SET general_access = 'restricted' WHERE general_access != 'restricted'`);
+      const cols = new Set((db.pragma('table_info(documents)') as { name: string }[]).map((c) => c.name));
+      if (!cols.has('agents_by')) db.exec(`ALTER TABLE documents ADD COLUMN agents_by TEXT NOT NULL DEFAULT 'editors' CHECK (agents_by IN ('owner','editors','everyone'))`);
+      db.pragma('user_version = 12');
+    })();
+  }
   return db;
 }

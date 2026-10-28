@@ -94,7 +94,7 @@ test('minimal replacement keeps unchanged text identity (anchors survive)', () =
   assert.equal(docs.text(d.id).slice(abs.index, abs.index + 5), 'brown');
 });
 
-test('access control: restricted by default, roles, general access', () => {
+test('access control: restricted by default, roles; general access is retired', () => {
   const { docs, actor } = core();
   const a = actor('Alice'); const b = actor('Bob'); const c = actor('Carol');
   const d = docs.create(a, 'Private', 'x');
@@ -104,10 +104,11 @@ test('access control: restricted by default, roles, general access', () => {
   assert.equal(docs.role(d.id, b), 'commenter');
   assert.throws(() => docs.require(d.id, b, 'editor'), /commenter/);
   assert.throws(() => docs.share(d.id, b, c.sub, 'viewer'), /commenter/);
-  docs.setGeneralAccess(d.id, a, 'viewer');
-  assert.equal(docs.role(d.id, c), 'viewer');
-  assert.equal(docs.role(d.id, b), 'commenter');
-  assert.equal(docs.list(c).length, 1);
+  assert.throws(() => docs.setGeneralAccess(d.id, a, 'viewer'), /retired/);
+  docs.setGeneralAccess(d.id, a, 'restricted'); // still accepted: it is what everything is
+  assert.equal(docs.get(d.id)!.generalAccess, 'restricted');
+  assert.equal(docs.role(d.id, c), null);
+  assert.equal(docs.list(c).length, 0);
 });
 
 test('agent diff: a small change in a long paragraph is word-marked and trimmed; a rewrite stays as whole lines', () => {

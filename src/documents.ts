@@ -13,7 +13,13 @@ import { Fault } from './auth.js';
 import { isGuest, type Actor, type Principals } from './principals.js';
 
 export type Role = 'viewer' | 'commenter' | 'editor' | 'owner';
+/** Retired: every document is 'restricted' (v12); kept as a type for old clients. */
 export type GeneralAccess = 'restricted' | 'viewer' | 'commenter' | 'editor';
+/** Who may bring agents into a document: share it with one (or with a group that has one), mention,
+ *  assign, reply to or ping one. */
+export type AgentsBy = 'owner' | 'editors' | 'everyone';
+export const AGENTS_BY: AgentsBy[] = ['owner', 'editors', 'everyone'];
+const STRICT: Record<AgentsBy, number> = { owner: 3, editors: 2, everyone: 1 };
 const RANK: Record<Role, number> = { viewer: 1, commenter: 2, editor: 3, owner: 4 };
 export const atLeast = (role: Role | null, min: Role) => !!role && RANK[role] >= RANK[min];
 
@@ -24,6 +30,7 @@ export interface DocMeta {
   type: string;
   ownerSub: string;
   generalAccess: GeneralAccess;
+  agentsBy: AgentsBy;
   createdAt: number;
   updatedAt: number;
   rev: number;
@@ -62,8 +69,8 @@ export interface DocChange {
   inserted: string;
 }
 
-type DocRow = { id: string; title: string; type: string; owner_sub: string; general_access: GeneralAccess; created_at: number; updated_at: number; rev: number; deleted_at: number | null };
-const meta = (r: DocRow): DocMeta => ({ id: r.id, title: r.title, type: r.type ?? 'markdown', ownerSub: r.owner_sub, generalAccess: r.general_access, createdAt: r.created_at, updatedAt: r.updated_at, rev: r.rev });
+type DocRow = { id: string; title: string; type: string; owner_sub: string; general_access: GeneralAccess; agents_by: AgentsBy; created_at: number; updated_at: number; rev: number; deleted_at: number | null };
+const meta = (r: DocRow): DocMeta => ({ id: r.id, title: r.title, type: r.type ?? 'markdown', ownerSub: r.owner_sub, generalAccess: r.general_access, agentsBy: r.agents_by ?? 'editors', createdAt: r.created_at, updatedAt: r.updated_at, rev: r.rev });
 export const NODE_TYPES = ['markdown', 'html', 'latex', 'text'];
 /** How deep access may be derived through parents. */
 const DERIVE_DEPTH = 12;
@@ -230,7 +237,7 @@ export class Documents extends EventEmitter {
     const id = `d${randomBytes(6).toString('base64url').replace(/[-_]/g, 'x')}`;
     const now = Date.now();
     const clean = p.title.trim().slice(0, 300);
-    const access = clean ? this.opts.defaultAccess : 'restricted'; // sections are reached through their parents
+    const access: GeneralAccess = 'restricted'; // "everyone signed in" is retired (v12)
     this.db.prepare(`INSERT INTO documents (id, title, type, owner_sub, general_access, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
       .run(id, clean, type, p.owner ?? actor.sub, access, now, now);
     if (p.content) this.edit(id, actor, (text) => text.insert(0, p.content!));
@@ -339,6 +346,10 @@ export class Documents extends EventEmitter {
     if (granteeSub === doc.ownerSub) throw new Fault(400, 'The owner always has owner access.');
     if (granteeSub.startsWith('group:') && role === 'owner') throw new Fault(400, 'A group cannot own a document; make a person the owner.');
     if (role !== 'none' && !['viewer', 'commenter', 'editor', 'owner'].includes(role)) throw new Fault(400, 'role must be viewer, commenter, editor, owner or none');
+    if (role !== 'none' && this.involvesAgents(granteeSub)) {
+      const why = this.agentBarrier(docId, actor);
+      if (why) throw new Fault(403, why);
+    }
     // Editors may share up to editor; only owners grant ownership or remove people.
     if (mine !== 'owner' && (role === 'owner' || role === 'none')) throw new Fault(403, 'Only an owner can grant ownership or remove access.');
     if (role === 'owner') {
@@ -362,11 +373,62 @@ export class Documents extends EventEmitter {
     }
   }
 
+  /** Retired: only 'restricted' remains (what every document now is). */
   setGeneralAccess(docId: string, actor: Actor, access: GeneralAccess): void {
     this.require(docId, actor, 'owner');
-    if (!['restricted', 'viewer', 'commenter', 'editor'].includes(access)) throw new Fault(400, 'access must be restricted, viewer, commenter or editor');
-    this.db.prepare('UPDATE documents SET general_access = ? WHERE id = ?').run(access, docId);
-    this.emit('share', { docId, sub: null, role: access, by: actor.sub });
+    if (access !== 'restricted') throw new Fault(400, 'Access for everyone signed in has been retired. Share with people or groups, or make a link.');
+  }
+
+  // ------------------------------------------------------------------ agents
+
+  /**
+   * Would addressing `sub` on this document bring an agent in? The document's own owner never counts
+   * (an agent that owns a document chose who may reach it there).
+   */
+  bringsAgentIn(docId: string, sub: string): boolean {
+    return sub !== this.get(docId)?.ownerSub && this.involvesAgents(sub);
+  }
+
+  /** Is this principal an agent (or service), or a group with one in it? */
+  involvesAgents(sub: string): boolean {
+    const agentish = (s: string) => { const k = this.principals.get(s)?.kind; return k === 'agent' || k === 'service'; };
+    if (sub.startsWith('group:')) return (this.db.prepare('SELECT sub FROM group_members WHERE group_sub = ?').all(sub) as { sub: string }[]).some((m) => agentish(m.sub));
+    return agentish(sub);
+  }
+
+  /** The setting that applies: a section follows the strictest of the documents it sits in. */
+  agentsBy(docId: string, seen = new Set<string>(), depth = 0): AgentsBy {
+    const d = this.get(docId);
+    if (!d) return 'owner';
+    let by = d.agentsBy;
+    if (d.title === '' && this.parents && depth < DERIVE_DEPTH) {
+      seen.add(docId);
+      for (const p of this.parents(docId)) {
+        if (seen.has(p)) continue;
+        const pb = this.agentsBy(p, seen, depth + 1);
+        if (STRICT[pb] > STRICT[by]) by = pb;
+      }
+    }
+    return by;
+  }
+
+  /** Why this actor may not bring agents into the document, or null if they may. */
+  agentBarrier(docId: string, actor: Pick<Actor, 'sub' | 'admin'>): string | null {
+    // Guests are people through a link: their role counts like anyone's (they still can't share or ping,
+    // and each agent's own `guests` setting decides whether what they write wakes it).
+    const by = this.agentsBy(docId);
+    const role = this.role(docId, actor);
+    if (by === 'everyone' ? !!role : by === 'editors' ? atLeast(role, 'editor') : role === 'owner') return null;
+    const title = this.get(docId)?.title || 'this section';
+    return `On “${title}”, only ${by === 'owner' ? 'the owner' : 'the owner and editors'} can bring agents in (share with them, mention, assign or ping them).`;
+  }
+
+  /** Owners choose who may bring agents in. */
+  setAgentsBy(docId: string, actor: Actor, by: AgentsBy): void {
+    this.require(docId, actor, 'owner');
+    if (!AGENTS_BY.includes(by)) throw new Fault(400, 'agents must be owner, editors or everyone');
+    this.db.prepare('UPDATE documents SET agents_by = ? WHERE id = ?').run(by, docId);
+    this.emit('meta', { docId, kind: 'agents', by: actor.sub });
   }
 
   // ------------------------------------------------------------------ share links
@@ -386,6 +448,7 @@ export class Documents extends EventEmitter {
       groupSub = String(opts.groupSub ?? '').trim();
       if (!/^group:[A-Za-z0-9]+$/.test(groupSub) || !this.db.prepare('SELECT 1 FROM groups WHERE sub = ?').get(groupSub)) throw new Fault(400, 'A group link needs the group it is for (its id, like group:…).');
       if (!this.inGroup(groupSub, actor.sub)) throw new Fault(403, 'You can make links only for groups you belong to.');
+      if (this.involvesAgents(groupSub)) { const why = this.agentBarrier(docId, actor); if (why) throw new Fault(403, why); }
     }
     const need: Role = opts.audience === 'anyone' ? 'owner' : 'editor';
     if (!atLeast(this.baseRole(docId, actor), need)) {

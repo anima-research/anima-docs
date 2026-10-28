@@ -272,7 +272,7 @@ export class Comments extends EventEmitter {
     const id = newId();
     const { mentions, warnings } = this.mentionsIn(docId, body, actor);
     if (p.assignee && isGuest(actor.sub)) throw new Fault(403, 'Sign in with Archipelago to assign comments.');
-    const assignee = p.assignee ? this.assignable(docId, p.assignee, warnings) : null;
+    const assignee = p.assignee ? this.assignable(docId, p.assignee, warnings, actor) : null;
     const now = Date.now();
     if (p.anchor?.endDoc && sugg) throw new Fault(400, 'A suggestion cannot span two sections.');
     if (p.anchor?.endDoc) this.docs.require(p.anchor.endDoc, actor, 'commenter');
@@ -524,7 +524,7 @@ export class Comments extends EventEmitter {
     this.requireFor(c, actor);
     if (isGuest(actor.sub)) throw new Fault(403, 'Sign in with Archipelago to assign comments.');
     const warnings: string[] = [];
-    const who = assigneeRef ? this.assignable(c.docId, assigneeRef, warnings) : null;
+    const who = assigneeRef ? this.assignable(c.docId, assigneeRef, warnings, actor) : null;
     this.db.prepare('UPDATE comments SET assignee_sub = ? WHERE id = ?').run(who?.sub ?? null, c.threadId);
     this.record(c.docId, c.threadId, c.threadId, 'assigned', actor.sub, who && who.sub !== actor.sub ? [{ sub: who.sub, reason: 'assigned' }] : []);
     return { comment: this.get(c.threadId)!, warnings };
@@ -674,16 +674,20 @@ export class Comments extends EventEmitter {
   private mentionsIn(docId: string, body: string, actor: Actor): { mentions: Principal[]; warnings: string[] } {
     const mentions = this.principals.findMentions(body);
     const warnings: string[] = [];
+    const barrier = this.docs.agentBarrier(docId, actor);
     for (const m of mentions) {
       if (m.sub !== actor.sub && !this.docs.role(docId, { sub: m.sub, admin: m.role === 'admin' })) {
         warnings.push(`${m.name} has no access to this document, so they won't be notified. Share it with them first.`);
+      } else if (m.sub !== actor.sub && barrier && this.docs.bringsAgentIn(docId, m.sub)) {
+        warnings.push(`${m.name} won't be notified. ${barrier}`);
       }
     }
     return { mentions: mentions.filter((m) => this.docs.role(docId, { sub: m.sub, admin: m.role === 'admin' })), warnings };
   }
 
-  private assignable(docId: string, ref: string, warnings: string[]): Principal {
+  private assignable(docId: string, ref: string, warnings: string[], actor?: Actor): Principal {
     const p = this.principals.resolve(ref);
+    if (actor && this.docs.bringsAgentIn(docId, p.sub)) { const why = this.docs.agentBarrier(docId, actor); if (why) throw new Fault(403, why); }
     if (!atLeast(this.docs.role(docId, { sub: p.sub, admin: p.role === 'admin' }), 'commenter')) {
       throw new Fault(409, `${p.name} needs at least commenter access to be assigned. Share the document with them first.`);
     }

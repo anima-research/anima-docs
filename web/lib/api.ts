@@ -3,6 +3,8 @@
 export type Kind = 'human' | 'agent' | 'service' | 'guest' | 'group';
 export type Role = 'viewer' | 'commenter' | 'editor' | 'owner';
 export type GeneralAccess = 'restricted' | 'viewer' | 'commenter' | 'editor';
+/** Who may bring agents into a document (share with them, mention, assign, ping). */
+export type AgentsBy = 'owner' | 'editors' | 'everyone';
 
 export interface Me { sub: string; name: string; kind: Kind; color: string; admin: boolean; issuer: string }
 export interface Config { audience: string; issuer: string | null; dev: boolean; origin: string }
@@ -22,6 +24,9 @@ export interface DocSummary {
   type?: NodeType;
   owner: { sub: string; label: string; kind?: Kind; color?: string };
   generalAccess: GeneralAccess;
+  agentsBy?: AgentsBy;
+  /** Whether you may bring agents in here. */
+  canInvolveAgents?: boolean;
   role: Role;
   rev: number;
   updatedAt: number;
@@ -180,7 +185,7 @@ export const api = {
   docs: (opts: { q?: string; filter?: 'all' | 'owned' | 'shared' } = {}) => call<{ docs: DocSummary[] }>('GET', `/api/docs${q({ q: opts.q, filter: opts.filter })}`),
   createDoc: (title: string, content?: string, type?: NodeType) => call<DocSummary>('POST', '/api/docs', { title, content, ...(type ? { type } : {}) }),
   doc: (id: string) => call<DocDetail>('GET', `/api/docs/${encodeURIComponent(id)}`),
-  patchDoc: (id: string, patch: { title?: string; generalAccess?: GeneralAccess; type?: NodeType }) => call<DocSummary>('PATCH', `/api/docs/${encodeURIComponent(id)}`, patch),
+  patchDoc: (id: string, patch: { title?: string; generalAccess?: GeneralAccess; agentsBy?: AgentsBy; type?: NodeType }) => call<DocSummary>('PATCH', `/api/docs/${encodeURIComponent(id)}`, patch),
   deleteDoc: (id: string) => call<{ ok: true }>('DELETE', `/api/docs/${encodeURIComponent(id)}`),
   /** Files attached to a document (an HTML page's data, scripts, styles; its markdown companion). */
   files: (id: string) => call<{ files: DocFile[] }>('GET', `/api/docs/${encodeURIComponent(id)}/files`),
@@ -192,7 +197,7 @@ export const api = {
   version: (id: string, vid: string) => call<{ text: string }>('GET', `/api/docs/${encodeURIComponent(id)}/versions/${encodeURIComponent(vid)}`),
   restoreVersion: (id: string, vid: string) => call<{ ok: true }>('POST', `/api/docs/${encodeURIComponent(id)}/versions/${encodeURIComponent(vid)}/restore`, {}),
   activity: (id: string) => call<{ activity: ActivityRow[] }>('GET', `/api/docs/${encodeURIComponent(id)}/activity`),
-  agents: (id: string) => call<{ agents: PingableAgent[] }>('GET', `/api/docs/${encodeURIComponent(id)}/agents`),
+  agents: (id: string) => call<{ agents: PingableAgent[]; why?: string }>('GET', `/api/docs/${encodeURIComponent(id)}/agents`),
   ping: (id: string, body: { who: string; message?: string; quote?: string; line?: number }) => call<{ delivered: boolean; online: boolean }>('POST', `/api/docs/${encodeURIComponent(id)}/ping`, body),
   history: (id: string, before?: number) => call<{ checkpoints: Checkpoint[]; more: boolean }>('GET', `/api/docs/${encodeURIComponent(id)}/history${before ? `?before=${before}` : ''}`),
   compare: (id: string, from: number, to: number | 'now') => call<{ before: string; after: string }>('GET', `/api/docs/${encodeURIComponent(id)}/history/compare?from=${from}&to=${to}`),

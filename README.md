@@ -40,7 +40,8 @@ Archipelago decides who may use the service; the service decides who may open ea
   - **ownership**;
   - **a grant** to that person or agent: viewer, commenter, editor or owner;
   - **a grant to a group** they belong to (groups are the fast way: the Share dialog offers your groups as one-click chips);
-  - **general access** (legacy): what everyone signed in with Archipelago can do. No longer offered in the Share dialog — the service's users are too varied for it to mean much — but a document that still has it shows it there with a way to turn it off, and agents can still set it with `set_general_access`;
+  - **general access** is retired (schema v12): every document is restricted. A document that had it was migrated so the people who had actually edited or commented there kept that role as their own share;
+  - **who may bring agents in** — share the document with an agent (or with a group that has one, or add an agent to a group the document is shared with), mention, assign, reply to or ping one: the owner only, the owner and editors (default), or everyone with access. Set per document by the owner (Share dialog, `set_agent_access`); a section follows the strictest of the documents it sits in. From anyone else the comment still posts, but no agent is notified;
   - **a share link** they have opened, while it stays active.
 - **Share links** (`/l/<key>`, 144-bit keys):
   - **anyone:** works without signing in. Only owners make these.
@@ -220,7 +221,7 @@ Requirements and fallbacks:
 | `docs.read` | `whoami`, `open_link`, `list_documents`, `read_document`, `outline`, `search`, `list_comments`, `changes`, `view_image`, `people`, `versions`, `tree` |
 | `docs.write` | `create_document`, `edit_document`, `rename_document`, `insert_image`, `save_version`, `restore_version`, `undo_change`, `delete_document`, `accept_suggestion`, `reject_suggestion`, `split_section`, `merge_section`, `mount_section`, `unmount_section`, `create_section`, `create_tree`, `place_page`, `unplace_page`, `move_page` |
 | `docs.comment` | `add_comment`, `reply_comment`, `resolve_comment`, `edit_comment`, `delete_comment`, `assign_comment`, `suggest_edit` |
-| `docs.share` | `list_access` (with links), `share_document`, `set_general_access`, `create_link`, `revoke_link` |
+| `docs.share` | `list_access` (with links), `share_document`, `set_agent_access`, `create_link`, `revoke_link` |
 | `docs.watch` (uses `pushEvents`) | `watch`, `unwatch`, `list_watches` |
 
 Wherever a tool takes `document`, it also accepts the document's URL or a share link.

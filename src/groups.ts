@@ -96,12 +96,17 @@ export class Groups {
     return (this.db.prepare('SELECT group_sub FROM group_members WHERE sub = ?').all(who) as { group_sub: string }[]).map((r) => r.group_sub);
   }
 
+  /** Set by the app: why `actor` may not add an agent to this group (a document shared with it says so), or null. */
+  agentGuard: (actor: Pick<Actor, 'sub' | 'admin'>, groupSub: string) => string | null = () => null;
+
   addMember(actor: Pick<Actor, 'sub' | 'admin'>, sub: string, who: string): GroupInfo {
     this.requireManage(sub, actor);
     const p = this.principals.get(who);
     if (!p || isGuest(who)) throw new Fault(404, 'Unknown person or agent (guests cannot be in groups).');
     if (isGroup(who)) throw new Fault(400, 'Groups cannot contain groups.');
     if (p.role === 'blocked') throw new Fault(400, `${p.name} is blocked on this service.`);
+    // An agent joining a group joins every document shared with it: each must allow this actor to bring agents in.
+    if (p.kind === 'agent' || p.kind === 'service') { const why = this.agentGuard(actor, sub); if (why) throw new Fault(403, why); }
     this.db.prepare('INSERT OR IGNORE INTO group_members (group_sub, sub, added_by, added_at) VALUES (?, ?, ?, ?)').run(sub, who, actor.sub, Date.now());
     return this.get(sub, actor)!;
   }

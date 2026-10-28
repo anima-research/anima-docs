@@ -42,12 +42,12 @@ test('H1: a link stops working when its maker loses the access needed to make it
   docs.share(d.id, owner, ed.sub, 'editor');
   assert.equal(docs.role(d.id, reader), 'editor', 'restored with their access');
 
-  // Editor via general access, then general access narrowed.
-  docs.setGeneralAccess(d.id, owner, 'editor');
+  // Editor via a share, then the share removed: their own link goes with it.
+  docs.share(d.id, owner, gen.sub, 'editor');
   const genLink = docs.createLink(d.id, gen, { role: 'editor', audience: 'members' });
   docs.redeemLink(genLink.key, gen);
   assert.throws(() => docs.share(d.id, gen, gen.sub, 'editor'), /your own access/);
-  docs.setGeneralAccess(d.id, owner, 'restricted');
+  docs.share(d.id, owner, gen.sub, 'none');
   assert.equal(docs.role(d.id, gen), null);
 
   // Ownership transferred: the old owner's public links end with it.
@@ -163,6 +163,14 @@ test('M3: guests can only comment slowly, and agents get a bounded number of the
   try {
     const d = (await api('POST', '/api/docs', ann, { title: 'Spam', content: 'x\n' })).json;
     await api('POST', `/api/docs/${d.id}/share`, ann, { who: '@Target', role: 'editor' });
+    // By default a commenter (a guest here) can't bring agents in at all…
+    const g0 = await guestOn(ann, d.id, 'commenter');
+    const guest0 = await browserClient(S, g0.cookie, d.id);
+    try { assert.ok((await guest0.ask({ type: 'comment.create', body: '@Target hello?' })).ok); } finally { guest0.close(); }
+    await sleep(300);
+    assert.equal(host.pushes.filter((p) => p.tags.includes('chat:mention')).length, 0, 'default: no agent hears a commenter');
+    // …so the owner opens it to everyone with access, and the guest limits are what's left.
+    await api('PATCH', `/api/docs/${d.id}`, ann, { agentsBy: 'everyone' });
     const results: boolean[] = [];
     for (let n = 0; n < 3; n++) {
       const g = await guestOn(ann, d.id, 'commenter');

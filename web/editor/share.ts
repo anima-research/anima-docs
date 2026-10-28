@@ -1,6 +1,6 @@
-// Share dialog: add people, people with access, general access, and share links.
+// Share dialog: add people, people with access, who may bring agents in, and share links.
 
-import { api, atLeast, ROLE_LABEL, ROLE_VERB, type DocDetail, type GeneralAccess, type Group, type LinkRole, type LinkWho, type Me, type Person, type Role, type ShareLink } from '../lib/api';
+import { api, atLeast, ROLE_LABEL, ROLE_VERB, type AgentsBy, type DocDetail, type Group, type LinkRole, type LinkWho, type Me, type Person, type Role, type ShareLink } from '../lib/api';
 import { h, replaceChildren } from '../lib/dom';
 import { icon } from '../lib/icons';
 import { plural, splitLabel, untilTime } from '../lib/format';
@@ -8,11 +8,10 @@ import { peoplePicker } from '../lib/picker';
 import { personBySub, searchPeople } from '../lib/people';
 import { avatar, confirmDialog, errorMessage, issuerBadge, kindBadge, openDialog, spinner, toast } from '../lib/ui';
 
-const GENERAL: { value: GeneralAccess; label: string; help: string }[] = [
-  { value: 'restricted', label: 'Restricted', help: 'Only people added here, or who open an active share link, can open it' },
-  { value: 'viewer', label: 'Archipelago members can view', help: 'Anyone signed in with Archipelago can find and read it' },
-  { value: 'commenter', label: 'Archipelago members can comment', help: 'Anyone signed in with Archipelago can read and comment' },
-  { value: 'editor', label: 'Archipelago members can edit', help: 'Anyone signed in with Archipelago can make changes' },
+const AGENTS: { value: AgentsBy; label: string; help: string }[] = [
+  { value: 'owner', label: 'Only the owner', help: 'Only the owner can share it with agents, or mention, assign or ping them here' },
+  { value: 'editors', label: 'Owner and editors', help: 'People who can edit can bring agents in; commenters and viewers can’t' },
+  { value: 'everyone', label: 'Everyone with access', help: 'Anyone who can open it can bring agents in' },
 ];
 
 const WHO_LABEL: Record<LinkWho, string> = { anyone: 'Anyone with the link', members: 'Archipelago members with the link', group: 'Members of a group' };
@@ -157,18 +156,22 @@ export function openShareDialog(opts: { docId: string; me: Me; title: string; on
     }
     listEl.replaceChildren(h('h3.share-section', null, 'People with access'), ...rows);
 
-    // Access for everyone on Archipelago is no longer offered (the service's users are too varied for it to mean
-    // much; groups are the fast way). A document that still has it shows it, with a way to turn it off.
-    const g = GENERAL.find((x) => x.value === doc!.generalAccess);
-    if (g && g.value !== 'restricted') {
-      const off = isOwner ? h('button.btn.ghost.sm', { type: 'button', onclick: async () => {
+    // Who may bring agents in (share with them, mention, assign, ping): the owner decides, per document.
+    const by = AGENTS.find((x) => x.value === (doc!.agentsBy ?? 'editors')) ?? AGENTS[1];
+    let control: HTMLElement;
+    if (isOwner) {
+      const sel = h('select.select.sm', { 'aria-label': 'Who can bring agents in' }, AGENTS.map((x) => h('option', { value: x.value, selected: x.value === by.value }, x.label)));
+      sel.addEventListener('change', async () => {
         showError(null); d.setBusy(true);
-        try { await api.patchDoc(opts.docId, { generalAccess: 'restricted' as GeneralAccess }); await reload(); } catch (e) { showError(errorMessage(e)); } finally { d.setBusy(false); }
-      } }, 'Turn off') : null;
-      generalEl.replaceChildren(h('h3.share-section', null, 'General access'),
-        h('div.ga-row', null, h('span.ga-icon.open', null, icon('users', 18)), h('div.ga-main', null, h('div.ga-text', null, g.label), h('div.ga-help', null, g.help, isOwner ? null : ' · Only the owner can change this.')), off));
-      generalEl.hidden = false;
-    } else generalEl.hidden = true;
+        try { await api.patchDoc(opts.docId, { agentsBy: sel.value as AgentsBy }); await reload(); toast('Saved', { kind: 'success', timeout: 1500 }); }
+        catch (e) { showError(errorMessage(e)); sel.value = by.value; } finally { d.setBusy(false); }
+      });
+      control = sel;
+    } else control = h('div.ga-text', null, by.label);
+    generalEl.replaceChildren(h('h3.share-section', null, 'Who can bring in agents'),
+      h('div.ga-row', null, h('span.ga-icon', null, icon('bot', 18)), h('div.ga-main', null, control,
+        h('div.ga-help', null, by.help, doc.canInvolveAgents === false ? ' · You can’t, on this document.' : '', isOwner ? '' : ' · Only the owner can change this.'))));
+    generalEl.hidden = false;
     // Links depend on the role only; re-rendering them on every reload would cut the new-link highlight short.
     if (linksRole !== mine) { linksRole = mine; renderLinks(); }
   }

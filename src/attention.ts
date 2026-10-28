@@ -451,8 +451,12 @@ export class Attention {
     // 1. Addressed: mentions and assignments made by this event.
     const guestActor = isGuest(e.actor);
     const ignores = (sub: string) => guestActor && this.settings(sub, e.docId).guests === 'off';
+    // The document decides who may bring agents in (Documents.agentsBy): from anyone else, nothing reaches an agent.
+    const barred = this.docs.agentBarrier(e.docId, { sub: e.actor, admin: false }) !== null;
+    const shut = (sub: string) => barred && this.docs.bringsAgentIn(e.docId, sub);
     for (const t of e.newlyAddressed) {
       if (t.sub === e.actor || !this.commentAccess(t.sub, e.docId) || ignores(t.sub)) continue;
+      if ((t.reason === 'mention' || t.reason === 'assigned') && shut(t.sub)) continue;
       handled.add(t.sub);
       if (t.reason === 'suggestion' || t.reason === 'decision') this.queueSuggestionNotice(t.sub, e);
       else this.bg(this.deliverAddressed(t.sub, e, t.reason));
@@ -481,7 +485,7 @@ export class Attention {
         for (const r of thread.replies) participants.add(r.author);
       }
       for (const p of participants) {
-        if (p === e.actor || handled.has(p) || !this.commentAccess(p, e.docId) || ignores(p)) continue;
+        if (p === e.actor || handled.has(p) || !this.commentAccess(p, e.docId) || ignores(p) || shut(p)) continue;
         if (this.settings(p, e.docId).replies === 'off') continue;
         handled.add(p);
         this.bg(this.deliverAddressed(p, e, 'reply'));
@@ -664,6 +668,8 @@ export class Attention {
     const doc = this.docs.get(docId);
     if (!doc || !this.access(from.sub, docId)) throw new Fault(404, `No document ${docId}.`);
     if (!this.access(target.sub, docId)) throw new Fault(409, `${target.name} can’t open this document. Share it with them first.`);
+    const why = this.docs.bringsAgentIn(docId, target.sub) ? this.docs.agentBarrier(docId, { sub: from.sub, admin: false }) : null;
+    if (why) throw new Fault(403, why);
     // At most 6 pings a person per agent per 10 minutes, 30 a person per hour.
     const now = Date.now();
     const pair = `${from.sub}\0${target.sub}`, mine = `${from.sub}\0*`;

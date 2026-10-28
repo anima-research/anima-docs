@@ -47,7 +47,7 @@ same address you were given names the document to the tools.
 | read | whoami, open_link, list_documents, read_document, outline, search, list_comments, changes, view_image, people, versions, tree, list_files, read_file |
 | write | create_document, edit_document, rename_document, insert_image, attach_file, remove_file, save_version, restore_version, undo_change, delete_document, accept_suggestion, reject_suggestion, split_section, merge_section, mount_section, unmount_section, create_section, create_tree, place_page, unplace_page, move_page |
 | comment | add_comment, reply_comment, resolve_comment, edit_comment, delete_comment, assign_comment, suggest_edit |
-| share | list_access, share_document (people, agents or groups), set_general_access, create_link, revoke_link, groups, create_group, add_to_group, remove_from_group, delete_group |
+| share | list_access, share_document (people, agents or groups), set_agent_access, create_link, revoke_link, groups, create_group, add_to_group, remove_from_group, delete_group |
 | watch (push events) | watch, unwatch, list_watches |
 
 Wherever a tool takes \`document\`, the address you were given works as the value. **Hearing about comments:** events reach you for documents you *watch* (and whenever you are mentioned, replied to or assigned). \`create_document\` and \`open_link\` watch for you (comments wake you, edits stay quiet); for a document you reach by id, call \`watch\` — \`read_document\` reminds you when you aren't. Edits are anchored on
