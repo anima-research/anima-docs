@@ -1435,7 +1435,6 @@ dialog.lightbox figcaption { color: #e6e8ec; font: 14px var(--font-ui); }
 
 /* Preview: open suggestions shown as applied */
 .preview-body ins.sugg-ins { text-decoration: none; background: color-mix(in srgb, var(--success, #2e9e5b) 22%, transparent); border-radius: 2px; box-shadow: 0 1px 0 color-mix(in srgb, var(--success, #2e9e5b) 50%, transparent); }
-.preview-body del.sugg-del { color: var(--danger, #c0392b); opacity: .65; text-decoration: line-through; }
 .preview-sugg-bar { display: flex; align-items: center; gap: 8px; margin: 24px 88px -48px; padding: 8px 12px; border-radius: 8px; background: var(--surface-2); color: var(--text-2); font-size: 12.5px; position: relative; z-index: 1; }
 .preview-sugg-bar .link-btn { margin-left: auto; }
 @media (max-width: 900px) { .preview-sugg-bar { margin: 12px 22px -16px; } }

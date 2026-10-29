@@ -775,7 +775,7 @@ try {
     await alice.locator('button.comments-btn').click();
   });
 
-  await step('Preview shows open suggestions as applied: the insertion highlighted, the deletion struck; the bar hides and shows them', async () => {
+  await step('Preview shows open suggestions as applied: the result, with the inserted text highlighted; the bar hides and shows them', async () => {
     const d = (await api(alice, 'POST', '/api/docs', { title: 'Fruit', content: '# Fruit\n\nIntro about apples and figs.\n' })).json;
     const bobSub = (await api(bob, 'GET', '/api/me')).json.you.sub;
     assert((await api(alice, 'POST', `/api/docs/${d.id}/share`, { who: bobSub, role: 'commenter' })).status === 200, 'share with Bob');
@@ -784,7 +784,7 @@ try {
     await openDoc(alice, d.id);
     await alice.locator('.seg-btn[data-mode=preview]').click();
     await alice.locator('.preview-body ins.sugg-ins', { hasText: 'pears' }).waitFor({ timeout: 8000 });
-    await alice.locator('.preview-body del.sugg-del', { hasText: 'apples' }).waitFor({ timeout: 8000 });
+    assert(!(await alice.locator('.preview-body').innerText()).includes('apples'), 'the replaced text is not shown: the result only');
     assert((await alice.locator('.preview-sugg-bar').innerText()).includes('1 open suggestion shown as applied'), 'the bar counts');
     await alice.locator('.preview-sugg-bar button', { hasText: 'Hide' }).click();
     await alice.locator('.preview-body ins.sugg-ins').waitFor({ state: 'detached', timeout: 5000 });
@@ -792,6 +792,29 @@ try {
     await alice.locator('.preview-sugg-bar button', { hasText: 'Show as applied' }).click();
     await alice.locator('.preview-body ins.sugg-ins', { hasText: 'pears' }).waitFor({ timeout: 5000 });
     await alice.locator('.seg-btn[data-mode=edit]').click();
+  });
+
+  await step('switching modes keeps your place: the paragraph at the top of the editor tops the preview, and back', async () => {
+    const paras = Array.from({ length: 160 }, (_, i) => `Paragraph ${i + 1} of the long report, with enough words to take a line or two on screen.`);
+    const d = (await api(alice, 'POST', '/api/docs', { title: 'Long walk', content: `# Long walk\n\n${paras.join('\n\n')}\n` })).json;
+    await openDoc(alice, d.id);
+    await alice.locator('.seg-btn[data-mode=edit]').click();
+    const topEditorPara = () => alice.evaluate(() => { const v = window.__anima.view; const r = document.querySelector('.edit-pane').getBoundingClientRect(); const c = v.contentDOM.getBoundingClientRect(); const pos = v.posAtCoords({ x: c.left + 8, y: r.top + 4 }, false); const line = v.state.doc.lineAt(pos ?? 0).text; return Number((/Paragraph (\d+)/.exec(line) || [])[1] || 0); });
+    const topPreviewPara = () => alice.evaluate(() => { const top = document.querySelector('.preview-pane').getBoundingClientRect().top + 4; let best = null; for (const el of document.querySelectorAll('.preview-body [data-line]')) { const b = el.getBoundingClientRect(); if (b.top <= top + 1 && b.bottom > top) best = el; } if (!best) best = [...document.querySelectorAll('.preview-body [data-line]')].find((el) => el.getBoundingClientRect().bottom > top); return Number((/Paragraph (\d+)/.exec(best?.textContent || '') || [])[1] || 0); });
+    // Put paragraph 100 at the top of the editor (scroll the pane until it is there).
+    await alice.evaluate(() => { const v = window.__anima.view; const i = v.state.doc.toString().indexOf('Paragraph 100'); v.dispatch({ selection: { anchor: i }, scrollIntoView: true }); });
+    await alice.waitForFunction(() => { const v = window.__anima.view; const i = v.state.doc.toString().indexOf('Paragraph 100'); return !!v.coordsAtPos(i); });
+    await alice.evaluate(() => { const v = window.__anima.view; const i = v.state.doc.toString().indexOf('Paragraph 100'); const c = v.coordsAtPos(i); const pane = document.querySelector('.edit-pane'); pane.scrollTop += c.top - pane.getBoundingClientRect().top - 4; });
+    await alice.waitForFunction(() => { const v = window.__anima.view; const r = document.querySelector('.edit-pane').getBoundingClientRect(); const c = v.contentDOM.getBoundingClientRect(); const pos = v.posAtCoords({ x: c.left + 8, y: r.top + 4 }, false); return /Paragraph (99|100|101)\b/.test(v.state.doc.lineAt(pos ?? 0).text); }, null, { timeout: 5000 });
+    const e1 = await topEditorPara();
+    await alice.locator('.seg-btn[data-mode=preview]').click();
+    await alice.waitForFunction((n) => { const top = document.querySelector('.preview-pane').getBoundingClientRect().top + 4; const el = [...document.querySelectorAll('.preview-body [data-line]')].find((x) => x.getBoundingClientRect().bottom > top); const m = /Paragraph (\d+)/.exec(el?.textContent || ''); return m && Math.abs(Number(m[1]) - n) <= 1; }, e1, { timeout: 8000 });
+    // Now scroll the preview to paragraph 40 and go back to the editor.
+    await alice.evaluate(() => { const el = [...document.querySelectorAll('.preview-body p')].find((p) => p.textContent.startsWith('Paragraph 40 ')); const pane = document.querySelector('.preview-pane'); pane.scrollTop += el.getBoundingClientRect().top - pane.getBoundingClientRect().top - 4; });
+    const p1 = await topPreviewPara();
+    assert(Math.abs(p1 - 40) <= 1, `preview top should be paragraph 40, got ${p1}`);
+    await alice.locator('.seg-btn[data-mode=edit]').click();
+    await alice.waitForFunction((n) => { const v = window.__anima.view; const r = document.querySelector('.edit-pane').getBoundingClientRect(); const c = v.contentDOM.getBoundingClientRect(); const pos = v.posAtCoords({ x: c.left + 8, y: r.top + 4 }, false); const m = /Paragraph (\d+)/.exec(v.state.doc.lineAt(pos ?? 0).text); return m && Math.abs(Number(m[1]) - n) <= 1; }, p1, { timeout: 8000 });
   });
 
   await step('a document with an anyone-with-the-link link shows that link as its address, and the link address reloads to the document', async () => {

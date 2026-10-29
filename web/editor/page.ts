@@ -369,7 +369,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   const canvas = h('div.doc-canvas', null, pageWrap);
   const editPane = h('div.doc-scroll.edit-pane', { tabindex: '-1' }, canvas);
   const previewBody = h('article.prose.preview-body');
-  // Open suggestions are shown in the preview as if applied (insertions highlighted, deletions struck), unless hidden here.
+  // Open suggestions are shown in the preview as if applied (the result, with inserted text highlighted), unless hidden here.
   let showApplied = (() => { try { return localStorage.getItem('docs.previewApplied') !== '0'; } catch { return true; } })();
   const previewSuggBar = h('div.preview-sugg-bar', { hidden: true });
   const previewPage = h('div.page.preview-page', null, previewSuggBar, previewBody);
@@ -1077,8 +1077,8 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   // ------------------------------------------------------------------ modes & layout
 
   /** The flattened text for rendering: latex and text nodes wrapped by type (markdown as is). */
-  // Sentinels around applied suggestions in the preview's source; after rendering they become ins / del.
-  const S_INS0 = '\uE010', S_INS1 = '\uE011', S_DEL0 = '\uE012', S_DEL1 = '\uE013';
+  // Sentinels around applied suggestions in the preview's source; after rendering they become highlighted insertions.
+  const S_INS0 = '\uE010', S_INS1 = '\uE011', S_DEL0 = '\uE012';
   type PreviewEdit = { from: number; to: number; original: string; text: string; point: boolean };
   function renderSource(L: Layout, edits: PreviewEdit[] = []): string {
     const typeOf = (id: string) => labelOf(id)?.type ?? 'markdown';
@@ -1104,7 +1104,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
         }
       } else to = from;
       if (wrapped.some((w) => from < w.to && to > w.from)) continue; // inside a node of another type: not shown
-      ops.push({ from, to, depth: 1e9, replace: () => `${e.original ? S_DEL0 + e.original + S_DEL1 : ''}${e.text ? S_INS0 + e.text + S_INS1 : ''}` });
+      ops.push({ from, to, depth: 1e9, replace: () => (e.text ? S_INS0 + e.text + S_INS1 : '') }); // the result only: replaced text is gone
     }
     ops.sort((a, b) => b.from - a.from || b.depth - a.depth);
     let lastFrom = Infinity;
@@ -1202,7 +1202,62 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
 
   /** The person chose a mode on this page (an HTML page otherwise opens as the page). */
   let modeChosen = false;
+  // ------------------------------------------------------------------ keeping your place across modes
+  // Rendered blocks carry their source lines (data-line / data-line-end); the editor knows its lines. On a
+  // switch, the line at the top of the surface you leave becomes the top of the one you arrive at.
+  function editorTopLine(): number {
+    const r = editPane.getBoundingClientRect(), c = view.contentDOM.getBoundingClientRect();
+    const pos = view.posAtCoords({ x: c.left + 8, y: r.top + 4 }, false) ?? view.viewport.from;
+    const line = view.state.doc.lineAt(pos);
+    const coords = view.coordsAtPos(line.from);
+    const frac = coords && coords.bottom > coords.top ? Math.min(1, Math.max(0, (r.top + 4 - coords.top) / (coords.bottom - coords.top))) : 0;
+    return line.number - 1 + frac;
+  }
+  function previewTopLine(): number | null {
+    const top = previewPane.getBoundingClientRect().top + 4;
+    const blocks = [...previewBody.querySelectorAll<HTMLElement>('[data-line]')];
+    // The innermost block under the top edge; failing that (a gap between blocks), the first block below it.
+    let best: HTMLElement | null = null;
+    for (const el of blocks) { const b = el.getBoundingClientRect(); if (b.top <= top && b.bottom > top) best = el; }
+    if (!best) best = blocks.find((el) => el.getBoundingClientRect().bottom > top) ?? null;
+    if (!best) return null;
+    const b = best.getBoundingClientRect();
+    const start = Number(best.dataset.line), end = Number(best.dataset.lineEnd ?? start + 1);
+    const frac = b.height > 0 ? Math.min(1, Math.max(0, (top - b.top) / b.height)) : 0;
+    return start + frac * Math.max(1, end - start);
+  }
+  function alignPreviewTo(line: number) {
+    if (line < 0.01) { previewPane.scrollTop = 0; return; } // at the top, stay at the top (above the page's padding)
+    let best: HTMLElement | null = null;
+    for (const el of previewBody.querySelectorAll<HTMLElement>('[data-line]')) {
+      const start = Number(el.dataset.line);
+      if (start <= line && (!best || start >= Number(best.dataset.line))) best = el; // the latest (innermost) block starting at or before the line
+    }
+    if (!best) { previewPane.scrollTop = 0; return; }
+    const start = Number(best.dataset.line), end = Number(best.dataset.lineEnd ?? start + 1);
+    const frac = Math.min(1, Math.max(0, (line - start) / Math.max(1, end - start)));
+    const b = best.getBoundingClientRect(), p = previewPane.getBoundingClientRect();
+    previewPane.scrollTop += b.top - p.top - 4 + frac * b.height;
+  }
+  function alignEditorTo(line: number) {
+    if (line < 0.01) { editPane.scrollTop = 0; return; }
+    const n = Math.max(1, Math.min(view.state.doc.lines, Math.floor(line) + 1));
+    const pos = view.state.doc.line(n).from;
+    const go = () => view.dispatch({ effects: EditorView.scrollIntoView(pos, { y: 'start', yMargin: 4 }) });
+    go();
+    // CodeMirror estimates the heights of lines it has not drawn: settle in a few passes, never from inside a measure.
+    let tries = 0;
+    const check = () => {
+      if (tries++ >= 3) return;
+      const c = view.coordsAtPos(pos), r = editPane.getBoundingClientRect();
+      if (!c || Math.abs(c.top - (r.top + 4)) > 12) { go(); setTimeout(check, 60); }
+    };
+    setTimeout(check, 60);
+  }
+
   function setMode(m: Mode, opts: { chosen?: boolean } = {}) {
+    const prev = mode;
+    const fromLine = prev !== m && !isHtml() ? (prev === 'edit' ? editorTopLine() : prev === 'preview' ? previewTopLine() : null) : null;
     mode = m;
     if (opts.chosen) modeChosen = true;
     // An HTML page's default (preview) is not remembered as the person's mode for documents.
@@ -1216,6 +1271,10 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     if (m !== 'edit') renderPreview();
     computeLayout();
     if (m !== 'preview') requestAnimationFrame(() => view.requestMeasure());
+    if (fromLine !== null) requestAnimationFrame(() => {
+      if (prev === 'edit' && m !== 'edit') alignPreviewTo(fromLine);
+      else if (prev === 'preview' && m !== 'preview') alignEditorTo(fromLine);
+    });
   }
 
   function computeLayout() {

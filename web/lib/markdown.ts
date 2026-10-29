@@ -34,6 +34,11 @@ function taskLists(md: MD) {
 }
 
 const docMd = new MarkdownIt({ html: true, linkify: true, typographer: true }); // raw HTML shows in previews; DOMPurify keeps it inert
+// Each rendered block carries the source lines it came from (0-based, end exclusive), so the editor and
+// the preview can be scrolled to the same place.
+docMd.core.ruler.push('source_lines', (state) => {
+  for (const t of state.tokens) if (t.block && t.map && t.nesting >= 0 && t.type !== 'inline') { t.attrSet('data-line', String(t.map[0])); t.attrSet('data-line-end', String(t.map[1])); }
+});
 docMd.use(taskLists);
 imageSizes(docMd);
 galleryFence(docMd);
