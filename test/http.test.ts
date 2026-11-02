@@ -2,6 +2,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { brotliDecompressSync, deflateSync, gunzipSync } from 'node:zlib';
 import { get as httpGet, request as httpRequest } from 'node:http';
+import { createServer, type AddressInfo } from 'node:net';
 import { startServer } from './server-harness.js';
 import { compressible, pickEncoding } from '../src/http.js';
 
@@ -115,6 +116,16 @@ test('media: upload validates type, serves to signed-in users only, agents can i
     const r = await (await fetch(`${S.base}/api/operations/insert_image`, { method: 'POST', headers: { Authorization: `Bearer ${agent}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ document: d.id, url: u }) })).json();
     assert.equal(r.isError, true, u);
   }
+  // A name is checked by the lookup the guarded undici Agent connects with: one that resolves to loopback is
+  // refused before anything connects, so a listener there is never reached.
+  let reached = 0;
+  const listener = createServer((s) => { reached++; s.destroy(); });
+  await new Promise<void>((r) => listener.listen(0, '127.0.0.1', () => r()));
+  const named = `https://localhost:${(listener.address() as AddressInfo).port}/a.png`;
+  const viaName = await (await fetch(`${S.base}/api/operations/insert_image`, { method: 'POST', headers: { Authorization: `Bearer ${agent}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ document: d.id, url: named }) })).json();
+  await new Promise((r) => listener.close(r));
+  assert.equal(viaName.isError, true, named);
+  assert.equal(reached, 0, 'refused before connecting');
 });
 
 test('admin: identity management for humans and agents', async () => {
