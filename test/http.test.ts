@@ -2,7 +2,8 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { brotliDecompressSync, deflateSync, gunzipSync } from 'node:zlib';
 import { get as httpGet, request as httpRequest } from 'node:http';
-import { createServer, type AddressInfo } from 'node:net';
+import { connect, createServer, type AddressInfo } from 'node:net';
+import { once } from 'node:events';
 import { startServer } from './server-harness.js';
 import { compressible, pickEncoding } from '../src/http.js';
 
@@ -119,11 +120,17 @@ test('media: upload validates type, serves to signed-in users only, agents can i
   let reached = 0;
   const listener = createServer((s) => { reached++; s.destroy(); });
   await new Promise<void>((r) => listener.listen(0, () => r()));
-  const named = `https://localhost:${(listener.address() as AddressInfo).port}/a.png`;
-  const viaName = await (await fetch(`${S.base}/api/operations/insert_image`, { method: 'POST', headers: { Authorization: `Bearer ${agent}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ document: d.id, url: named }) })).json();
-  await new Promise((r) => listener.close(r));
-  assert.equal(viaName.isError, true, named);
-  assert.equal(reached, 0, 'refused before connecting');
+  try {
+    const port = (listener.address() as AddressInfo).port;
+    await Promise.all([once(listener, 'connection'), new Promise<void>((ok, fail) => { const c = connect(port, 'localhost', () => { c.destroy(); ok(); }); c.on('error', fail); })]);
+    assert.equal(reached, 1, 'localhost reaches the listener directly');
+    const named = `https://localhost:${port}/a.png`;
+    const viaName = await (await fetch(`${S.base}/api/operations/insert_image`, { method: 'POST', headers: { Authorization: `Bearer ${agent}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ document: d.id, url: named }) })).json();
+    assert.equal(viaName.isError, true, named);
+    assert.equal(reached, 1, 'refused before connecting');
+  } finally {
+    await new Promise((r) => listener.close(r));
+  }
 });
 
 test('admin: identity management for humans and agents', async () => {
