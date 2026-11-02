@@ -116,11 +116,9 @@ test('media: upload validates type, serves to signed-in users only, agents can i
     const r = await (await fetch(`${S.base}/api/operations/insert_image`, { method: 'POST', headers: { Authorization: `Bearer ${agent}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ document: d.id, url: u }) })).json();
     assert.equal(r.isError, true, u);
   }
-  // A name is checked by the lookup the guarded undici Agent connects with: one that resolves to loopback is
-  // refused before anything connects, so a listener there is never reached.
   let reached = 0;
   const listener = createServer((s) => { reached++; s.destroy(); });
-  await new Promise<void>((r) => listener.listen(0, '127.0.0.1', () => r()));
+  await new Promise<void>((r) => listener.listen(0, () => r()));
   const named = `https://localhost:${(listener.address() as AddressInfo).port}/a.png`;
   const viaName = await (await fetch(`${S.base}/api/operations/insert_image`, { method: 'POST', headers: { Authorization: `Bearer ${agent}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ document: d.id, url: named }) })).json();
   await new Promise((r) => listener.close(r));
