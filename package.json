@@ -13,7 +13,7 @@
     "test": "tsx --test test/*.test.ts"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.12.0"
   },
   "dependencies": {
     "better-sqlite3": "^12.11.1",

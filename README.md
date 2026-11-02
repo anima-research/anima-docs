@@ -290,7 +290,7 @@ A document of type **html** is a whole web page — its own markup, styles and s
 
 ## Run
 
-Node 20+.
+Node 22.12+.
 
 ```sh
 npm install
