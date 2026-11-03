@@ -323,7 +323,7 @@ DOCS_DEV_ISSUER=dev.local DOCS_ISSUERS= npm run dev
 | `DOCS_ORIGIN` | `http://localhost:$PORT` | public origin; cookie mutations and sockets must come from it |
 | `DOCS_DATA_DIR` | `data` | SQLite (WAL) + `media/` |
 | `DOCS_AUDIENCE` | `docs` | |
-| `DOCS_ISSUERS` | `id.animalabs.ai` | comma list, `domain` or `domain=ed25519:<key>` (pin in production; otherwise fetched from `/.well-known/mcpl-identity`). The first one is used for human sign-in. |
+| `DOCS_ISSUERS` | `id.animalabs.ai` | comma list, `domain` or `domain=ed25519:<key>` (pin in production; otherwise fetched from `/.well-known/mcpl-identity`). `?via=<issuer domain>` on any page or on `/auth/login` selects which configured issuer a person signs in with and is remembered in a cookie; otherwise the first issuer. |
 | `DOCS_REQUIRED_SCOPES` | none | scopes every token must carry |
 | `DOCS_ADMINS` | none | subs that are workspace admins (the `docs:admin` scope also works) |
 | `DOCS_DEFAULT_ACCESS` | `restricted` | general access for new documents |

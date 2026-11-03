@@ -50,6 +50,69 @@ test('login redirects to the issuer for this audience', async () => {
   assert.match(r.headers.get('location') ?? '', /^https:\/\/test\.local\/login\?audience=docs&state=/);
 });
 
+test('single issuer: ?via= naming anything else is ignored, no home cookie', async () => {
+  const r = await fetch(`${S.base}/auth/login?via=other.example`, { redirect: 'manual' });
+  assert.equal(r.status, 302);
+  assert.match(r.headers.get('location') ?? '', /^https:\/\/test\.local\/login\?/);
+  assert.doesNotMatch(r.headers.get('set-cookie') ?? '', /docs_home/);
+  const page = await fetch(`${S.base}/d/nope?via=other.example`, { headers: { Accept: 'text/html,*/*' } });
+  assert.equal(page.status, 200);
+  assert.doesNotMatch(page.headers.get('set-cookie') ?? '', /docs_home/);
+});
+
+test('several issuers: ?via= and the docs_home cookie choose where a person signs in', async () => {
+  const T = await startServer({ DOCS_ISSUERS: 'test.local,second.example' });
+  try {
+    const login = (q = '', cookie?: string) => fetch(`${T.base}/auth/login${q}`, { redirect: 'manual', headers: cookie ? { Cookie: cookie } : {} });
+    // (a) nothing said: the first issuer.
+    const first = await login();
+    assert.equal(first.status, 302);
+    assert.match(first.headers.get('location') ?? '', /^https:\/\/test\.local\/login\?audience=docs&state=/);
+    assert.doesNotMatch(first.headers.get('set-cookie') ?? '', /docs_home/);
+    // (b) ?via=<second>: the second issuer, remembered for 400 days.
+    const via = await login('?via=second.example');
+    assert.equal(via.status, 302);
+    assert.match(via.headers.get('location') ?? '', /^https:\/\/second\.example\/login\?audience=docs&state=/);
+    const set = via.headers.getSetCookie();
+    const home = set.find((c) => c.startsWith('docs_home='));
+    assert.ok(home, 'docs_home set');
+    assert.match(home!, /^docs_home=second\.example; Path=\/; HttpOnly; SameSite=Lax; Max-Age=34560000$/);
+    assert.ok(set.some((c) => c.startsWith('docs_login=')), 'login state still set');
+    // (c) the cookie alone picks the second issuer; the domain compares case-insensitively.
+    const remembered = await login('', 'docs_home=Second.Example');
+    assert.match(remembered.headers.get('location') ?? '', /^https:\/\/second\.example\/login\?/);
+    // (d) an unknown ?via= falls through (to the cookie, then the first issuer) and sets nothing.
+    const unknown = await login('?via=unknown.example');
+    assert.match(unknown.headers.get('location') ?? '', /^https:\/\/test\.local\/login\?/);
+    assert.doesNotMatch(unknown.headers.get('set-cookie') ?? '', /docs_home/);
+    const unknownWithCookie = await login('?via=unknown.example', 'docs_home=second.example');
+    assert.match(unknownWithCookie.headers.get('location') ?? '', /^https:\/\/second\.example\/login\?/);
+    // (e) a document link with ?via= remembers the home and serves the app as usual.
+    const page = await fetch(`${T.base}/d/abc123?via=second.example`, { headers: { Accept: 'text/html,*/*' } });
+    assert.equal(page.status, 200);
+    assert.equal(page.headers.get('content-type'), 'text/html; charset=utf-8');
+    assert.ok((await page.text()).includes('<div id="app"'));
+    assert.match(page.headers.get('set-cookie') ?? '', /^docs_home=second\.example; /);
+    const root = await fetch(`${T.base}/?via=second.example`, { headers: { Accept: 'text/html,*/*' } });
+    assert.match(root.headers.get('set-cookie') ?? '', /^docs_home=second\.example; /);
+    const plain = await fetch(`${T.base}/d/abc123`, { headers: { Accept: 'text/html,*/*' } });
+    assert.equal(plain.headers.get('set-cookie'), null);
+    // Not on the API or assets.
+    const api = await fetch(`${T.base}/api/me?via=second.example`);
+    assert.equal(api.headers.get('set-cookie'), null);
+    const asset = await fetch(`${T.base}/favicon.svg?via=second.example`);
+    assert.equal(asset.headers.get('set-cookie'), null);
+    // The sign-in page names the remembered issuer.
+    const cfg = await (await fetch(`${T.base}/api/config`, { headers: { Cookie: 'docs_home=second.example' } })).json();
+    assert.equal(cfg.issuer, 'second.example');
+    assert.equal((await (await fetch(`${T.base}/api/config`)).json()).issuer, 'test.local');
+    // Signing out keeps the home.
+    const out = await fetch(`${T.base}/auth/logout`, { method: 'POST', headers: { Origin: T.base, Cookie: 'docs_home=second.example' } });
+    assert.equal(out.status, 200);
+    assert.doesNotMatch(out.headers.get('set-cookie') ?? '', /docs_home/);
+  } finally { await T.close(); }
+});
+
 test('cookie mutations need our Origin; the dev issuer is off unless configured', async () => {
   const cookie = await signIn('Ann');
   const cross = await fetch(`${S.base}/api/docs`, { method: 'POST', headers: { Cookie: cookie, Origin: 'https://evil.example', 'Content-Type': 'application/json' }, body: '{"title":"x"}' });
