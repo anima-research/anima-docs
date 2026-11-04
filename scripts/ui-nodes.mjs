@@ -579,6 +579,8 @@ try {
     await alice.waitForFunction(() => document.querySelector('.doc-app')?.dataset.mode === 'preview', null, { timeout: 8000 });
     await alice.locator('.seg-btn[data-mode=split]').click();
     const frame = alice.locator('.preview-pane iframe.page-frame');
+    assert((await frame.getAttribute('allow') || '').includes('fullscreen') && (await frame.getAttribute('allowfullscreen')) !== null, 'the page frame grants fullscreen');
+    assert(await alice.frameLocator('.preview-pane iframe.page-frame').locator('body').evaluate(() => document.fullscreenEnabled), 'fullscreen is enabled inside the page');
     await frame.waitFor({ timeout: 8000 });
     assert((await frame.getAttribute('sandbox') ?? '').includes('allow-scripts') && !(await frame.getAttribute('sandbox') ?? '').includes('allow-same-origin'), 'frame sandbox');
     // The page's own address shows the app around it for a person: the header (share, more) and the framed page.

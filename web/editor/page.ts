@@ -375,7 +375,8 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   const previewPage = h('div.page.preview-page', null, previewSuggBar, previewBody);
   const previewCanvas = h('div.doc-canvas', null, previewPage);
   // An HTML page previews as itself, in a sandboxed frame (opaque origin: its scripts cannot reach this app).
-  const pageFrame = h('iframe.page-frame', { title: 'Page preview', sandbox: 'allow-scripts allow-forms allow-popups allow-modals allow-downloads allow-pointer-lock allow-presentation', hidden: true });
+  // The page may play media: fullscreen and picture-in-picture are granted (a sandbox token does not cover them).
+  const pageFrame = h('iframe.page-frame', { title: 'Page preview', sandbox: 'allow-scripts allow-forms allow-popups allow-modals allow-downloads allow-pointer-lock allow-presentation', allow: 'fullscreen; picture-in-picture; autoplay; encrypted-media; clipboard-write', allowfullscreen: '', hidden: true });
   const previewPane = h('div.doc-scroll.preview-pane', { 'aria-label': 'Preview' }, previewCanvas, pageFrame);
   const overlay = h('div.doc-overlay', { hidden: true });
   const syncVeil = h('div.sync-veil', null, spinner(24), h('span', null, 'Loading document…'));
