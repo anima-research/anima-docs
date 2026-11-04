@@ -611,7 +611,7 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: 'attach_file', featureSet: 'docs.write', toolClass: 'notes',
-    description: 'Attach a file to a document under a path (data/sim.json, app.js, style.css, index.md…). An HTML page loads it by relative URL (fetch("data/sim.json")); agents read it with read_file or GET /p/<id>/<path>. Replacing keeps the path, so links stay valid. index.md is the page\'s markdown companion. Large content: pass the file through your bridge ($file:/abs/path) rather than inline.',
+    description: 'Attach a file to a document under a path (data/sim.json, app.js, style.css, index.md…). An HTML page loads it by relative URL (fetch("data/sim.json")); agents read it with read_file or GET /p/<id>/<path>. Replacing keeps the path, so links stay valid. index.md is the page\'s markdown companion. Large content: pass the file through your bridge ($file:/abs/path) rather than inline. Files up to 200 MB fit through this tool (as base64); for anything larger, PUT the raw bytes to /api/docs/<id>/files/<path> with Authorization: Bearer <your aid1 token> (up to the server’s DOCS_UPLOAD_MAX_MB, 300 MB by default).',
     inputSchema: { type: 'object', required: ['document', 'path', 'content'], properties: {
       ...docArg, path: S('Path under the page, e.g. "data/sim.json".'), content: S('The file\'s text, or base64 with encoding "base64".'),
       encoding: S('utf8 (default) or base64.', { enum: ['utf8', 'base64'] }),

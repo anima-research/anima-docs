@@ -310,7 +310,8 @@ export class McplSession implements AgentSession {
 }
 
 export function attachMcpl(server: Server, app: App, log: (m: string) => void = (m) => console.log(`[mcpl] ${m}`)) {
-  const wss = new WebSocketServer({ noServer: true, maxPayload: 24 * 1024 * 1024 });
+  // A 200 MB file arrives as ~267 MB of base64 inside a JSON tool call.
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 280 * 1024 * 1024 });
   const open = new Map<WebSocket, McplSession>();
   // Blocking applies to live connections at once.
   app.principals.on('role', (e: { sub: string }) => {
