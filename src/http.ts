@@ -161,6 +161,22 @@ export function createHttp(app: App) {
   const cookie = (name: string, value: string, maxAge: number) =>
     `${name}=${encodeURIComponent(value)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.max(0, Math.floor(maxAge))}${production ? '; Secure' : ''}`;
 
+  // ---------------------------------------------------------------- sign-in home
+  // With several trusted issuers, a person signs in at their own. `?via=<issuer>` on
+  // any page (or on /auth/login) names it and is remembered in `docs_home`; otherwise
+  // the first configured issuer. Values naming no configured issuer are ignored.
+  const HOME_COOKIE_S = 400 * 86400;
+  const trustedIssuer = (v: string | null | undefined): string | null => {
+    const d = (v ?? '').trim().toLowerCase();
+    return d ? app.config.issuers.find((i) => i.domain.toLowerCase() === d)?.domain ?? null : null;
+  };
+  const rememberHome = (res: ServerResponse, url: URL) => {
+    const via = trustedIssuer(url.searchParams.get('via'));
+    if (via) res.appendHeader('Set-Cookie', cookie('docs_home', via, HOME_COOKIE_S));
+  };
+  const homeIssuer = (req: IncomingMessage, url: URL): string | undefined =>
+    trustedIssuer(url.searchParams.get('via')) ?? trustedIssuer(cookies(req).docs_home) ?? app.config.issuers[0]?.domain;
+
   // ---------------------------------------------------------------- sessions
 
   // A sign-in token proves who you are once (it lives minutes); the session is
@@ -332,7 +348,7 @@ export function createHttp(app: App) {
     res.writeHead(200, { 'Content-Type': 'text/markdown; charset=utf-8', 'Cache-Control': 'no-store', Vary: 'Accept' });
     res.end(parts.join('\n\n'));
   }
-  const sendShell = (res: ServerResponse, meta: LinkMeta) => { res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(shell(meta)); };
+  const sendShell = (res: ServerResponse, meta: LinkMeta, url: URL) => { rememberHome(res, url); res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(shell(meta)); };
 
   const SANDBOX = "sandbox allow-scripts allow-forms allow-popups allow-modals allow-downloads allow-pointer-lock allow-presentation; frame-ancestors 'self'";
   /** Compressed pages and files, keyed by their ETags (content hashes). */
@@ -477,9 +493,10 @@ export function createHttp(app: App) {
       // ------------------------------------------------ sign-in
       if (path === '/auth/login' && method === 'GET') {
         const state = opaque(16);
-        const issuer = app.config.issuers[0]?.domain;
+        const issuer = homeIssuer(req, url);
         if (!issuer) throw new Fault(500, 'No issuer configured.');
-        res.setHeader('Set-Cookie', cookie('docs_login', state, 600));
+        rememberHome(res, url);
+        res.appendHeader('Set-Cookie', cookie('docs_login', state, 600));
         res.writeHead(302, { Location: `https://${issuer}/login?audience=${encodeURIComponent(app.config.audience)}&state=${state}` });
         res.end();
         return;
@@ -510,6 +527,7 @@ export function createHttp(app: App) {
       if (path === '/auth/logout' && method === 'POST') {
         const t = cookies(req).docs_session;
         if (t) { app.db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(tokenHash(t)); realtime.closeSession(tokenHash(t)); }
+        // Only the session ends; `docs_home` (where this person signs in) stays.
         res.setHeader('Set-Cookie', cookie('docs_session', '', 0));
         send(200, { ok: true });
         return;
@@ -548,7 +566,7 @@ export function createHttp(app: App) {
       if (actor && method === 'GET' && path.startsWith('/api/') && !req.headers.authorization) renewSession(req, res);
 
       if (path === '/api/config') {
-        send(200, { audience: app.config.audience, issuer: app.config.issuers[0]?.domain ?? null, dev: !!app.devIssuer, origin: app.config.origin });
+        send(200, { audience: app.config.audience, issuer: homeIssuer(req, url) ?? null, dev: !!app.devIssuer, origin: app.config.origin });
         return;
       }
       if (path === '/api/me') {
@@ -641,12 +659,12 @@ export function createHttp(app: App) {
         // frames, agents, non-browsers and ?raw=1 get the page itself (redirected to its signed path below).
         if ((rest === undefined || rest === '') && wantsMarkdown(req, url) && !(actor && app.files.get(d.id, COMPANION) && app.docs.role(d.id, actor))) { sendAgentMarkdown(res, d, false); return; }
         const browserNav = method === 'GET' && (rest === undefined || rest === '') && req.headers['sec-fetch-dest'] === 'document' && String(req.headers.accept ?? '').includes('text/html') && !url.searchParams.has('raw') && !url.searchParams.has('format');
-        if (browserNav) { sendShell(res, docMeta(d, `${app.config.origin}/p/${d.id}`)); return; }
+        if (browserNav) { sendShell(res, docMeta(d, `${app.config.origin}/p/${d.id}`), url); return; }
         const role = actor ? app.docs.role(d.id, actor) : null;
         if (actor && !role) throw new Fault(404, 'No such page.');
         if (!actor) {
           // No session: the bare page needs one (401); the short link gets the shell — the app asks to sign in, crawlers read the card.
-          if ((rest === undefined || rest === '') && !url.searchParams.has('raw') && !url.searchParams.has('format')) { sendShell(res, docMeta(d, `${app.config.origin}/p/${d.id}`)); return; }
+          if ((rest === undefined || rest === '') && !url.searchParams.has('raw') && !url.searchParams.has('format')) { sendShell(res, docMeta(d, `${app.config.origin}/p/${d.id}`), url); return; }
           throw new Fault(401, 'Sign in to view this page.');
         }
         if (rest !== undefined && rest !== '') { await sendDocFile(req, res, d.id, rest); return; } // /p/<id>/<path> with a session or a bearer token: the file
@@ -991,7 +1009,7 @@ export function createHttp(app: App) {
       if (dmatch) {
         const d = app.docs.get(dmatch[1]);
         if (wantsMarkdown(req, url)) { sendAgentMarkdown(res, d ?? null, false); return; }
-        sendShell(res, d ? docMeta(d, `${app.config.origin}/d/${d.id}`) : { ...GENERIC, url: `${app.config.origin}${path}` });
+        sendShell(res, d ? docMeta(d, `${app.config.origin}/d/${d.id}`) : { ...GENERIC, url: `${app.config.origin}${path}` }, url);
         return;
       }
       if (lmatch) {
@@ -999,11 +1017,11 @@ export function createHttp(app: App) {
         const peek = app.docs.peekLink(lmatch[1]);
         const d = peek.active && peek.docId ? app.docs.get(peek.docId) : null;
         if (wantsMarkdown(req, url)) { sendAgentMarkdown(res, d, !!d); return; }
-        sendShell(res, d ? docMeta(d, `${app.config.origin}${path}`, true) : { ...GENERIC, url: `${app.config.origin}${path}` });
+        sendShell(res, d ? docMeta(d, `${app.config.origin}${path}`, true) : { ...GENERIC, url: `${app.config.origin}${path}` }, url);
         return;
       }
       if (path === '/' || path === '/auth/callback' || path === '/admin' || path === '/people' || path === '/groups') {
-        sendShell(res, { ...GENERIC, url: `${app.config.origin}${path === '/auth/callback' ? '/' : path}` });
+        sendShell(res, { ...GENERIC, url: `${app.config.origin}${path === '/auth/callback' ? '/' : path}` }, url);
         return;
       }
       throw new Fault(404, 'Not found.');
