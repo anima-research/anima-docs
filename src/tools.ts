@@ -1063,7 +1063,7 @@ export const TOOLS: ToolDef[] = [
           for (const p of v.placements.filter((x) => x.parent === parent)) {
             const n = byId.get(p.child);
             if (!n) continue;
-            lines.push(`${'  '.repeat(depth)}- ${n.title || '(section)'} (${n.id})${p.derived ? '' : ' [placed]'}`);
+            lines.push(`${'  '.repeat(depth)}- ${n.title || '(section)'} (${n.id})${p.derived ? '' : ' [placed]'}${n.space ? ' [space]' : ''}`);
             if (!seen.has(p.child)) { seen.add(p.child); walk(p.child, depth + 1, seen); }
           }
         };

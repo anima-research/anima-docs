@@ -273,7 +273,7 @@ export class NavPanel {
     const byId = new Map(v.nodes.map((n) => [n.id, n]));
     const canArrange = atLeast(v.role, 'editor');
     const rows: HTMLElement[] = [];
-    const row = (id: string, depth: number, parent: string | null, index: number) => {
+    const row = (id: string, depth: number, parent: string | null, index: number, path: string[]) => {
       const n = byId.get(id);
       const kids = v.placements.filter((p) => p.parent === id).sort((a, b) => a.ord - b.ord);
       const col = this.collapsed.has(id);
@@ -294,9 +294,9 @@ export class NavPanel {
         h('button.nav-act.nav-more', { type: 'button', 'aria-label': 'Page actions', 'aria-haspopup': 'menu', onclick: (e: MouseEvent) => { e.stopPropagation(); this.contextMenu(e, id, parent, index); } }, '⋯'));
       if (canArrange) this.wireDrag(el, id, parent, index);
       rows.push(el);
-      if (!col) kids.forEach((p, i) => { if (p.child !== id) row(p.child, depth + 1, id, i); });
+      if (!col) kids.forEach((p, i) => { if (!path.includes(p.child)) row(p.child, depth + 1, id, i, [...path, p.child]); });
     };
-    row(v.root, 0, null, 0);
+    row(v.root, 0, null, 0, [v.root]);
     const inSpace = this.deps.docId === v.root || v.placements.some((p) => p.child === this.deps.docId);
     const me = this.deps.label(this.deps.docId);
     const addHere = !inSpace && canArrange && me && !me.section
@@ -353,10 +353,25 @@ export class NavPanel {
     return v.placements.filter((p) => p.parent === parent).sort((a, b) => a.ord - b.ord).findIndex((p) => p.child === child);
   }
 
+  /** The space whose pages hang under `id`: its own if it is one, otherwise the one it is placed in. */
+  private treeOf(id: string): string {
+    const v = this.view!;
+    if (id === v.root || v.nodes.find((n) => n.id === id)?.space) return id;
+    return v.placements.find((p) => p.child === id)?.tree ?? v.root;
+  }
+
+  /** The space holding `child` under `parent`: a space placed inside this one keeps its own pages. */
+  private placedIn(parent: string, child: string): string {
+    const v = this.view!;
+    return v.placements.find((p) => p.parent === parent && p.child === child)?.tree ?? v.root;
+  }
+
   private async reparent(child: string, from: string, to: string, index: number | null) {
     const v = this.view;
     if (!v) return;
-    try { await api.reparent(v.root, child, from, to, index); await this.refresh(); }
+    const tree = this.placedIn(from, child);
+    if (this.treeOf(to) !== tree) { toast('That page belongs to another space. To move it, remove it there and add it here.'); return; }
+    try { await api.reparent(tree, child, from, to, index); await this.refresh(); }
     catch (e) { toast(errorMessage(e), { kind: 'error' }); }
   }
 
@@ -377,10 +392,10 @@ export class NavPanel {
       items.push('separator', { label: 'New subpage…', icon: 'plus', onSelect: () => void this.newSubpage(id) }, { label: 'Add an existing document here…', icon: 'file', onSelect: () => void this.addExisting(id) });
       if (parent) {
         items.push(
-          { label: 'Move up', icon: 'arrowLeft', disabled: index === 0, onSelect: () => void this.act(api.movePage(v.root, parent, id, 'up')) },
-          { label: 'Move down', icon: 'arrowLeft', disabled: index >= siblings.length - 1, onSelect: () => void this.act(api.movePage(v.root, parent, id, 'down')) },
+          { label: 'Move up', icon: 'arrowLeft', disabled: index === 0, onSelect: () => void this.act(api.movePage(this.placedIn(parent, id), parent, id, 'up')) },
+          { label: 'Move down', icon: 'arrowLeft', disabled: index >= siblings.length - 1, onSelect: () => void this.act(api.movePage(this.placedIn(parent, id), parent, id, 'down')) },
           { label: 'Move to…', icon: 'columns', onSelect: () => void this.moveToDialog(id, parent) },
-          { label: 'Remove from this space', icon: 'x', onSelect: () => void this.act(api.unplace(v.root, parent, id)) });
+          { label: 'Remove from this space', icon: 'x', onSelect: () => void this.act(api.unplace(this.placedIn(parent, id), parent, id)) });
       }
     }
     if (canEditPage) items.push('separator', { label: 'Rename…', icon: 'pencil', onSelect: () => void this.rename(id, n?.title ?? '') });
@@ -398,12 +413,13 @@ export class NavPanel {
     const v = this.view;
     if (!v) return;
     const byId = new Map(v.nodes.map((n) => [n.id, n]));
-    const options: { id: string; depth: number }[] = [{ id: v.root, depth: 0 }];
+    const tree = this.placedIn(from, id);
+    const options: { id: string; depth: number }[] = this.treeOf(v.root) === tree ? [{ id: v.root, depth: 0 }] : [];
     const walk = (parent: string, depth: number, seen: Set<string>) => {
       for (const p of v.placements.filter((x) => x.parent === parent).sort((a, b) => a.ord - b.ord)) {
         if (p.child === id || seen.has(p.child)) continue;
         seen.add(p.child);
-        options.push({ id: p.child, depth });
+        if (this.treeOf(p.child) === tree) options.push({ id: p.child, depth });
         walk(p.child, depth + 1, seen);
       }
     };
@@ -447,7 +463,7 @@ export class NavPanel {
     if (!title) return;
     try {
       const d = await api.createDoc(title, `# ${title}\n\n`);
-      await api.place(v.root, parent, d.id);
+      await api.place(this.treeOf(parent), parent, d.id);
       await this.refresh();
       this.deps.onOpen(d.id, v.root);
     } catch (e) { toast(errorMessage(e), { kind: 'error' }); }
@@ -472,7 +488,7 @@ export class NavPanel {
     const chosen = await this.deps.pickDocument('Add a document to this space');
     if (!chosen) return;
     try {
-      await api.place(v.root, parent, chosen.id);
+      await api.place(this.treeOf(parent), parent, chosen.id);
       toast(h('span', null, h('strong', null, chosen.title || 'Untitled'), ' is in this space now: everyone who can open the space can open it.'), { kind: 'success', timeout: 5000 });
       await this.refresh();
     } catch (e) { toast(errorMessage(e), { kind: 'error' }); }

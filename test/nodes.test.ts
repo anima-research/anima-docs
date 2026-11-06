@@ -235,3 +235,87 @@ test('navigation trees: derived subpages, sticky exclusion, placed-only pages, c
   assert.equal(trees.isRoot(paper.id), false);
   assert.ok(docs.get(appendix.id));
 });
+
+test('a space inside a space: the outer space shows its pages, and access to them is additive', () => {
+  const { docs, trees, actor } = setup();
+  const o = actor('O'), outerOnly = actor('OuterOnly'), innerOnly = actor('InnerOnly'), both = actor('Both'), stranger = actor('Stranger');
+  const outer = docs.create(o, 'Outer', 'o'), inner = docs.create(o, 'Inner', 'i');
+  const page = docs.create(o, 'Page', 'p'), deep = docs.create(o, 'Deep', 'd');
+  trees.create(outer.id, o);
+  trees.create(inner.id, o);
+  trees.place(inner.id, inner.id, page.id, o);
+  trees.place(inner.id, page.id, deep.id, o);
+  trees.place(outer.id, outer.id, inner.id, o);
+  docs.share(outer.id, o, outerOnly.sub, 'viewer');
+  docs.share(inner.id, o, innerOnly.sub, 'commenter');
+  docs.share(outer.id, o, both.sub, 'editor');
+  docs.share(inner.id, o, both.sub, 'viewer');
+
+  // Additive: either space is enough, and holding both gives the higher role.
+  for (const id of [page.id, deep.id]) {
+    assert.equal(docs.role(id, outerOnly), 'viewer');
+    assert.equal(docs.role(id, innerOnly), 'commenter');
+    assert.equal(docs.role(id, both), 'editor');
+    assert.equal(docs.role(id, stranger), null);
+  }
+  // The inner space's reader gets nothing above it.
+  assert.equal(docs.role(outer.id, innerOnly), null);
+
+  // The outer space's navigation shows the inner space's pages, whoever reads it; each row names its own tree.
+  const pairs = (v: { placements: { parent: string; child: string }[] }) => v.placements.map((p) => `${p.parent}>${p.child}`).sort();
+  const want = [`${outer.id}>${inner.id}`, `${inner.id}>${page.id}`, `${page.id}>${deep.id}`].sort();
+  const seen = trees.view(outer.id, outerOnly);
+  assert.deepEqual(pairs(trees.view(outer.id, o)), want);
+  assert.deepEqual(pairs(seen), want);
+  assert.equal(seen.placements.find((p) => p.child === page.id)?.tree, inner.id);
+  assert.equal(seen.placements.find((p) => p.child === inner.id)?.tree, outer.id);
+  assert.deepEqual(seen.nodes.filter((n) => n.space).map((n) => n.id).sort(), [outer.id, inner.id].sort());
+  // The inner space on its own is unchanged, and keeps the outer space out.
+  assert.deepEqual(pairs(trees.view(inner.id, o)), [`${inner.id}>${page.id}`, `${page.id}>${deep.id}`].sort());
+
+  // Subpages footer and realtime fan-out reach through too.
+  assert.deepEqual(trees.subpagesNotInline(outer.id, inner.id), [page.id]);
+  assert.deepEqual(trees.subpagesNotInline(outer.id, page.id), [deep.id]);
+  assert.ok(trees.members(outer.id).includes(deep.id));
+  assert.ok(!trees.members(inner.id).includes(outer.id));
+  const heard: string[] = [];
+  trees.on('changed', (e: { tree: string }) => heard.push(e.tree));
+  const later = docs.create(o, 'Later', 'l');
+  trees.place(inner.id, inner.id, later.id, o);
+  assert.deepEqual(heard.sort(), [outer.id, inner.id].sort());
+  trees.unplace(inner.id, inner.id, later.id, o);
+
+  // Losing one route leaves the other.
+  docs.share(outer.id, o, both.sub, 'none');
+  assert.equal(docs.role(page.id, both), 'viewer');
+  trees.unplace(outer.id, outer.id, inner.id, o);
+  assert.equal(docs.role(page.id, outerOnly), null);
+  assert.equal(docs.role(page.id, innerOnly), 'commenter');
+  assert.ok(!trees.view(outer.id, o).nodes.some((n) => n.id === page.id));
+});
+
+test('a space inside a space: mounted subpages show once, and two spaces holding each other do not loop', () => {
+  const { docs, trees, actor } = setup();
+  const o = actor('O');
+  const mounted = docs.create(o, 'Mounted', 'm');
+  const a = docs.create(o, 'A', 'a'), b = docs.create(o, 'B', `b\n${marker(mounted.id)}\n`), own = docs.create(o, 'Own', 'x');
+  trees.create(a.id, o);
+  trees.create(b.id, o);
+  trees.place(b.id, b.id, own.id, o);
+  // Placing derives a copy of B's mounted page into A: only B's own placement shows.
+  trees.place(a.id, a.id, b.id, o);
+  const v = trees.view(a.id, o);
+  assert.equal(v.placements.filter((p) => p.child === mounted.id).length, 1);
+  assert.equal(v.placements.find((p) => p.child === mounted.id)?.tree, b.id);
+  // Taken out of B, it stays out, even though A still holds a derived copy.
+  trees.unplace(b.id, b.id, mounted.id, o);
+  assert.ok(!trees.view(a.id, o).nodes.some((n) => n.id === mounted.id));
+  // Each tree alone is fine with this; together they hold each other.
+  assert.equal(trees.place(b.id, b.id, a.id, o), true);
+  const fromA = trees.view(a.id, o), fromB = trees.view(b.id, o);
+  assert.ok(!fromA.placements.some((p) => p.child === a.id));
+  assert.ok(!fromB.placements.some((p) => p.child === b.id));
+  assert.ok(fromA.nodes.some((n) => n.id === own.id));
+  assert.ok(fromB.nodes.some((n) => n.id === own.id));
+  assert.deepEqual(trees.members(a.id).sort(), trees.members(b.id).sort());
+});

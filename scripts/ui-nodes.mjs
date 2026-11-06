@@ -897,6 +897,63 @@ try {
     assert(await alice.evaluate((el) => el.isConnected, navEl), 'page was reloaded instead of switched');
   });
 
+  await step('a space inside a space: the outer space shows its pages, new subpages go into the inner space, and either space’s reader can open them', async () => {
+    const mk = async (title) => (await api(alice, 'POST', '/api/docs', { title, content: `# ${title}\n\n` })).json;
+    const outer = await mk('Outer space'), inner = await mk('Inner space'), page = await mk('Inner page'), later = await mk('Later page');
+    for (const root of [outer.id, inner.id]) assert((await api(alice, 'POST', '/api/trees', { root })).status === 201, 'space not created');
+    assert((await api(alice, 'POST', `/api/trees/${inner.id}/place`, { parent: inner.id, child: page.id })).status === 200, 'page not placed');
+    assert((await api(alice, 'POST', `/api/trees/${outer.id}/place`, { parent: outer.id, child: inner.id })).status === 200, 'inner space not placed');
+    const bobSub = (await api(bob, 'GET', '/api/me')).json.you.sub;
+    assert((await api(alice, 'POST', `/api/docs/${outer.id}/share`, { who: bobSub, role: 'viewer' })).status === 200, 'share');
+
+    await openDoc(alice, outer.id, outer.id);
+    if (!(await alice.evaluate(() => document.querySelector('.doc-app').classList.contains('nav-open')))) await alice.locator('.nav-btn').click();
+    const row = (t) => alice.locator('.doc-nav .nav-pages .nav-row', { hasText: t });
+    await row('Inner page').waitFor({ timeout: 8000 });
+    assert((await row('Inner space').getAttribute('aria-level')) === '2', 'the inner space should sit under the outer one');
+    assert((await row('Inner page').getAttribute('aria-level')) === '3', 'the inner page should sit under the inner space');
+
+    // A change made in the inner space reaches a page open on the outer one.
+    assert((await api(alice, 'POST', `/api/trees/${inner.id}/place`, { parent: inner.id, child: later.id })).status === 200, 'later page not placed');
+    await row('Later page').waitFor({ timeout: 8000 });
+
+    // New subpage on a row of the inner space belongs to the inner space, and shows from both.
+    await row('Inner page').hover();
+    await row('Inner page').locator('.nav-add').click();
+    await alice.locator('dialog.dialog input').fill('Grandchild');
+    await alice.locator('dialog.dialog button', { hasText: 'Create' }).click();
+    await row('Grandchild').waitFor({ timeout: 8000 });
+    assert((await row('Grandchild').getAttribute('aria-level')) === '4', 'the grandchild should sit under the inner page');
+    await alice.waitForURL(/\?tree=/);
+    assert(alice.url().includes(`tree=${outer.id}`), 'creating a subpage left the outer space');
+    const own = (await api(alice, 'GET', `/api/trees/${inner.id}`)).json;
+    assert(own.nodes.some((n) => n.title === 'Grandchild'), 'the new subpage is not in the inner space');
+    assert((await api(alice, 'GET', `/api/trees/${outer.id}`)).json.placements.find((x) => own.nodes.find((n) => n.title === 'Grandchild').id === x.child).tree === inner.id, 'filed in the wrong tree');
+
+    // Breadcrumb and Subpages footer read through the nesting.
+    await row('Inner space').click();
+    await alice.locator('.editor-page .subpages a', { hasText: 'Inner page' }).waitFor({ timeout: 8000 });
+    await row('Grandchild').click();
+    await alice.locator('.doc-crumbs a.crumb', { hasText: 'Inner space' }).waitFor({ timeout: 8000 });
+    assert(await alice.locator('.doc-crumbs a.crumb', { hasText: 'Outer space' }).count() === 1, 'the breadcrumb lost the outer space');
+
+    // Moving a page across the boundary is refused with a reason, and nothing changes.
+    const before = JSON.stringify((await api(alice, 'GET', `/api/trees/${outer.id}`)).json.placements);
+    await row('Later page').dragTo(row('Outer space'));
+    await alice.locator('.toast', { hasText: 'another space' }).waitFor({ timeout: 8000 });
+    assert(JSON.stringify((await api(alice, 'GET', `/api/trees/${outer.id}`)).json.placements) === before, 'the refused move changed the tree');
+
+    // Agents see the same shape, and which rows are spaces (they arrange a page through its own tree).
+    const told = JSON.stringify((await api(alice, 'POST', '/api/operations/tree', { navigation: outer.id })).json);
+    assert(told.includes('Grandchild') && told.includes('[space]'), `tree tool: ${told.slice(0, 300)}`);
+
+    // Bob holds only the outer space: he sees the inner pages and can open them, read-only.
+    await openDoc(bob, page.id, outer.id);
+    if (!(await bob.evaluate(() => document.querySelector('.doc-app').classList.contains('nav-open')))) await bob.locator('.nav-btn').click();
+    await bob.locator('.doc-nav .nav-pages .nav-row', { hasText: 'Grandchild' }).waitFor({ timeout: 8000 });
+    assert((await api(bob, 'GET', `/api/docs/${page.id}`)).json.role === 'viewer', 'Bob should read the inner page through the outer space');
+  });
+
   await step('home lists the tree', async () => {
     await alice.goto(`${ORIGIN}/`);
     await alice.locator('.home-trees a.tree-card', { hasText: 'Paper' }).waitFor({ timeout: 8000 });

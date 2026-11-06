@@ -51,7 +51,7 @@ export interface TreeView {
   title: string;
   role: Role;
   publish?: PublishSettings;
-  nodes: { id: string; title: string; section: boolean; type: string; role: Role }[];
+  nodes: { id: string; title: string; section: boolean; type: string; role: Role; /** Itself the root of a space. */ space: boolean }[];
   placements: Placement[];
 }
 
@@ -213,34 +213,58 @@ export class Trees extends EventEmitter {
     return out;
   }
 
-  /** The whole tree, limited to nodes the actor can open. */
+  /** `root` and the spaces placed inside it, at any depth. */
+  private within(root: string): string[] {
+    const out = new Set<string>([root]);
+    for (const t of out) {
+      for (const r of this.db.prepare('SELECT DISTINCT p.child_id AS id FROM placements p JOIN trees t ON t.root_id = p.child_id WHERE p.tree_id = ?').all(t) as { id: string }[]) out.add(r.id);
+    }
+    return [...out];
+  }
+
+  /**
+   * The whole tree, limited to nodes the actor can open. A space placed inside shows its pages
+   * here too, as it arranges them itself; each placement still names the tree that holds it.
+   */
   view(root: string, actor: Pick<Actor, 'sub' | 'admin'>): TreeView {
     const { doc, role } = this.docs.require(root, actor, 'viewer');
     if (!this.isRoot(root)) throw new Fault(404, `“${doc.title}” is not a tree root.`);
     const nodes: TreeView['nodes'] = [];
     const placements: Placement[] = [];
     const seen = new Set<string>();
-    const add = (id: string, r: Role) => { const d = this.docs.get(id); if (d && !seen.has(id)) { seen.add(id); nodes.push({ id, title: d.title, section: d.title === '', type: d.type, role: r }); } };
+    const walked = new Set<string>(), shown = new Set<string>();
+    const add = (id: string, r: Role) => { const d = this.docs.get(id); if (d && !seen.has(id)) { seen.add(id); nodes.push({ id, title: d.title, section: d.title === '', type: d.type, role: r, space: this.isRoot(id) }); } };
     add(root, role);
-    const walk = (parent: string, depth: number) => {
-      if (depth > 24) return;
-      for (const p of this.children(root, parent)) {
+    const walk = (tree: string, parent: string, path: string[]) => {
+      const key = `${tree}\0${parent}`;
+      if (path.length > 24 || walked.has(key)) return;
+      walked.add(key);
+      const nested = parent !== tree && this.isRoot(parent);
+      if (nested) walk(parent, parent, path);
+      for (const p of this.children(tree, parent)) {
+        // Copies derived from the inner space's mounts: its own arrangement, just walked, decides those.
+        if (nested && p.derived) continue;
+        // Two spaces can hold each other; each tree alone cannot loop.
+        if (path.includes(p.child)) continue;
+        const pair = `${p.parent}\0${p.child}`;
         const r = this.docs.role(p.child, actor);
-        if (!r || !this.docs.get(p.child)) continue;
+        if (shown.has(pair) || !r || !this.docs.get(p.child)) continue;
+        shown.add(pair);
         placements.push(p);
-        const fresh = !seen.has(p.child);
         add(p.child, r);
-        if (fresh) walk(p.child, depth + 1);
+        walk(tree, p.child, [...path, p.child]);
       }
     };
-    walk(root, 0);
+    walk(root, root, [root]);
     return { root, title: doc.title, role, nodes, placements, publish: this.publishSettings(root) ?? undefined };
   }
 
   /** Placed children of `node` in `tree` that are not mounted inline in its body (shown as a Subpages footer). */
   subpagesNotInline(tree: string, node: string): string[] {
     const inline = new Set(this.nodes.namedMountedChildren(node));
-    return this.children(tree, node).map((p) => p.child).filter((c) => !inline.has(c));
+    const out = new Set<string>();
+    for (const t of this.within(tree)) for (const p of this.children(t, node)) if (!inline.has(p.child)) out.add(p.child);
+    return [...out];
   }
 
   /** Named nodes the actor owns that are in no tree and have no parent. */
@@ -434,14 +458,24 @@ export class Trees extends EventEmitter {
     for (const t of trees) this.changed(t);
   }
 
+  /** A space placed inside others shows in their navigation too, so they change with it. */
   private changed(tree: string) {
-    try { this.emit('changed', { tree }); } catch (e) { console.error('[trees] changed listener failed:', e); }
+    const all = new Set<string>([tree]);
+    for (const t of all) {
+      for (const r of this.db.prepare('SELECT DISTINCT tree_id AS id FROM placements WHERE child_id = ?').all(t) as { id: string }[]) all.add(r.id);
+    }
+    for (const t of all) {
+      try { this.emit('changed', { tree: t }); } catch (e) { console.error('[trees] changed listener failed:', e); }
+    }
   }
 
   /** Every node in the tree (for realtime fan-out). */
   members(tree: string): string[] {
-    const set = new Set<string>([tree]);
-    for (const r of this.db.prepare('SELECT child_id FROM placements WHERE tree_id = ?').all(tree) as { child_id: string }[]) set.add(r.child_id);
+    const set = new Set<string>();
+    for (const t of this.within(tree)) {
+      set.add(t);
+      for (const r of this.db.prepare('SELECT child_id FROM placements WHERE tree_id = ?').all(t) as { child_id: string }[]) set.add(r.child_id);
+    }
     return [...set];
   }
 }

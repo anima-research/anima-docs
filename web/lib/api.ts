@@ -56,7 +56,7 @@ export interface TreeView {
   publish?: PublishSettings;
   /** Where the wiki lives when published. */
   url?: string | null;
-  nodes: { id: string; title: string; section: boolean; type: NodeType; role: Role }[];
+  nodes: { id: string; title: string; section: boolean; type: NodeType; role: Role; space: boolean }[];
   placements: Placement[];
 }
 
