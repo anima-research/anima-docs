@@ -272,17 +272,29 @@ export class Documents extends EventEmitter {
     if (doc) { doc.destroy(); this.live.delete(docId); }
   }
 
-  list(actor: Actor, opts: { query?: string; filter?: 'all' | 'owned' | 'shared'; limit?: number; sections?: boolean } = {}): (DocMeta & { role: Role })[] {
+  /**
+   * Documents the actor can open. `reached` adds what they open through a parent (a space's pages,
+   * what a document mounts): searching always does, browsing does not, since those live in their
+   * space's panel and would otherwise flood everyone's list. Roles below stay the only authority.
+   */
+  list(actor: Actor, opts: { query?: string; filter?: 'all' | 'owned' | 'shared'; limit?: number; sections?: boolean; reached?: boolean } = {}): (DocMeta & { role: Role })[] {
     const q = opts.query ? `%${opts.query.replace(/[%_]/g, '')}%` : '%';
-    const rows = this.db.prepare(`
-      SELECT d.* FROM documents d
-      WHERE d.deleted_at IS NULL AND d.title LIKE @q ${opts.sections ? '' : "AND d.title != ''"}
-        AND (d.owner_sub = @sub OR (@guest = 0 AND d.general_access != 'restricted')
+    const reached = opts.reached ?? !!opts.query;
+    const given = `d.owner_sub = @sub OR (@guest = 0 AND d.general_access != 'restricted')
              OR EXISTS (SELECT 1 FROM doc_acl a WHERE a.doc_id = d.id AND a.sub = @sub)
              OR EXISTS (SELECT 1 FROM doc_acl a JOIN group_members m ON m.group_sub = a.sub WHERE a.doc_id = d.id AND m.sub = @sub)
              OR EXISTS (SELECT 1 FROM link_holders h JOIN doc_links l ON l.id = h.link_id
                         WHERE h.doc_id = d.id AND h.sub = @sub AND l.revoked_at IS NULL AND (l.expires_at IS NULL OR l.expires_at > @now)
-                          AND (l.audience != 'group' OR EXISTS (SELECT 1 FROM group_members gm WHERE gm.group_sub = l.group_sub AND gm.sub = @sub))))
+                          AND (l.audience != 'group' OR EXISTS (SELECT 1 FROM group_members gm WHERE gm.group_sub = l.group_sub AND gm.sub = @sub)))`;
+    const rows = this.db.prepare(`
+      ${reached ? `WITH RECURSIVE reach(id) AS (
+        SELECT d.id FROM documents d WHERE d.deleted_at IS NULL AND (${given})
+        UNION SELECT m.child_id FROM mounts m JOIN reach r ON m.parent_id = r.id
+        UNION SELECT p.child_id FROM placements p JOIN reach r ON p.parent_id = r.id
+      )` : ''}
+      SELECT d.* FROM documents d
+      WHERE d.deleted_at IS NULL AND d.title LIKE @q ${opts.sections ? '' : "AND d.title != ''"}
+        AND ${reached ? 'd.id IN (SELECT id FROM reach)' : `(${given})`}
       ORDER BY d.updated_at DESC LIMIT @limit
     `).all({ q, sub: actor.sub, guest: isGuest(actor.sub) ? 1 : 0, now: Date.now(), limit: Math.min(opts.limit ?? 100, 500) }) as DocRow[];
     return rows.map(meta)
@@ -315,7 +327,7 @@ export class Documents extends EventEmitter {
     const needle = query.toLowerCase();
     if (!needle.trim()) return [];
     const out: { doc: DocMeta; line: number; snippet: string }[] = [];
-    for (const d of this.list(actor, { limit: 500 })) {
+    for (const d of this.list(actor, { limit: 500, reached: true, sections: true })) {
       const text = this.text(d.id);
       const lines = text.split('\n');
       for (let i = 0; i < lines.length && out.length < limit; i++) {

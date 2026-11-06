@@ -952,6 +952,13 @@ try {
     if (!(await bob.evaluate(() => document.querySelector('.doc-app').classList.contains('nav-open')))) await bob.locator('.nav-btn').click();
     await bob.locator('.doc-nav .nav-pages .nav-row', { hasText: 'Grandchild' }).waitFor({ timeout: 8000 });
     assert((await api(bob, 'GET', `/api/docs/${page.id}`)).json.role === 'viewer', 'Bob should read the inner page through the outer space');
+
+    // Home: searching finds it for him; his plain list stays to what was given to him.
+    await bob.goto(`${ORIGIN}/`);
+    await bob.locator('a.doc-row', { hasText: 'Outer space' }).waitFor({ timeout: 8000 });
+    assert((await bob.locator('a.doc-row', { hasText: 'Inner page' }).count()) === 0, 'the inner page should not crowd Home');
+    await bob.locator('.search-input').fill('Inner page');
+    await bob.locator('a.doc-row', { hasText: 'Inner page' }).waitFor({ timeout: 8000 });
   });
 
   await step('home lists the tree', async () => {

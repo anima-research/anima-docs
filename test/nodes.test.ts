@@ -319,3 +319,41 @@ test('a space inside a space: mounted subpages show once, and two spaces holding
   assert.ok(fromB.nodes.some((n) => n.id === own.id));
   assert.deepEqual(trees.members(a.id).sort(), trees.members(b.id).sort());
 });
+
+test('searching finds what you can open through a space; browsing stays to what was given to you', () => {
+  const { docs, trees, actor } = setup();
+  const o = actor('O'), reader = actor('R'), stranger = actor('S');
+  const outer = docs.create(o, 'Outer', 'o'), inner = docs.create(o, 'Inner', 'i');
+  const sec = docs.createNode(o, { title: '', content: 'walrus inside a section' });
+  const page = docs.create(o, 'Walrus page', `penguin on a page\n${marker(sec.id)}\n`);
+  const gone = docs.create(o, 'Walrus gone', 'penguin gone');
+  trees.create(outer.id, o);
+  trees.create(inner.id, o);
+  trees.place(inner.id, inner.id, page.id, o);
+  trees.place(inner.id, inner.id, gone.id, o);
+  trees.place(outer.id, outer.id, inner.id, o);
+  docs.share(outer.id, o, reader.sub, 'viewer');
+  docs.remove(gone.id, o);
+  const titled = (a: ReturnType<typeof actor>, query?: string) => docs.list(a, { query, limit: 500 }).map((d) => d.id);
+  const found = (a: ReturnType<typeof actor>, q: string) => docs.search(a, q).map((h) => h.doc.id);
+
+  // Browsing: only what was given to you.
+  assert.deepEqual(titled(reader), [outer.id]);
+  // By title and by text, two levels down, sections included, deleted pages not.
+  assert.deepEqual(titled(reader, 'walrus'), [page.id]);
+  assert.deepEqual(found(reader, 'penguin'), [page.id]);
+  assert.deepEqual(found(reader, 'walrus inside'), [sec.id]);
+  // Each page once, for the owner too.
+  assert.deepEqual(titled(o, 'walrus'), [page.id]);
+  assert.deepEqual(found(o, 'penguin'), [page.id]);
+  // The people you may name stay as they were: being able to find a page does not widen them.
+  const peer = actor('Peer');
+  docs.share(page.id, o, peer.sub, 'viewer');
+  assert.ok(!docs.collaborators(reader).has(peer.sub));
+  // Nothing for anyone without access, and nothing once access goes.
+  assert.deepEqual(titled(stranger, 'walrus'), []);
+  assert.deepEqual(found(stranger, 'penguin'), []);
+  docs.share(outer.id, o, reader.sub, 'none');
+  assert.deepEqual(titled(reader, 'walrus'), []);
+  assert.deepEqual(found(reader, 'penguin'), []);
+});

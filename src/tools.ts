@@ -385,7 +385,7 @@ export const TOOLS: ToolDef[] = [
         return text(hits.length ? hits.map(([n, l]) => `${a.document}:${n}  ${clip(l, 240)}`).join('\n') : 'No matches.');
       }
       const hits = app.docs.search(actor, q, a.limit ?? 30);
-      return text(hits.length ? hits.map((h) => `${h.doc.id}:${h.line}  “${h.doc.title}”  ${h.snippet}`).join('\n') : 'No matches.');
+      return text(hits.length ? hits.map((h) => `${h.doc.id}:${h.line}  ${h.doc.title ? `“${h.doc.title}”` : '(section)'}  ${h.snippet}`).join('\n') : 'No matches.');
     },
   },
   {
