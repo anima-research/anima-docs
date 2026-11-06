@@ -172,6 +172,15 @@ export class Trees extends EventEmitter {
     return (this.db.prepare('SELECT * FROM placements WHERE tree_id = ? AND parent_id = ? ORDER BY ord, child_id').all(tree, parent) as PRow[]).map(fromRow);
   }
 
+  /**
+   * The pages under `parent` as `tree` shows them: a space placed there brings its own, as it arranges
+   * them. Copies derived into `tree` from that space's mounts are left out, so its arrangement decides.
+   */
+  childrenIn(tree: string, parent: string): Placement[] {
+    if (parent === tree || !this.isRoot(parent)) return this.children(tree, parent);
+    return [...this.children(parent, parent), ...this.children(tree, parent).filter((p) => !p.derived)];
+  }
+
   placementsOf(child: string): Placement[] {
     return (this.db.prepare('SELECT * FROM placements WHERE child_id = ?').all(child) as PRow[]).map(fromRow);
   }
@@ -239,11 +248,7 @@ export class Trees extends EventEmitter {
       const key = `${tree}\0${parent}`;
       if (path.length > 24 || walked.has(key)) return;
       walked.add(key);
-      const nested = parent !== tree && this.isRoot(parent);
-      if (nested) walk(parent, parent, path);
-      for (const p of this.children(tree, parent)) {
-        // Copies derived from the inner space's mounts: its own arrangement, just walked, decides those.
-        if (nested && p.derived) continue;
+      for (const p of this.childrenIn(tree, parent)) {
         // Two spaces can hold each other; each tree alone cannot loop.
         if (path.includes(p.child)) continue;
         const pair = `${p.parent}\0${p.child}`;
@@ -252,7 +257,7 @@ export class Trees extends EventEmitter {
         shown.add(pair);
         placements.push(p);
         add(p.child, r);
-        walk(tree, p.child, [...path, p.child]);
+        walk(p.tree, p.child, [...path, p.child]);
       }
     };
     walk(root, root, [root]);

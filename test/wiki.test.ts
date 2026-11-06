@@ -275,3 +275,29 @@ test('media embeds: uploaded video and audio become players, YouTube and Vimeo a
   assert.ok(!/<iframe[^>]*evil\.example/.test(home.text) && home.text.includes('<img src="https://evil.example/embed/x"'), 'an unknown host is not framed (it stays an image)');
   assert.equal((await fetch(`${S.base}${mp4.url}`)).status, 200, 'media of a public wiki is public');
 });
+
+test('a published wiki includes the pages of a space placed inside it, and stops when it is taken out', async () => {
+  const nia = await signIn('Nia');
+  const mk = async (title: string, content: string) => (await api(nia, 'POST', '/api/docs', { title, content })).json;
+  const outer = await mk('Outer wiki', '# Outer wiki\n\nFront page.\n');
+  const inner = await mk('Inner notes', '# Inner notes\n\nInner front.\n');
+  const deep = await mk('Deep field notes', '# Deep field notes\n\nKelp forests hold carbon.\n');
+  const other = await mk('Other private page', 'stays out');
+  for (const root of [outer.id, inner.id]) assert.equal((await api(nia, 'POST', '/api/trees', { root })).status, 201);
+  assert.equal((await api(nia, 'POST', `/api/trees/${inner.id}/place`, { parent: inner.id, child: deep.id })).status, 200);
+  assert.equal((await api(nia, 'POST', `/api/trees/${outer.id}/place`, { parent: outer.id, child: inner.id })).status, 200);
+  assert.equal((await api(nia, 'PATCH', `/api/trees/${outer.id}/publish`, { published: 'public', slug: 'nested-wiki' })).status, 200);
+
+  const front = await api(null, 'GET', '/w/nested-wiki/');
+  assert.equal(front.status, 200);
+  assert.ok(front.text.includes('Deep field notes'), 'the nested page is missing from the wiki navigation');
+  const page = await api(null, 'GET', '/w/nested-wiki/deep-field-notes');
+  assert.equal(page.status, 200);
+  assert.ok(page.text.includes('Kelp forests hold carbon'));
+  assert.ok(!front.text.includes('Other private page'));
+  // The inner space itself stays unpublished; only the outer wiki carries it.
+  assert.equal((await api(null, 'GET', `/api/trees/${inner.id}`)).status, 401);
+
+  assert.equal((await api(nia, 'POST', `/api/trees/${outer.id}/unplace`, { parent: outer.id, child: inner.id })).status, 200);
+  assert.equal((await api(null, 'GET', '/w/nested-wiki/deep-field-notes')).status, 404);
+});

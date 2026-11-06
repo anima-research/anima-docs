@@ -56,7 +56,7 @@ export class Wiki {
     const out: WikiPage[] = [];
     const used = new Set<string>(['']);
     const seen = new Set<string>();
-    const add = (id: string, parent: string | null, depth: number) => {
+    const add = (id: string, parent: string | null, depth: number, tree: string) => {
       const d = this.app.docs.get(id);
       if (!d || seen.has(id)) return;
       seen.add(id);
@@ -64,9 +64,9 @@ export class Wiki {
       if (depth > 0) { let i = 1; const base = slug; while (used.has(slug)) slug = `${base}-${++i}`; }
       used.add(slug);
       out.push({ id, title: d.title || 'Untitled', slug, parent, depth });
-      for (const p of this.app.trees.children(root, id)) add(p.child, id, depth + 1);
+      for (const p of this.app.trees.childrenIn(tree, id)) add(p.child, id, depth + 1, p.tree);
     };
-    add(root, null, 0);
+    add(root, null, 0, root);
     return out;
   }
 
