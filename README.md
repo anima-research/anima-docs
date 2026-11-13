@@ -300,6 +300,7 @@ npm run build        # web bundle + server
 npm test             # unit, protocol, realtime and HTTP tests
 AF_PATH=/path/to/agent-framework npm test   # also runs test/host-e2e.test.ts against the real host
 node scripts/ui-smoke.mjs                   # headless-browser smoke test of the web app (Playwright; own server on :7366)
+node scripts/ui-signin.mjs                  # Archipelago sign-in in a popup, and in the same window when popups are blocked (:7369)
 ```
 
 The web app (`web/`, bundled by esbuild into `public/app.js`) is a CodeMirror 6 + Yjs editor with:

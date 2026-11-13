@@ -2,7 +2,8 @@
 
 import { api, isGuestMe, setUnauthorizedHandler, type Config, type Me } from './lib/api';
 import { h } from './lib/dom';
-import { installTooltips, emptyState, errorMessage } from './lib/ui';
+import { installTooltips, emptyState, errorMessage, toast } from './lib/ui';
+import { handOverFromPopup, signInInPopup } from './lib/signin-popup';
 import { icon } from './lib/icons';
 import { linkKeyFor, setSessionMe, setSignInHandler, startSignIn } from './lib/session';
 import { navigate, startRouter } from './router';
@@ -87,7 +88,12 @@ function renderMembersOnly(guest: Me) {
 /** Sign in, then come back to `returnTo`: Archipelago when configured, else the development form. */
 function signInReturning(returnTo: string) {
   rememberReturn(returnTo);
-  if (config.issuer) { location.assign('/auth/login'); return; }
+  if (config.issuer) {
+    if (!signInInPopup(returnTo)) { location.assign('/auth/login'); return; }
+    takeReturn(); // the popup took its copy when it opened; this page stays here and needs none
+    toast('Sign in in the window that just opened. This page carries on when you’re done.');
+    return;
+  }
   unmount();
   renderSignIn(root, config, { onSignedIn: signedIn });
 }
@@ -114,7 +120,11 @@ async function boot() {
   if (location.pathname === '/auth/callback') {
     root.classList.remove('boot');
     const r = await handleCallback(root);
-    if (r.me) { setMe(r.me); history.replaceState(null, '', takeReturn()); }
+    if (r.me) {
+      if (r.popup) await handOverFromPopup(root); // closes this window; it goes on only if the browser keeps it open
+      setMe(r.me);
+      history.replaceState(null, '', takeReturn());
+    }
     else {
       history.replaceState(null, '', '/');
       renderSignIn(root, config, { error: r.error, onSignedIn: signedIn });

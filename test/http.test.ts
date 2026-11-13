@@ -50,6 +50,32 @@ test('login redirects to the issuer for this audience', async () => {
   assert.match(r.headers.get('location') ?? '', /^https:\/\/test\.local\/login\?audience=docs&state=/);
 });
 
+test('a sign-in started in a popup says so when it finishes; one started in the page does not', async () => {
+  const start = async (query: string) => {
+    const r = await fetch(`${S.base}/auth/login${query}`, { redirect: 'manual' });
+    const login = decodeURIComponent(/docs_login=([^;]+)/.exec(r.headers.get('set-cookie') ?? '')![1]);
+    const state = new URL(r.headers.get('location')!).searchParams.get('state')!;
+    return { login, state };
+  };
+  const finish = (login: string, state: string, name: string) => fetch(`${S.base}/auth/exchange`, {
+    method: 'POST', headers: H({ Cookie: `docs_login=${encodeURIComponent(login)}` }), body: JSON.stringify({ token: S.iss.mint(name, 'human'), state }),
+  });
+
+  const popup = await start('?popup=1');
+  assert.equal(popup.login, `p.${popup.state}`, 'the cookie marks the popup; the issuer sees the bare state');
+  // the state the issuer returns must still be the one this browser started with
+  assert.equal((await finish(popup.login, 'someone-elses', 'Pop')).status, 401);
+  const ok = await finish(popup.login, popup.state, 'Pop');
+  assert.equal(ok.status, 200);
+  assert.equal((await ok.json()).popup, true);
+
+  const page = await start('');
+  assert.equal(page.login, page.state);
+  const plain = await finish(page.login, page.state, 'Page');
+  assert.equal(plain.status, 200);
+  assert.equal('popup' in (await plain.json()), false);
+});
+
 test('cookie mutations need our Origin; the dev issuer is off unless configured', async () => {
   const cookie = await signIn('Ann');
   const cross = await fetch(`${S.base}/api/docs`, { method: 'POST', headers: { Cookie: cookie, Origin: 'https://evil.example', 'Content-Type': 'application/json' }, body: '{"title":"x"}' });

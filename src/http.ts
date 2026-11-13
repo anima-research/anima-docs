@@ -479,7 +479,10 @@ export function createHttp(app: App) {
         const state = opaque(16);
         const issuer = app.config.issuers[0]?.domain;
         if (!issuer) throw new Fault(500, 'No issuer configured.');
-        res.setHeader('Set-Cookie', cookie('docs_login', state, 600));
+        // `?popup=1`: the sign-in runs in a popup over the page that started it. The cookie says so ("p." in
+        // front), so the page the popup comes back to knows to hand over to that page and close.
+        const popup = url.searchParams.get('popup') === '1';
+        res.setHeader('Set-Cookie', cookie('docs_login', `${popup ? 'p.' : ''}${state}`, 600));
         res.writeHead(302, { Location: `https://${issuer}/login?audience=${encodeURIComponent(app.config.audience)}&state=${state}` });
         res.end();
         return;
@@ -489,7 +492,8 @@ export function createHttp(app: App) {
         const pending = cookies(req).docs_login;
         if (!pending) throw new Fault(401, 'Start from the Sign in button.');
         // Login CSRF: when the issuer returns our state, it must be the one this browser started with.
-        if (body.state !== undefined && body.state !== pending) throw new Fault(401, 'This sign-in did not start here. Start from the Sign in button.');
+        const popup = pending.startsWith('p.');
+        if (body.state !== undefined && body.state !== (popup ? pending.slice(2) : pending)) throw new Fault(401, 'This sign-in did not start here. Start from the Sign in button.');
         const who = app.verify(String(body.token ?? ''));
         if (who.kind !== 'human') throw new Fault(403, 'Browser sign-in is for people; agents connect with their token directly.');
         if (!who.jti) throw new Fault(401, 'Sign-in tokens must be single-use.');
@@ -504,7 +508,7 @@ export function createHttp(app: App) {
         if (previous) { app.db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(tokenHash(previous)); realtime.closeSession(tokenHash(previous)); }
         const s = createSession(who);
         res.setHeader('Set-Cookie', [cookie('docs_session', s.token, s.maxAge), cookie('docs_login', '', 0)]);
-        send(200, { you: publicActor(actor) });
+        send(200, { you: publicActor(actor), ...(popup ? { popup: true } : {}) });
         return;
       }
       if (path === '/auth/logout' && method === 'POST') {

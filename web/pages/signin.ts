@@ -4,6 +4,7 @@ import { api, type Config, type Me } from '../lib/api';
 import { h } from '../lib/dom';
 import { icon, logo } from '../lib/icons';
 import { errorMessage, spinner } from '../lib/ui';
+import { signInInPopup } from '../lib/signin-popup';
 
 const RETURN_KEY = 'docs.returnTo';
 
@@ -22,8 +23,16 @@ export function renderSignIn(root: HTMLElement, config: Config, opts: { error?: 
 
   const parts: (HTMLElement | null)[] = [];
   if (config.issuer) {
-    parts.push(h('a.btn.primary.lg.block', { href: '/auth/login', onclick: () => rememberReturn(location.pathname) }, icon('shield', 18), 'Sign in with Archipelago'),
-      h('p.signin-fine', null, 'You’ll confirm who you are on ', h('strong', null, config.issuer), ', then come right back.'));
+    const fine = h('p.signin-fine', null, 'You’ll confirm who you are on ', h('strong', null, config.issuer), ', then come right back.');
+    // In a popup, so this page stays where it is; a browser that blocks it follows the link in this window.
+    const start = (e: Event) => {
+      rememberReturn(location.pathname);
+      if (!signInInPopup(location.pathname)) return;
+      e.preventDefault();
+      takeReturn(); // the popup took its copy when it opened
+      fine.textContent = 'Sign in in the window that just opened. This page carries on when you’re done.';
+    };
+    parts.push(h('a.btn.primary.lg.block', { href: '/auth/login', onclick: start }, icon('shield', 18), 'Sign in with Archipelago'), fine);
   }
   if (config.dev) {
     const name = h('input.input.lg', { type: 'text', name: 'name', placeholder: 'Your name', autocomplete: 'name', required: true, maxlength: '60', 'aria-label': 'Your name', autofocus: true });
@@ -73,7 +82,7 @@ export function renderSignIn(root: HTMLElement, config: Config, opts: { error?: 
 }
 
 /** /auth/callback#token=aid1… → exchange for a session, then leave the URL clean. */
-export async function handleCallback(root: HTMLElement): Promise<{ me: Me | null; error?: string }> {
+export async function handleCallback(root: HTMLElement): Promise<{ me: Me | null; popup?: boolean; error?: string }> {
   const params = new URLSearchParams(location.hash.replace(/^#/, ''));
   const token = params.get('token');
   const state = params.get('state');
@@ -82,8 +91,8 @@ export async function handleCallback(root: HTMLElement): Promise<{ me: Me | null
   root.replaceChildren(h('div.full-center', null, h('div.callback', null, spinner(26), h('p', null, 'Signing you in…'))));
   if (!token) return { me: null, error: err ? `Sign-in was cancelled (${err}).` : 'The sign-in link was incomplete. Try again.' };
   try {
-    const { you } = await api.exchange(token, state);
-    return { me: you };
+    const { you, popup } = await api.exchange(token, state);
+    return { me: you, popup };
   } catch (e) {
     return { me: null, error: errorMessage(e) };
   }

@@ -179,7 +179,7 @@ export const api = {
   config: () => call<Config>('GET', '/api/config'),
   me: () => call<{ you: Me | null; guest?: boolean; dev: boolean }>('GET', '/api/me'),
   devLogin: (name: string, admin: boolean) => call<{ you: Me }>('POST', '/dev/login', { name, admin }),
-  exchange: (token: string, state?: string | null) => call<{ you: Me }>('POST', '/auth/exchange', state ? { token, state } : { token }),
+  exchange: (token: string, state?: string | null) => call<{ you: Me; popup?: boolean }>('POST', '/auth/exchange', state ? { token, state } : { token }),
   logout: () => call<{ ok: true }>('POST', '/auth/logout', {}),
 
   docs: (opts: { q?: string; filter?: 'all' | 'owned' | 'shared' } = {}) => call<{ docs: DocSummary[] }>('GET', `/api/docs${q({ q: opts.q, filter: opts.filter })}`),
