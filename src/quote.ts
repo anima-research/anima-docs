@@ -35,7 +35,7 @@ export function indexSource(src: string, options: boolean | IndexOptions = true)
       // At a line start: fence bodies are text as they are; marker-only lines vanish; block markers are skipped.
       const eol = src.indexOf('\n', i); const line = src.slice(i, eol < 0 ? src.length : eol);
       const fence = /^[ \t]*(`{3,}|~{3,})/.exec(line);
-      if (inFence) { if (fence && fence[1][0] === inFence[0] && fence[1].length >= inFence.length) { inFence = null; gap(i); i += line.length; } }
+      if (inFence) { if (fence && fence[1][0] === inFence[0] && fence[1].length >= inFence.length) { inFence = null; gap(i); i += line.length; continue; } }
       else if (fence) { inFence = fence[1]; gap(i); i += line.length; continue; }
       else if (MD_NOISE_LINE.test(line) && line.trim()) { gap(i); i += line.length; continue; }
       else {

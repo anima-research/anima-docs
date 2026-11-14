@@ -88,3 +88,11 @@ test('a thread\'s quote, a slice of the source, reads as the preview shows it, s
   }
   assert.equal(shown('a*b*c'), 'a*b*c');
 });
+
+test('a markdown document whose last line closes a fenced code block is indexed, and a quote before it is found', () => {
+  assert.equal(indexSource('```\nx\n```', { markdown: true }).text.trim(), 'x');
+  assert.equal(indexSource('```\nx\n```', { markdown: true, fold: true }).text.trim(), 'x');
+  const src = 'Some words.\n\n```\nx\n```';
+  const r = findQuote(src, 'Some words', null, null, { markdown: true, fold: true })!;
+  assert.equal(src.slice(r.from, r.to), 'Some words');
+});
