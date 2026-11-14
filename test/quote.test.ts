@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { findQuote, indexSource } from '../src/quote.js';
+import MarkdownIt from 'markdown-it';
+import { findQuote, foldTypography, indexSource, indexedText } from '../src/quote.js';
 
 test('quotes from a rendered page are found in the HTML source across tags, entities and whitespace', () => {
   const src = '<h1>Hello &amp; welcome</h1>\n<p>We ship   the\n<b>thing</b> in March. We ship the thing in April.</p><script>var x = "the thing";</script>';
@@ -33,4 +34,57 @@ test('quotes from a rendered markdown document are found in the source across ma
   const r = findQuote(src, 'the thing', null, '";', { markdown: true })!;
   assert.ok(src.slice(r.from).startsWith('the thing";'));
   assert.equal(indexSource('- a\n- b', { markdown: true }).text, 'a b');
+});
+
+// The preview renders with markdown-it's typographer on (web/lib/markdown.ts), so a quote taken from it holds ’ “ ” – — ….
+const preview = new MarkdownIt({ html: true, linkify: true, typographer: true });
+const pageText = (src: string) => preview.render(src).replace(/<[^>]+>/g, ' ').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();
+
+test('a comment\'s quote from the preview, with the typographer\'s characters, is found in the markdown source', () => {
+  const cases: [string, string][] = [
+    ["It's a test of the apostrophe.", "It's a test"],
+    ['She said "quoted words" today.', '"quoted words"'],
+    ['Pages ten--twenty are dashes.', 'ten--twenty'],
+    ['A pause---then more.', 'pause---then'],
+    ['And then... an ellipsis.', 'then... an'],
+    ['Don’t panic, it’s typed.', 'Don’t panic'],
+    ["- It's one\n- It's two", "It's one\n- It's two"],
+  ];
+  for (const [src, want] of cases) {
+    const shown = pageText(src);
+    const quote = shown.slice(0, shown.length - (src.endsWith('.') ? 1 : 0));
+    const r = findQuote(src, quote, null, null, { markdown: true, fold: true });
+    assert.ok(r, `found: ${JSON.stringify(quote)}`);
+    assert.ok(src.slice(r.from, r.to).includes(want), `${JSON.stringify(src.slice(r.from, r.to))} holds ${JSON.stringify(want)}`);
+  }
+  const dash = findQuote('Pages ten--twenty are dashes.', 'ten–twenty', null, null, { markdown: true, fold: true })!;
+  assert.equal('Pages ten--twenty are dashes.'.slice(dash.from, dash.to), 'ten--twenty');
+  assert.equal(findQuote("It's a test.", 'It’s a test', null, null, { markdown: true }), null);
+  const typed = findQuote('Typed: we’re here.', 'we’re here', null, null, { markdown: true })!;
+  assert.equal('Typed: we’re here.'.slice(typed.from, typed.to), 'we’re here');
+});
+
+test('a quote from the preview inside a code span, or with an underscore inside a word, is found with the characters it shows', () => {
+  const src = 'The value is `my_var` and `a*b*c` and `$x$` and `\\_raw` here.';
+  assert.equal(pageText(src), 'The value is my_var and a*b*c and $x$ and \\_raw here.');
+  const md = (q: string) => { const r = findQuote(src, q, null, null, { markdown: true }); return r && src.slice(r.from, r.to); };
+  assert.equal(md('my_var'), 'my_var');
+  assert.equal(md('The value is my_var and a*b*c'), 'The value is `my_var` and `a*b*c');
+  assert.equal(md('$x$'), '$x$');
+  assert.equal(md('\\_raw here'), '\\_raw` here');
+  const bare = 'A bare my_var, café_bar, cafe\u0301_bar and _emphasis_ here.';
+  assert.equal(pageText(bare), 'A bare my_var, café_bar, cafe\u0301_bar and emphasis here.');
+  const b = findQuote(bare, 'A bare my_var, café_bar, cafe\u0301_bar and emphasis', null, null, { markdown: true })!;
+  assert.equal(bare.slice(b.from, b.to), 'A bare my_var, café_bar, cafe\u0301_bar and _emphasis');
+});
+
+test('a thread\'s quote, a slice of the source, reads as the preview shows it, so its mark can be found there', () => {
+  const src = "It's a test.\n\nPages ten--twenty, then... an end.\n\nThe value is `a*b*c` here.";
+  const idx = indexSource(src, { markdown: true, fold: true });
+  const shown = (quote: string) => { const at = src.indexOf(quote); return indexedText(idx, at, at + quote.length).trim(); };
+  const page = foldTypography(pageText(src));
+  for (const quote of ["It's a test", 'ten--twenty, then... an', 'a*b*c', '`a*b*c` here']) {
+    assert.ok(page.includes(shown(quote)), `${JSON.stringify(shown(quote))} in ${JSON.stringify(page)}`);
+  }
+  assert.equal(shown('a*b*c'), 'a*b*c');
 });

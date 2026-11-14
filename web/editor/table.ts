@@ -78,6 +78,30 @@ function measureCh(el: HTMLElement): number {
 const unescapeCell = (s: string) => s.replace(/\\\|/g, '|');
 const escapeCell = (s: string) => s.replace(/\r?\n/g, ' ').replace(/\|/g, '\\|').trim();
 
+const cellInputs = new WeakMap<HTMLInputElement, { r: number; c: number; start: () => number; commit: () => void }>();
+
+export function cellSelection(view: EditorView): { from: number; to: number } | null {
+  const input = document.activeElement;
+  if (!(input instanceof HTMLInputElement) || !view.dom.contains(input)) return null;
+  const cell = cellInputs.get(input);
+  if (!cell) return null;
+  const a = input.selectionStart, b = input.selectionEnd;
+  if (a === null || b === null || a === b) return null;
+  const value = input.value, text = escapeCell(value);
+  const escaped = (s: string) => s.replace(/\r?\n/g, ' ').replace(/\|/g, '\\|');
+  const lead = escaped(value).length - escaped(value).trimStart().length;
+  const at = (p: number) => Math.min(text.length, Math.max(0, escaped(value.slice(0, p)).length - lead));
+  const start = cell.start();
+  cell.commit();
+  const doc = view.state.doc;
+  const row = doc.lineAt(start).number + (cell.r === 0 ? 0 : cell.r + 1);
+  if (row > doc.lines) return null;
+  const line = doc.line(row);
+  const place = splitRow(line.text)[cell.c];
+  if (!place || place.text !== text) return null;
+  return { from: line.from + place.start + at(a), to: line.from + place.start + at(b) };
+}
+
 /** Which cell to focus in the table widget rebuilt after an edit (keyed by the table's position). */
 let pendingFocus: { start: number; r: number; c: number; atEnd?: boolean } | null = null;
 /** The cell last focused, so a rebuild that pulls the DOM out from under it (another transaction landing between an edit and its hand-off) can put the focus back. */
@@ -139,6 +163,7 @@ export class TableWidget extends WidgetType {
       input.style.width = `${Math.max(80, td.clientWidth - 28)}px`;
       td.replaceChildren(input);
       active = { r, c, input, td };
+      cellInputs.set(input, { r, c, start, commit: () => { if (active && active.input === input) endEdit('commit', null); } });
       current = { r, c };
       lastFocus = { start: start(), r, c, atEnd, at: Date.now() };
       wrap.classList.add('focused');

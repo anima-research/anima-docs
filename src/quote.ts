@@ -3,10 +3,13 @@
 // vanish. The index maps each normalized character back to its source offset.
 
 const ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
+// markdown-it's typographer shows these for ' " -- --- ... on the rendered page.
+const TYPOGRAPHIC: Record<string, string> = { '‘': "'", '’': "'", '“': '"', '”': '"', '–': '--', '—': '---', '…': '...' };
+export const foldTypography = (s: string) => s.replace(/[‘’“”–—…]/g, (c) => TYPOGRAPHIC[c]);
 
 export interface Indexed { text: string; /** source offset of normalized char i */ from: number[]; /** source offset just after normalized char i */ to: number[] }
 
-export interface IndexOptions { /** drop tags and script/style bodies (default true) */ html?: boolean; /** drop markdown syntax: block markers, emphasis, links, code fences */ markdown?: boolean }
+export interface IndexOptions { /** drop tags and script/style bodies (default true) */ html?: boolean; /** drop markdown syntax: block markers, emphasis, links, code fences */ markdown?: boolean; /** with markdown: index the typographer's characters as their plain forms */ fold?: boolean }
 
 // Markdown block markers at the start of a line: indentation, blockquote `>`, list bullets, headings, table pipes.
 const MD_LINE_START = /^(?:[ \t]*>[ \t]?|[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]+(?:\[[ xX]\][ \t]+)?|[ \t]*#{1,6}[ \t]+|[ \t]*\|[ \t]*|[ \t]+)/;
@@ -16,13 +19,13 @@ const MD_NOISE_LINE = /^[ \t]*(?:(?:`{3,}|~{3,})[^\n]*|(?:-[ \t]*){3,}|(?:\*[ \t
 /** Normalize a source: drop tags (and script/style bodies when `html`), decode entities, collapse whitespace. */
 export function indexSource(src: string, options: boolean | IndexOptions = true): Indexed {
   const opts = typeof options === 'boolean' ? { html: options } : options;
-  const html = opts.html ?? true, md = !!opts.markdown;
+  const html = opts.html ?? true, md = !!opts.markdown, fold = md && !!opts.fold;
   let text = '';
   const from: number[] = [], to: number[] = [];
   let space = true;
   const push = (ch: string, a: number, b: number) => {
     if (/\s/.test(ch)) { if (space) return; text += ' '; from.push(a); to.push(b); space = true; }
-    else { text += ch; from.push(a); to.push(b); space = false; }
+    else for (const p of fold ? foldTypography(ch) : ch) { text += p; from.push(a); to.push(b); space = false; }
   };
   // A tag reads as whitespace (block boundaries become breaks on the page; inline tags sit between words).
   const gap = (at: number) => { if (!space) { text += ' '; from.push(at); to.push(at); space = true; } };
@@ -48,7 +51,13 @@ export function indexSource(src: string, options: boolean | IndexOptions = true)
       const rest = src.slice(i, i + 3);
       if (c === '\\' && i + 1 < src.length && /[\\`*_{}\[\]()#+\-.!|~<>]/.test(src[i + 1])) { push(src[i + 1], i, i + 2); i += 1; continue; } // escape: the character itself
       if (rest.startsWith('**') || rest.startsWith('__') || rest.startsWith('~~')) { i += 1; continue; } // emphasis markers vanish, no gap: **cat** reads cat
-      if (c === '`') { let n = i; while (src[n] === '`') n++; i = n - 1; continue; } // code spans keep their text, lose the ticks
+      if (c === '`') {
+        let n = i; while (src[n] === '`') n++;
+        const close = closingTicks(src, n, n - i);
+        if (close >= 0) { for (let k = n; k < close; k++) push(src[k], k, k + 1); i = close + (n - i) - 1; continue; }
+        i = n - 1; continue;
+      }
+      if (c === '_' && /[\p{L}\p{M}\p{N}_]/u.test(src[i - 1] ?? '') && /[\p{L}\p{M}\p{N}_]/u.test(src[i + 1] ?? '')) { push(c, i, i + 1); continue; }
       if ((c === '*' || c === '_') && (/\S/.test(src[i + 1] ?? ' ') || /\S/.test(src[i - 1] ?? ' '))) continue;
       if (c === '!' && src[i + 1] === '[') { // an image: its alt text is not on the page as text (a caption may be; keep the alt)
         const close = src.indexOf('](', i); const end = close >= 0 ? src.indexOf(')', close) : -1;
@@ -81,15 +90,38 @@ export function indexSource(src: string, options: boolean | IndexOptions = true)
   return { text, from, to };
 }
 
+function closingTicks(src: string, from: number, ticks: number): number {
+  const blank = src.slice(from).search(/\n[ \t]*\n/);
+  const stop = blank < 0 ? src.length : from + blank;
+  for (let k = from; k < stop; k++) {
+    if (src[k] !== '`') continue;
+    let m = k; while (src[m] === '`') m++;
+    if (m - k === ticks) return k;
+    k = m - 1;
+  }
+  return -1;
+}
+
+export function indexedText(idx: Indexed, from: number, to: number): string {
+  let lo = 0, hi = idx.from.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (idx.from[mid] < from) lo = mid + 1; else hi = mid; }
+  let out = '';
+  for (let i = lo; i < idx.text.length && idx.from[i] < to; i++) if (idx.to[i] <= to) out += idx.text[i];
+  return out;
+}
+
 const norm = (s: string) => String(s ?? '').replace(/\s+/g, ' ');
 
 /**
  * Where a quote (as seen on the page) sits in the source. Prefix/suffix (text
  * around the quote on the page) choose between repeats; `near` breaks ties.
  */
-export function findQuote(src: string, quote: string, prefix?: string | null, suffix?: string | null, opts: { html?: boolean; markdown?: boolean; near?: number } = {}): { from: number; to: number } | null {
-  const idx = indexSource(src, { html: opts.html ?? true, markdown: opts.markdown });
-  const q = norm(quote).trim();
+export function findQuote(src: string, quote: string, prefix?: string | null, suffix?: string | null, opts: { html?: boolean; markdown?: boolean; fold?: boolean; near?: number } = {}): { from: number; to: number } | null {
+  const idx = indexSource(src, { html: opts.html ?? true, markdown: opts.markdown, fold: opts.fold });
+  const fold = opts.markdown && opts.fold ? foldTypography : (s: string) => s;
+  const q = norm(fold(String(quote ?? ''))).trim();
+  if (prefix) prefix = fold(prefix);
+  if (suffix) suffix = fold(suffix);
   if (!q) return null;
   let best: number | null = null, bestScore = -1, at = -1;
   while ((at = idx.text.indexOf(q, at + 1)) >= 0) {
