@@ -130,3 +130,12 @@ test('a setext underline or a thematic break ends a code span\'s search', () => 
   const r = findQuote(src, 'red blue', null, null, { markdown: true, fold: true })!;
   assert.equal(src.slice(r.from, r.to), 'red\n---\nblue');
 });
+
+test('an entity outside the BMP keeps the source offsets after it', () => {
+  const src = '&#x1F600; hello world';
+  const r = findQuote(src, 'hello', null, null, { markdown: true, fold: true })!;
+  assert.equal(src.slice(r.from, r.to), 'hello');
+  const idx = indexSource(src, { markdown: true, fold: true });
+  const at = src.indexOf('hello');
+  assert.equal(indexedText(idx, at, at + 5), 'hello');
+});

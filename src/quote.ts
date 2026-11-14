@@ -25,7 +25,7 @@ export function indexSource(src: string, options: boolean | IndexOptions = true)
   let space = true;
   const push = (ch: string, a: number, b: number) => {
     if (/\s/.test(ch)) { if (space) return; text += ' '; from.push(a); to.push(b); space = true; }
-    else for (const p of fold ? foldTypography(ch) : ch) { text += p; from.push(a); to.push(b); space = false; }
+    else for (const p of fold ? foldTypography(ch) : ch) { text += p; for (let u = 0; u < p.length; u++) { from.push(a); to.push(b); } space = false; }
   };
   // A tag reads as whitespace (block boundaries become breaks on the page; inline tags sit between words).
   const gap = (at: number) => { if (!space) { text += ' '; from.push(at); to.push(at); space = true; } };
