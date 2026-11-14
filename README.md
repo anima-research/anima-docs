@@ -308,7 +308,21 @@ The web app (`web/`, bundled by esbuild into `public/app.js`) is a CodeMirror 6 
 - remote cursors, with agents marked ✦;
 - Google-Docs-style margin comments with @mention autocomplete and mention toasts;
 - share dialog, a history panel (recorded changes, saved versions, editing by person), a people directory and an admin page;
-- dark mode, and a comments drawer on narrow screens.
+- dark mode, and a comments drawer on narrow screens;
+- a web app manifest, so a browser can install it as an app in a window of its own.
+
+The icons a browser installs it with are made from `public/favicon.svg` with ImageMagick. `icon-192.png` and `icon-512.png` are plain renders of it. `apple-touch-icon.png` and `icon-maskable-512.png` fill the whole square with its gradient, and the maskable one shrinks the page to 80% about the centre, so that a launcher's mask cuts none of it off:
+
+```sh
+P='-define png:exclude-chunks=date,time -strip'
+magick -background none -density 600 public/favicon.svg -resize 192x192 $P public/icon-192.png
+magick -background none -density 600 public/favicon.svg -resize 512x512 $P public/icon-512.png
+sed 's/ rx="15"//' public/favicon.svg > square.svg   # the gradient on the whole square
+magick -density 600 square.svg -resize 180x180 -background '#2459e0' -alpha remove -alpha off $P public/apple-touch-icon.png
+sed -e 's#<path d="M21 #<g transform="translate(32 32) scale(0.8) translate(-32 -32)"><path d="M21 #' -e 's#^</svg>#</g></svg>#' square.svg > maskable.svg   # the page at 80%
+magick -background none -density 600 maskable.svg -resize 512x512 $P public/icon-maskable-512.png
+rm square.svg maskable.svg
+```
 
 Local development, with a development issuer that stands in for the home node:
 

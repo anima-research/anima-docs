@@ -332,6 +332,24 @@ test('page files: attached files are served next to the page under a signed path
   assert.ok(made.includes('companion index.md attached'), made);
 });
 
+test('installable: the app\'s pages link its web app manifest, which answers without a sign-in, and so does each icon it and the pages name', async () => {
+  const page = await (await fetch(`${S.base}/`)).text();
+  assert.ok(page.includes('<link rel="manifest" href="/manifest.webmanifest">'), 'the page links the manifest');
+  assert.ok(page.includes('<link rel="apple-touch-icon" href="/apple-touch-icon.png">'), 'the page links the apple-touch-icon');
+  const r = await fetch(`${S.base}/manifest.webmanifest`);
+  assert.equal(r.status, 200);
+  assert.equal(r.headers.get('content-type'), 'application/manifest+json');
+  const manifest = await r.json() as { display: string; icons: { src: string; sizes: string }[] };
+  assert.equal(manifest.display, 'standalone');
+  const icons = [...manifest.icons.map((i) => i.src), '/apple-touch-icon.png'];
+  assert.ok(manifest.icons.some((i) => i.sizes === '192x192') && manifest.icons.some((i) => i.sizes === '512x512'), 'a 192 and a 512 icon');
+  for (const src of icons) {
+    const icon = await fetch(`${S.base}${src}`);
+    assert.equal(icon.status, 200, src);
+    assert.equal(icon.headers.get('content-type'), 'image/png', src);
+  }
+});
+
 test('link previews: Open Graph cards reveal a document only when anyone could read it (an anyone-link, a public wiki, or the share link itself)', async () => {
   const ann = await signIn('Ann');
   const d = await (await fetch(`${S.base}/api/docs`, { method: 'POST', headers: H({ Cookie: ann }), body: JSON.stringify({ title: 'Quarterly plan', content: '# Quarterly plan\n\nWe ship the **thing** in March.\n\n![cover](/media/00000000000000000000000000000000.png)\n' }) })).json();
