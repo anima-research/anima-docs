@@ -117,3 +117,10 @@ test('a run of underscores between two word characters reads as text, and emphas
   const r = findQuote(src, 'Call foo__bar, foo___bar and a__b__c, then bold x and init.py.', null, null, { markdown: true, fold: true })!;
   assert.equal(src.slice(r.from, r.to), src);
 });
+
+test('an escaped pipe in a code span reads as a pipe, as it shows in a table cell', () => {
+  const src = '| Type |\n| --- |\n| `string \\| null` |';
+  assert.equal(pageText(src), 'Type string | null');
+  const r = findQuote(src, 'string | null', null, null, { markdown: true, fold: true })!;
+  assert.equal(src.slice(r.from, r.to), 'string \\| null');
+});

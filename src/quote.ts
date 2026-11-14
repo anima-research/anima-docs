@@ -58,7 +58,7 @@ export function indexSource(src: string, options: boolean | IndexOptions = true)
       if (c === '`') {
         let n = i; while (src[n] === '`') n++;
         const close = closingTicks(src, n, n - i);
-        if (close >= 0) { for (let k = n; k < close; k++) push(src[k], k, k + 1); i = close + (n - i) - 1; continue; }
+        if (close >= 0) { for (let k = n; k < close; k++) { if (src[k] === '\\' && src[k + 1] === '|') { push('|', k, k + 2); k++; } else push(src[k], k, k + 1); } i = close + (n - i) - 1; continue; }
         i = n - 1; continue;
       }
       if ((c === '*' || c === '_') && (/\S/.test(src[i + 1] ?? ' ') || /\S/.test(src[i - 1] ?? ' '))) continue;
