@@ -18,7 +18,7 @@ import { setHighlights, type Anchored } from './highlights';
 import type { DocProvider, ThreadEvent } from './provider';
 import { setOverlays, sharedCoords, wordDiff, type Coords, type OverlayItem, type SuggestSession } from './suggest';
 import { nodePos, virtualPos, type Layout } from './nodes/layout';
-import { cellSelection } from './table';
+import { cellFocused, cellSelection } from './table';
 import type { NodeStore, NodeThread } from './nodes/store';
 
 const b64ToBytes = (s: string) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
@@ -358,14 +358,14 @@ export class CommentsRail {
     const view = this.deps.view();
     if (!view || !this.canComment) return;
     let sel = view.state.selection.main;
-    if (sel.empty) {
-      const cell = cellSelection(view);
-      if (!cell) {
-        toast('Select some text to comment on.', { kind: 'info' });
-        return;
-      }
+    const inCell = cellFocused(view);
+    const cell = inCell ? cellSelection(view) : null;
+    if (cell) {
       view.dispatch({ selection: { anchor: cell.from, head: cell.to } });
       sel = view.state.selection.main;
+    } else if (inCell || sel.empty) {
+      toast('Select some text to comment on.', { kind: 'info' });
+      return;
     }
     const c = this.coords;
     const L = this.deps.layout();

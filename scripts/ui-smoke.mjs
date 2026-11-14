@@ -411,11 +411,12 @@ try {
       await p.locator('.anima-bar:not([hidden]) button', { hasText: 'Comment' }).click();
       await p.locator('.thread-card.draft textarea').fill(`on ${shown}`);
       await p.keyboard.press('ControlOrMeta+Enter');
-      await p.locator('.preview-body mark.anima-mark', { hasText: shown }).waitFor();
+      await p.locator('.preview-body mark.anima-mark', { hasText: new RegExp('^' + shown.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$') }).waitFor();
     }
     await p.getByRole('radio', { name: 'Edit mode' }).click();
     await p.locator('.editor-page .cm-content').click();
     await p.keyboard.press('ControlOrMeta+Home');
+    await p.keyboard.press('Shift+End');
     await p.locator('.cm-table-widget td', { hasText: 'Cell alpha' }).click();
     const input = p.locator('input.cm-table-input');
     await input.evaluate((el) => el.setSelectionRange(5, 10));
@@ -424,8 +425,12 @@ try {
     await p.keyboard.press('ControlOrMeta+Enter');
     await p.locator('.thread-card:not(.draft)', { hasText: 'on alpha' }).waitFor();
     await p.getByRole('radio', { name: 'Preview mode' }).click();
-    await p.locator('.preview-body table mark.anima-mark', { hasText: 'alpha' }).waitFor();
+    await p.locator('.preview-body table mark.anima-mark', { hasText: /^alpha$/ }).waitFor();
     await p.getByRole('radio', { name: 'Edit mode' }).click();
+    await p.locator('.cm-table-widget td', { hasText: 'Cell beta' }).click();
+    await p.locator('input.cm-table-input').evaluate((el) => { el.value = ` ${el.value}`; el.setSelectionRange(0, 1); });
+    await p.locator('button.tb-comment').click();
+    await p.locator('.toast', { hasText: 'Select some text to comment on.' }).waitFor({ timeout: 4000 });
     await p.close();
   });
 

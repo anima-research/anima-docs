@@ -80,17 +80,24 @@ const escapeCell = (s: string) => s.replace(/\r?\n/g, ' ').replace(/\|/g, '\\|')
 
 const cellInputs = new WeakMap<HTMLInputElement, { r: number; c: number; start: () => number; commit: () => void }>();
 
-export function cellSelection(view: EditorView): { from: number; to: number } | null {
+const focusedCell = (view: EditorView) => {
   const input = document.activeElement;
-  if (!(input instanceof HTMLInputElement) || !view.dom.contains(input)) return null;
-  const cell = cellInputs.get(input);
-  if (!cell) return null;
+  return input instanceof HTMLInputElement && view.dom.contains(input) && cellInputs.has(input) ? input : null;
+};
+export const cellFocused = (view: EditorView) => focusedCell(view) !== null;
+
+export function cellSelection(view: EditorView): { from: number; to: number } | null {
+  const input = focusedCell(view);
+  if (!input) return null;
+  const cell = cellInputs.get(input)!;
   const a = input.selectionStart, b = input.selectionEnd;
   if (a === null || b === null || a === b) return null;
   const value = input.value, text = escapeCell(value);
   const escaped = (s: string) => s.replace(/\r?\n/g, ' ').replace(/\|/g, '\\|');
   const lead = escaped(value).length - escaped(value).trimStart().length;
   const at = (p: number) => Math.min(text.length, Math.max(0, escaped(value.slice(0, p)).length - lead));
+  const from = at(a), to = at(b);
+  if (from === to) return null;
   const start = cell.start();
   cell.commit();
   const doc = view.state.doc;
@@ -99,7 +106,7 @@ export function cellSelection(view: EditorView): { from: number; to: number } | 
   const line = doc.line(row);
   const place = splitRow(line.text)[cell.c];
   if (!place || place.text !== text) return null;
-  return { from: line.from + place.start + at(a), to: line.from + place.start + at(b) };
+  return { from: line.from + place.start + from, to: line.from + place.start + to };
 }
 
 /** Which cell to focus in the table widget rebuilt after an edit (keyed by the table's position). */
