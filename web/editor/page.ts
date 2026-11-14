@@ -932,6 +932,8 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   // A thread's quote is a slice of the source; the rendered surface searches its own text, so the
   // quote is normalized the same way the source is when a selection is looked up (tags and markdown markers gone).
   const highlightThreads = () => {
+    const threads = latestThreads.filter((t) => t.quote && !t.orphaned);
+    if (!threads.length) return [];
     const html = isHtml();
     const src = html ? '' : view.state.doc.toString();
     const idx = html ? null : indexSource(src, { html: false, markdown: true, fold: true });
@@ -939,7 +941,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
       const at = idx ? src.indexOf(quote) : -1;
       return (idx && at >= 0 ? indexedText(idx, at, at + quote.length) : indexSource(quote, { html, markdown: !html, fold: true }).text).trim();
     };
-    return latestThreads.filter((t) => t.quote && !t.orphaned).map((t) => ({ id: t.id, quote: shown(t.quote ?? ''), resolved: t.resolved }));
+    return threads.map((t) => ({ id: t.id, quote: shown(t.quote ?? ''), resolved: t.resolved }));
   };
   function sendHighlights() {
     if (isHtml()) toFrame({ type: 'highlights', threads: highlightThreads() });
