@@ -124,3 +124,9 @@ test('an escaped pipe in a code span reads as a pipe, as it shows in a table cel
   const r = findQuote(src, 'string | null', null, null, { markdown: true, fold: true })!;
   assert.equal(src.slice(r.from, r.to), 'string \\| null');
 });
+
+test('a setext underline or a thematic break ends a code span\'s search', () => {
+  const src = 'first `red\n---\nblue` end';
+  const r = findQuote(src, 'red blue', null, null, { markdown: true, fold: true })!;
+  assert.equal(src.slice(r.from, r.to), 'red\n---\nblue');
+});

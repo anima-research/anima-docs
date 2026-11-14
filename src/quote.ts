@@ -93,12 +93,12 @@ export function indexSource(src: string, options: boolean | IndexOptions = true)
   return { text, from, to };
 }
 
-// A code span ends within its block: a blank line, a list item, a quote, a heading, a table row or a fence starts another.
+// A code span ends within its block: a blank line, a list item, a quote, a heading, a table row, a fence or a rule starts another.
 const BLOCK_START = /^[ \t]*(?:$|>|[-*+](?:[ \t]|$)|\d{1,9}[.)](?:[ \t]|$)|#{1,6}(?:[ \t]|$)|\||`{3,}|~{3,})/;
 
 function closingTicks(src: string, from: number, ticks: number): number {
   for (let k = from; k < src.length; k++) {
-    if (src[k] === '\n') { const eol = src.indexOf('\n', k + 1); if (BLOCK_START.test(src.slice(k + 1, eol < 0 ? src.length : eol))) return -1; continue; }
+    if (src[k] === '\n') { const eol = src.indexOf('\n', k + 1); const next = src.slice(k + 1, eol < 0 ? src.length : eol); if (BLOCK_START.test(next) || MD_NOISE_LINE.test(next)) return -1; continue; }
     if (src[k] !== '`') continue;
     let m = k; while (src[m] === '`') m++;
     if (m - k === ticks) return k;
