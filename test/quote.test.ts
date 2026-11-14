@@ -100,3 +100,12 @@ test('a markdown document whose last line closes a fenced code block is indexed,
   const r = findQuote(src, 'Some words', null, null, { markdown: true, fold: true })!;
   assert.equal(src.slice(r.from, r.to), 'Some words');
 });
+
+test('a code span\'s closing ticks are looked for only within its own block', () => {
+  const items = '- first `red\n- blue` end';
+  const r = findQuote(items, 'red blue', null, null, { markdown: true, fold: true })!;
+  assert.equal(items.slice(r.from, r.to), 'red\n- blue');
+  const para = 'A line `one\ntwo` ends.';
+  const p = findQuote(para, 'line one two ends', null, null, { markdown: true, fold: true })!;
+  assert.equal(para.slice(p.from, p.to), 'line `one\ntwo` ends');
+});

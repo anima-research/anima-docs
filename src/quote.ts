@@ -90,10 +90,12 @@ export function indexSource(src: string, options: boolean | IndexOptions = true)
   return { text, from, to };
 }
 
+// A code span ends within its block: a blank line, a list item, a quote, a heading, a table row or a fence starts another.
+const BLOCK_START = /^[ \t]*(?:$|>|[-*+](?:[ \t]|$)|\d{1,9}[.)](?:[ \t]|$)|#{1,6}(?:[ \t]|$)|\||`{3,}|~{3,})/;
+
 function closingTicks(src: string, from: number, ticks: number): number {
-  const blank = src.slice(from).search(/\n[ \t]*\n/);
-  const stop = blank < 0 ? src.length : from + blank;
-  for (let k = from; k < stop; k++) {
+  for (let k = from; k < src.length; k++) {
+    if (src[k] === '\n') { const eol = src.indexOf('\n', k + 1); if (BLOCK_START.test(src.slice(k + 1, eol < 0 ? src.length : eol))) return -1; continue; }
     if (src[k] !== '`') continue;
     let m = k; while (src[m] === '`') m++;
     if (m - k === ticks) return k;
