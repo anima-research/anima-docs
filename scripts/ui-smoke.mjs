@@ -431,6 +431,7 @@ try {
     await p.locator('input.cm-table-input').evaluate((el) => { el.value = ` ${el.value}`; el.setSelectionRange(0, 1); });
     await p.locator('button.tb-comment').click();
     await p.locator('.toast', { hasText: 'Select some text to comment on.' }).waitFor({ timeout: 4000 });
+    if (await p.locator('.thread-card.draft').count()) throw new Error('a draft opened on a cell\'s trimmed space');
     await p.close();
   });
 

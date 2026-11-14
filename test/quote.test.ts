@@ -88,6 +88,7 @@ test('a thread\'s quote, a slice of the source, reads as the preview shows it, s
   const shown = (quote: string) => { const at = src.indexOf(quote); return indexedText(idx, at, at + quote.length).trim(); };
   const page = foldTypography(pageText(src));
   for (const quote of ["It's a test", 'ten--twenty, then... an', 'a*b*c', '`a*b*c` here']) {
+    assert.ok(shown(quote).length > 0, `${JSON.stringify(quote)} reads as nothing`);
     assert.ok(page.includes(shown(quote)), `${JSON.stringify(shown(quote))} in ${JSON.stringify(page)}`);
   }
   assert.equal(shown('a*b*c'), 'a*b*c');
