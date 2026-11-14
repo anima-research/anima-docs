@@ -50,6 +50,10 @@ export function indexSource(src: string, options: boolean | IndexOptions = true)
     if (md && !inFence) {
       const rest = src.slice(i, i + 3);
       if (c === '\\' && i + 1 < src.length && /[\\`*_{}\[\]()#+\-.!|~<>]/.test(src[i + 1])) { push(src[i + 1], i, i + 2); i += 1; continue; } // escape: the character itself
+      if (c === '_' && src[i - 1] !== '_') {
+        let n = i; while (src[n] === '_') n++;
+        if (/^[\p{L}\p{M}\p{N}]$/u.test([...src.slice(Math.max(0, i - 2), i)].pop() ?? '') && /^[\p{L}\p{M}\p{N}]$/u.test([...src.slice(n, n + 2)][0] ?? '')) { for (let k = i; k < n; k++) push('_', k, k + 1); i = n - 1; continue; }
+      }
       if (rest.startsWith('**') || rest.startsWith('__') || rest.startsWith('~~')) { i += 1; continue; } // emphasis markers vanish, no gap: **cat** reads cat
       if (c === '`') {
         let n = i; while (src[n] === '`') n++;
@@ -57,7 +61,6 @@ export function indexSource(src: string, options: boolean | IndexOptions = true)
         if (close >= 0) { for (let k = n; k < close; k++) push(src[k], k, k + 1); i = close + (n - i) - 1; continue; }
         i = n - 1; continue;
       }
-      if (c === '_' && /^[\p{L}\p{M}\p{N}_]$/u.test([...src.slice(Math.max(0, i - 2), i)].pop() ?? '') && /^[\p{L}\p{M}\p{N}_]$/u.test([...src.slice(i + 1, i + 3)][0] ?? '')) { push(c, i, i + 1); continue; }
       if ((c === '*' || c === '_') && (/\S/.test(src[i + 1] ?? ' ') || /\S/.test(src[i - 1] ?? ' '))) continue;
       if (c === '!' && src[i + 1] === '[') { // an image: its alt text is not on the page as text (a caption may be; keep the alt)
         const close = src.indexOf('](', i); const end = close >= 0 ? src.indexOf(')', close) : -1;

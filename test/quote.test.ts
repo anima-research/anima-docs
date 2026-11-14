@@ -109,3 +109,11 @@ test('a code span\'s closing ticks are looked for only within its own block', ()
   const p = findQuote(para, 'line one two ends', null, null, { markdown: true, fold: true })!;
   assert.equal(para.slice(p.from, p.to), 'line `one\ntwo` ends');
 });
+
+test('a run of underscores between two word characters reads as text, and emphasis underscores still vanish', () => {
+  const src = 'Call foo__bar, foo___bar and a__b__c, then __bold__ x and __init__.py.';
+  const shown = pageText(src);
+  assert.equal(shown, 'Call foo__bar, foo___bar and a__b__c, then bold x and init .py.');
+  const r = findQuote(src, 'Call foo__bar, foo___bar and a__b__c, then bold x and init.py.', null, null, { markdown: true, fold: true })!;
+  assert.equal(src.slice(r.from, r.to), src);
+});
