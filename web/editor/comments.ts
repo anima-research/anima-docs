@@ -224,6 +224,9 @@ export class CommentsRail {
     this.pushHighlights(force);
   }
 
+  /** A thread's anchored range in the editor, if it has one. */
+  anchorOf(id: string) { return this.anchors.get(id) ?? null; }
+
   private isOrphan(t: Thread) {
     return !!t.rel && this.synced && !this.anchors.get(t.id);
   }

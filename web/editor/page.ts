@@ -937,11 +937,11 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     const html = isHtml();
     const src = html ? '' : view.state.doc.toString();
     const idx = html ? null : indexSource(src, { html: false, markdown: true, fold: true });
-    const shown = (quote: string) => {
-      const at = idx ? src.indexOf(quote) : -1;
-      return (idx && at >= 0 ? indexedText(idx, at, at + quote.length) : indexSource(quote, { html, markdown: !html, fold: true }).text).trim();
+    const shown = (t: Thread) => {
+      const r = idx ? rail.anchorOf(t.id) : null;
+      return (idx && r && r.to > r.from ? indexedText(idx, r.from, r.to) : indexSource(t.quote ?? '', { html, markdown: !html, fold: true }).text).trim();
     };
-    return threads.map((t) => ({ id: t.id, quote: shown(t.quote ?? ''), resolved: t.resolved }));
+    return threads.map((t) => ({ id: t.id, quote: shown(t), resolved: t.resolved }));
   };
   function sendHighlights() {
     if (isHtml()) toFrame({ type: 'highlights', threads: highlightThreads() });
