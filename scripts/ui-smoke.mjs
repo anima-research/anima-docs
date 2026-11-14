@@ -395,11 +395,11 @@ try {
     const p = await aliceCtx.newPage();
     watch(p, 'alice-anchors');
     await p.goto(`${ORIGIN}/`);
-    const d = await p.evaluate(() => fetch('/api/docs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: 'Anchors', content: "It's -- a test of snake_case.\n\nThe value is `my_var` here.\n\n| Name | Note |\n| --- | --- |\n| Cell alpha | Cell beta |" }) }).then((r) => r.json()));
+    const d = await p.evaluate(() => fetch('/api/docs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: 'Anchors', content: "It's -- a test of snake_case, \u{1E900}_x and x_\u{1E900}.\n\nThe value is `my_var` here.\n\n| Name | Note |\n| --- | --- |\n| Cell alpha | Cell beta |" }) }).then((r) => r.json()));
     await openDoc(p, d.id);
     await p.getByRole('radio', { name: 'Preview mode' }).click();
     await p.locator('.preview-body table').waitFor();
-    for (const shown of ['It’s – a test of snake_case', 'my_var']) {
+    for (const shown of ['It’s – a test of snake_case, \u{1E900}_x and x_\u{1E900}', 'my_var']) {
       await p.evaluate((needle) => {
         const w = document.createTreeWalker(document.querySelector('.preview-body'), NodeFilter.SHOW_TEXT);
         for (let n = w.nextNode(); n; n = w.nextNode()) {
