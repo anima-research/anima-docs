@@ -76,6 +76,10 @@ test('a quote from the preview inside a code span, or with an underscore inside 
   assert.equal(pageText(bare), 'A bare my_var, café_bar, cafe\u0301_bar and emphasis here.');
   const b = findQuote(bare, 'A bare my_var, café_bar, cafe\u0301_bar and emphasis', null, null, { markdown: true })!;
   assert.equal(bare.slice(b.from, b.to), 'A bare my_var, café_bar, cafe\u0301_bar and _emphasis');
+  const astral = 'Astral x_\u{1E900} and \u{1E900}_x here.';
+  assert.equal(pageText(astral), astral);
+  const c = findQuote(astral, 'x_\u{1E900} and \u{1E900}_x', null, null, { markdown: true })!;
+  assert.equal(astral.slice(c.from, c.to), 'x_\u{1E900} and \u{1E900}_x');
 });
 
 test('a thread\'s quote, a slice of the source, reads as the preview shows it, so its mark can be found there', () => {

@@ -57,7 +57,7 @@ export function indexSource(src: string, options: boolean | IndexOptions = true)
         if (close >= 0) { for (let k = n; k < close; k++) push(src[k], k, k + 1); i = close + (n - i) - 1; continue; }
         i = n - 1; continue;
       }
-      if (c === '_' && /[\p{L}\p{M}\p{N}_]/u.test(src[i - 1] ?? '') && /[\p{L}\p{M}\p{N}_]/u.test(src[i + 1] ?? '')) { push(c, i, i + 1); continue; }
+      if (c === '_' && /[\p{L}\p{M}\p{N}_]$/u.test(src.slice(Math.max(0, i - 2), i)) && /^[\p{L}\p{M}\p{N}_]/u.test(src.slice(i + 1, i + 3))) { push(c, i, i + 1); continue; }
       if ((c === '*' || c === '_') && (/\S/.test(src[i + 1] ?? ' ') || /\S/.test(src[i - 1] ?? ' '))) continue;
       if (c === '!' && src[i + 1] === '[') { // an image: its alt text is not on the page as text (a caption may be; keep the alt)
         const close = src.indexOf('](', i); const end = close >= 0 ? src.indexOf(')', close) : -1;
