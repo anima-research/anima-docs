@@ -107,9 +107,19 @@ export function annotationLayer(root: HTMLElement, sink: AnnotationSink): Annota
       if (r) markRange(idx, r.start, r.end, t.id, !!t.resolved);
     }
   }
+  function textAt(x: number, y: number): Node | null {
+    const doc = document as Document & { caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node } | null };
+    const pos = doc.caretPositionFromPoint ? doc.caretPositionFromPoint(x, y) : null;
+    return pos ? pos.offsetNode : document.caretRangeFromPoint ? document.caretRangeFromPoint(x, y)?.startContainer ?? null : null;
+  }
+  let firstText: Node | null = null;
   const onClick = (e: MouseEvent) => {
     const m = (e.target as HTMLElement | null)?.closest?.('mark.anima-mark');
-    if (m && root.contains(m)) { e.preventDefault(); sink.openThread(m.getAttribute('data-thread') ?? ''); }
+    if (!m || !root.contains(m)) return;
+    e.preventDefault();
+    if (e.detail > 1 || window.getSelection()?.isCollapsed === false) return;
+    firstText = textAt(e.clientX, e.clientY);
+    sink.openThread(m.getAttribute('data-thread') ?? '');
   };
 
   // ------------------------------------------------------------ selection → comment
@@ -139,7 +149,7 @@ export function annotationLayer(root: HTMLElement, sink: AnnotationSink): Annota
   }
   const onMouseUp = () => setTimeout(showBar, 0);
   const onKeyUp = (e: KeyboardEvent) => { if (e.shiftKey || e.key === 'Shift') setTimeout(showBar, 0); };
-  const onMouseDown = (e: MouseEvent) => { if (!bar.contains(e.target as Node)) hideBar(); };
+  const onMouseDown = (e: MouseEvent) => { if (e.detail <= 1) firstText = null; if (!bar.contains(e.target as Node)) hideBar(); };
   const onScroll = () => hideBar();
 
   // ------------------------------------------------------------ double-click → edit a text run
@@ -171,9 +181,7 @@ export function annotationLayer(root: HTMLElement, sink: AnnotationSink): Annota
   }
   const onDblClick = (e: MouseEvent) => {
     if (!config.canEdit || editing || !root.contains(e.target as Node)) return;
-    const doc = document as Document & { caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node } | null };
-    const pos = doc.caretPositionFromPoint ? doc.caretPositionFromPoint(e.clientX, e.clientY) : null;
-    const node = pos ? pos.offsetNode : document.caretRangeFromPoint ? document.caretRangeFromPoint(e.clientX, e.clientY)?.startContainer ?? null : null;
+    const node = firstText?.isConnected ? firstText : textAt(e.clientX, e.clientY);
     if (node && node.nodeType === 3 && root.contains(node) && !(node.parentElement?.closest('[data-anima-ui],a,button,input,select,textarea,code,pre,.katex'))) { e.preventDefault(); startEdit(node as Text); }
   };
   const onKeyDown = (e: KeyboardEvent) => {

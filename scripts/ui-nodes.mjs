@@ -1011,6 +1011,214 @@ try {
     await carol.locator('.rail-close').click();
   });
 
+  async function bobComments(d, pairs) {
+    const bobSub = (await api(bob, 'GET', '/api/me')).json.you.sub;
+    assert((await api(carol, 'POST', `/api/docs/${d.id}/share`, { who: bobSub, role: 'commenter' })).status === 200, 'share with Bob');
+    const ids = [];
+    for (const [quote, text] of pairs) ids.push(threadOf(await api(bob, 'POST', '/api/operations/add_comment', { document: d.id, quote, text })));
+    return ids;
+  }
+  const marked = (p) => p.locator('.comment-rail .rail-filter .seg-btn[aria-selected="true"]').innerText();
+  const activeId = (p) => p.evaluate(() => document.querySelector('.thread-card.active')?.getAttribute('data-id') ?? null);
+  async function doubleClick(p, x, y, gap) {
+    await p.mouse.move(x, y);
+    await p.mouse.down({ clickCount: 1 });
+    await p.mouse.up({ clickCount: 1 });
+    await sleep(gap);
+    await p.mouse.down({ clickCount: 2 });
+    await p.mouse.up({ clickCount: 2 });
+  }
+
+  await step('with the list on Resolved, or with a search that misses the thread, a click on an open highlight shows its card', async () => {
+    await ensureCarol();
+    const d = (await api(carol, 'POST', '/api/docs', { title: 'Hidden', content: '# Hidden\n\nThe first claim is here.\n\nThe second claim is there.\n' })).json;
+    const [, done] = await bobComments(d, [['first claim', 'Still open.'], ['second claim', 'Settled already.']]);
+    await api(bob, 'POST', '/api/operations/resolve_comment', { comment: done });
+    await openDoc(carol, d.id);
+    await carol.locator('.seg-btn[data-mode=preview]').click();
+    const mark = carol.locator('.preview-body mark.anima-mark[data-thread]', { hasText: 'first claim' });
+    await mark.waitFor({ timeout: 8000 });
+    await carol.locator('button.comments-btn').click();
+    await carol.locator('.comment-rail .rail-filter .seg-btn', { hasText: 'Resolved' }).click();
+    await carol.locator('.comment-rail.drawer.open .thread-card', { hasText: 'Settled already.' }).waitFor({ timeout: 5000 });
+    await mark.click();
+    await carol.locator('.comment-rail.drawer.open .thread-card.active', { hasText: 'Still open.' }).waitFor({ state: 'visible', timeout: 5000 });
+    assert((await marked(carol)) === 'All', `from Resolved, the marked tab should be All, not ${await marked(carol)}`);
+    const search = carol.locator('.comment-rail .rail-search-input');
+    await search.fill('zebra');
+    await carol.locator('.comment-rail.drawer .empty-state', { hasText: 'No comments match' }).waitFor({ timeout: 5000 });
+    await mark.click();
+    await carol.locator('.comment-rail.drawer.open .thread-card.active', { hasText: 'Still open.' }).waitFor({ state: 'visible', timeout: 5000 });
+    assert((await search.inputValue()) === '', `the search box should be empty, not ${JSON.stringify(await search.inputValue())}`);
+    assert(await carol.locator('.comment-rail .rail-search-clear').isHidden(), 'the search’s clear button should be hidden');
+    await carol.locator('.rail-close').click();
+    await carol.locator('.seg-btn[data-mode=edit]').click();
+  });
+
+  await step('a press on another card while a comment is being edited closes the edited card at once', async () => {
+    await ensureCarol();
+    const { d, first, other } = await threadsDoc('Press elsewhere', { beside: true });
+    await openCard(carol, d, 'What do we think?');
+    await beginEdit(carol);
+    await carol.keyboard.type('An edit in progress.');
+    await carol.locator(`.thread-card[data-id="${other}"]`).click();
+    await carol.locator(`.thread-card[data-id="${other}"].active`).waitFor({ timeout: 5000 });
+    const edited = carol.locator(`.thread-card[data-id="${first}"]`);
+    await edited.and(carol.locator('.thread-card.closed')).waitFor({ timeout: 2000 });
+    assert((await edited.locator('.collapse-btn').count()) === 0, 'the edited card still shows its Collapse button');
+    assert((await edited.locator('textarea.reply').count()) === 0, 'the edited card still shows its reply box');
+  });
+
+  await step('a double-click on a highlight with 150 ms or 400 ms between its clicks edits that highlight’s text: with the list closed, beside another highlight, in a tall document, and in a page’s frame with centred text, alone, beside another, and beside another where the text can’t be selected', async () => {
+    await ensureCarol();
+    const quote = 'ship the whole thing in early March';
+    const line = 'We will ship the whole thing in early March, then a long tail of words that runs on past the highlight for a good while.';
+    const plain = (await api(carol, 'POST', '/api/docs', { title: 'Pace', content: `# Pace\n\n${line}\n` })).json;
+    const [plainId] = await bobComments(plain, [[quote, 'When?']]);
+    const pair = (await api(carol, 'POST', '/api/docs', { title: 'Pace pair', content: '# Pace pair\n\nWe will ship the whole thing in early March, second highlight here, then a long tail.\n' })).json;
+    const [pairA] = await bobComments(pair, [['ship the whole thing', 'About A.'], ['in early March, second highlight', 'About B.']]);
+    const filler = Array.from({ length: 80 }, (_, i) => `Filler paragraph ${i + 1} of the tall document, with enough words to take a line.`);
+    filler.splice(40, 0, line);
+    const tall = (await api(carol, 'POST', '/api/docs', { title: 'Pace tall', content: `# Pace tall\n\n${filler.join('\n\n')}\n` })).json;
+    const [tallId] = await bobComments(tall, [[quote, 'When?']]);
+    const framed = (await api(carol, 'POST', '/api/docs', { title: 'Pace page', type: 'html', content: `<!doctype html><title>Pace page</title><body><p id="p1" style="text-align:center">${line}</p></body>` })).json;
+    const [framedId] = await bobComments(framed, [[quote, 'When?']]);
+    const framedPair = (await api(carol, 'POST', '/api/docs', { title: 'Pace page pair', type: 'html', content: '<!doctype html><title>Pace page pair</title><body><p id="p1" style="text-align:center">We will ship the whole thing in early March, second highlight here, then a long tail.</p></body>' })).json;
+    const [framedA] = await bobComments(framedPair, [['ship the whole thing', 'About A.'], ['in early March, second highlight', 'About B.']]);
+    const unselectable = (await api(carol, 'POST', '/api/docs', { title: 'Pace page unselectable', type: 'html', content: '<!doctype html><title>Pace page unselectable</title><body><p id="p1" style="text-align:center;user-select:none">We will ship the whole thing in early March, second highlight here, then a long tail.</p></body>' })).json;
+    const [unselectableA] = await bobComments(unselectable, [['ship the whole thing', 'About A.'], ['in early March, second highlight', 'About B.']]);
+    const cases = [
+      ['with the list closed', plain.id, quote, plainId, false, false],
+      ['beside another highlight', pair.id, 'ship the whole thing', pairA, false, false],
+      ['in a tall document', tall.id, quote, tallId, false, true],
+      ['in a page’s frame with centred text', framed.id, quote, framedId, true, false],
+      ['in a page’s frame with centred text, beside another highlight', framedPair.id, 'ship the whole thing', framedA, true, false],
+      ['in a page’s frame with centred text that can’t be selected, beside another highlight', unselectable.id, 'ship the whole thing', unselectableA, true, false],
+    ];
+    const wrong = [];
+    for (const [where, id, text, thread, inFrame, scrollAway] of cases) {
+      for (const gap of [150, 400]) {
+        await openDoc(carol, id);
+        if (!inFrame) await carol.locator('.seg-btn[data-mode=preview]').click();
+        const scope = inFrame ? carol.frameLocator('.preview-pane iframe.page-frame').locator('body') : carol.locator('.preview-body');
+        const mark = scope.locator('mark.anima-mark[data-thread]', { hasText: text });
+        await mark.waitFor({ timeout: 8000 });
+        if (scrollAway) {
+          await mark.evaluate((m) => { const pane = document.querySelector('.preview-pane'); pane.scrollTop += m.getBoundingClientRect().top - pane.getBoundingClientRect().top - 120; });
+          await sleep(300);
+        }
+        const box = await mark.boundingBox();
+        await doubleClick(carol, box.x + box.width / 2, box.y + box.height / 2, gap);
+        const edit = scope.locator('.anima-edit');
+        const edited = await edit.waitFor({ timeout: 3000 }).then(() => edit.innerText(), () => null);
+        if (edited !== text) wrong.push(`${where}, ${gap} ms apart, it edits ${edited === null ? 'nothing' : JSON.stringify(edited.slice(0, 40))}`);
+        const active = await activeId(carol);
+        if (active !== thread) wrong.push(`${where}, ${gap} ms apart, the active thread is ${active}, not the highlight’s`);
+        if (edited !== null) await carol.keyboard.press('Escape');
+      }
+    }
+    assert(!wrong.length, wrong.join('; '));
+  });
+
+  await step('a double-click on a highlight whose second click lands on the list of comments, on a card or on a tab, changes nothing there and starts no edit', async () => {
+    await ensureCarol();
+    const words = 'This last paragraph carries the comment that the double-click is on, and it runs over three lines of the page so that some of it sits under the list once the list comes in from the right.';
+    const others = ['First paragraph to talk about.', 'Second paragraph to talk about.', 'Third paragraph to talk about.', 'Fourth paragraph to talk about.'];
+    const filler = Array.from({ length: 30 }, (_, i) => `Filler paragraph ${i + 1}, so that the preview can scroll.`);
+    const d = (await api(carol, 'POST', '/api/docs', { title: 'Under the list', content: `# Under the list\n\n${others.join('\n\n')}\n\n${words}\n\n${filler.join('\n\n')}\n` })).json;
+    const ids = await bobComments(d, [...others.map((o, i) => [o, `Card ${i + 1}.`]), [words, 'The one clicked.']]);
+    const target = ids[ids.length - 1];
+    const p = await carolCtx.newPage();
+    p.on('pageerror', (e) => errors.push(`carol (narrow): ${e.message}`));
+    const resolvedCount = () => p.evaluate(() => window.__anima.nodes.allThreads().filter((t) => t.resolved).length);
+    const wrong = [];
+    try {
+      await p.addInitScript(() => { window.__second = null; document.addEventListener('mousedown', (e) => { if (e.detail === 2) { const c = e.target.closest?.('.thread-card'); const tab = e.target.closest?.('.rail-filter .seg-btn'); window.__second = c ? `card ${c.getAttribute('data-id')}` : tab ? `tab ${tab.textContent}` : e.target.closest?.('.comment-rail') ? 'the list' : e.target.nodeName; } }, true); });
+      await p.setViewportSize({ width: 1200, height: 900 });
+      for (const onto of ['a card', 'a tab']) {
+        await openDoc(p, d.id);
+        await p.locator('.seg-btn[data-mode=preview]').click();
+        const mark = p.locator('.preview-body mark.anima-mark[data-thread]', { hasText: 'This last paragraph' });
+        await mark.waitFor({ timeout: 8000 });
+        let tabBefore = 'Open';
+        let pt;
+        if (onto === 'a card') {
+          pt = await mark.evaluate((m) => {
+            const listLeft = window.innerWidth - 380;
+            const r = [...m.getClientRects()].find((q) => q.right > listLeft + 60);
+            return r ? { x: listLeft + 40, y: r.top + r.height / 2 } : null;
+          });
+        } else {
+          await p.locator('button.comments-btn').click();
+          await p.locator('.comment-rail .rail-filter .seg-btn', { hasText: 'All' }).click();
+          await p.locator('.rail-close').click();
+          await p.locator('.comment-rail.drawer.open').waitFor({ state: 'detached', timeout: 5000 });
+          await sleep(400);
+          tabBefore = 'All';
+          pt = await mark.evaluate((m) => {
+            const drawer = document.querySelector('.comment-rail.drawer');
+            const tab = [...drawer.querySelectorAll('.rail-filter .seg-btn')].find((b) => b.textContent === 'Open');
+            const dr = drawer.getBoundingClientRect(), t = tab.getBoundingClientRect();
+            const x = window.innerWidth - dr.width + (t.left - dr.left) + t.width / 2, y = t.top + t.height / 2;
+            const r = [...m.getClientRects()].find((q) => q.left < x - 10 && q.right > x + 10);
+            if (!r) return null;
+            document.querySelector('.preview-pane').scrollTop += r.top + r.height / 2 - y;
+            return { x, y };
+          });
+          await sleep(300);
+        }
+        assert(pt, `no line of the highlight reaches under where ${onto} of the list comes in`);
+        const before = await resolvedCount();
+        await doubleClick(p, pt.x, pt.y, 400);
+        await sleep(300);
+        const landed = await p.evaluate(() => window.__second);
+        const there = onto === 'a card' ? ids.slice(0, -1).some((i) => landed === `card ${i}`) : landed === 'tab Open';
+        if (!there) { wrong.push(`the second press should land on ${onto === 'a card' ? "another thread's card" : 'the Open tab'}, not on ${landed}`); continue; }
+        const active = await activeId(p), tab = await marked(p);
+        if (active !== target) wrong.push(`on ${onto}: the active thread is ${active}, not the clicked one`);
+        if (tab !== tabBefore) wrong.push(`on ${onto}: the marked tab is ${tab}, not ${tabBefore}`);
+        if ((await resolvedCount()) !== before) wrong.push(`on ${onto}: the resolved threads changed`);
+        if ((await p.locator('.anima-edit').count()) !== 0) wrong.push(`on ${onto}: an edit started under the list`);
+      }
+    } finally {
+      await p.close();
+    }
+    assert(!wrong.length, wrong.join('; '));
+  });
+
+  await step('a drag that selects text inside a highlight opens no list, and the Comment bar sits at its selection: in Preview and in a page’s frame', async () => {
+    await ensureCarol();
+    const quote = 'ship the whole thing in early March';
+    const line = 'We will ship the whole thing in early March this year.';
+    const md = (await api(carol, 'POST', '/api/docs', { title: 'Drag', content: `# Drag\n\n${line}\n` })).json;
+    await bobComments(md, [[quote, 'When?']]);
+    const page = (await api(carol, 'POST', '/api/docs', { title: 'Drag page', type: 'html', content: `<!doctype html><title>Drag page</title><body><p id="p1">${line}</p></body>` })).json;
+    await bobComments(page, [[quote, 'When?']]);
+    for (const [where, id, inFrame] of [['Preview', md.id, false], ['a page’s frame', page.id, true]]) {
+      await openDoc(carol, id);
+      if (!inFrame) await carol.locator('.seg-btn[data-mode=preview]').click();
+      const scope = inFrame ? carol.frameLocator('.preview-pane iframe.page-frame').locator('body') : carol.locator('body');
+      const mark = scope.locator('mark.anima-mark[data-thread]', { hasText: quote });
+      await mark.waitFor({ timeout: 8000 });
+      const box = await mark.boundingBox();
+      const y = box.y + box.height / 2;
+      await carol.mouse.move(box.x + box.width * 0.15, y);
+      await carol.mouse.down();
+      await carol.mouse.move(box.x + box.width * 0.6, y, { steps: 8 });
+      await carol.mouse.up();
+      await sleep(600);
+      assert(!(await listOpen(carol)), `in ${where}, the drag opened the list`);
+      const bar = scope.locator('.anima-bar:not([hidden])');
+      await bar.waitFor({ timeout: 3000 });
+      const off = await scope.evaluate(() => {
+        const s = window.getSelection().getRangeAt(0).getBoundingClientRect();
+        const b = document.querySelector('.anima-bar').getBoundingClientRect();
+        return Math.round((b.left + b.width / 2) - (s.left + s.width / 2));
+      });
+      assert(Math.abs(off) <= 2, `in ${where}, the Comment bar sits ${off} px from the middle of its selection`);
+    }
+  });
+
   await step('Preview shows open suggestions as applied: the result, with the inserted text highlighted; the bar hides and shows them', async () => {
     const d = (await api(alice, 'POST', '/api/docs', { title: 'Fruit', content: '# Fruit\n\nIntro about apples and figs.\n' })).json;
     const bobSub = (await api(bob, 'GET', '/api/me')).json.you.sub;

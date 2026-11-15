@@ -99,9 +99,19 @@
       if (r) markRange(idx, r.start, r.end, t.id, !!t.resolved);
     }
   }
+  function textAt(x, y) {
+    var pos = document.caretPositionFromPoint ? document.caretPositionFromPoint(x, y) : null;
+    return pos ? pos.offsetNode : (document.caretRangeFromPoint ? document.caretRangeFromPoint(x, y).startContainer : null);
+  }
+  var firstText = null;
   document.addEventListener('click', function (e) {
     var m = e.target && e.target.closest ? e.target.closest('mark.anima-mark') : null;
-    if (m) { e.preventDefault(); post({ type: 'open-thread', id: m.getAttribute('data-thread') }); }
+    if (!m) return;
+    e.preventDefault();
+    var s = window.getSelection();
+    if (e.detail > 1 || (s && !s.isCollapsed)) return;
+    firstText = textAt(e.clientX, e.clientY);
+    post({ type: 'open-thread', id: m.getAttribute('data-thread') });
   }, true);
 
   // ------------------------------------------------------------ selection → comment
@@ -137,7 +147,7 @@
   commentBtn.addEventListener('click', function () { if (pending) { post({ type: 'comment', quote: pending.quote, prefix: pending.prefix, suffix: pending.suffix }); hideBar(); window.getSelection().removeAllRanges(); } });
   document.addEventListener('mouseup', function () { setTimeout(showBar, 0); });
   document.addEventListener('keyup', function (e) { if (e.shiftKey || e.key === 'Shift') setTimeout(showBar, 0); });
-  document.addEventListener('mousedown', function (e) { if (!bar.contains(e.target)) hideBar(); }, true);
+  document.addEventListener('mousedown', function (e) { if (e.detail <= 1) firstText = null; if (!bar.contains(e.target)) hideBar(); }, true);
   document.addEventListener('scroll', hideBar, true);
 
   // ------------------------------------------------------------ double-click → edit a text run
@@ -170,8 +180,7 @@
   }
   document.addEventListener('dblclick', function (e) {
     if (!config.canEdit || editing) return;
-    var pos = document.caretPositionFromPoint ? document.caretPositionFromPoint(e.clientX, e.clientY) : null;
-    var node = pos ? pos.offsetNode : (document.caretRangeFromPoint ? document.caretRangeFromPoint(e.clientX, e.clientY).startContainer : null);
+    var node = firstText && firstText.isConnected ? firstText : textAt(e.clientX, e.clientY);
     if (node && node.nodeType === 3 && !node.parentElement.closest('[data-anima-ui],a,button,input,select,textarea,code,pre')) { e.preventDefault(); startEdit(node); }
   }, true);
   document.addEventListener('keydown', function (e) {

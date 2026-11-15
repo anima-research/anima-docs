@@ -323,7 +323,11 @@ export class CommentsRail {
   focusThread(id: string) {
     const t = this.threads.find((x) => x.id === id);
     if (!t) return;
-    if (t.resolved && this.filter === 'open') { this.filter = 'all'; this.renderHead(); }
+    const hidden = t.resolved ? this.filter === 'open' : this.filter === 'resolved';
+    const missed = !!this.query && !this.matchIn(t);
+    if (hidden) this.filter = 'all';
+    if (missed) { this.searchEl.value = ''; this.query = ''; this.searchClear.hidden = true; }
+    if (hidden || missed) this.renderHead();
     if (this.layout === 'drawer' && !this.drawerOpen) this.setDrawer(true);
     this.setActive(id, { scroll: true });
   }
@@ -637,7 +641,8 @@ export class CommentsRail {
     card.el.classList.toggle('suggestion', !!t.suggestion);
     if (sig === card.sig) return;
     const focus = document.activeElement;
-    if (focus && (focus === card.revising || [...card.editing.values()].includes(focus as HTMLTextAreaElement))) return;
+    const sameState = card.el.classList.contains('closed') === !active;
+    if (sameState && focus && (focus === card.revising || [...card.editing.values()].includes(focus as HTMLTextAreaElement))) return;
     card.sig = sig;
     const ctx = this.mentionCtx(t);
     const parts: (HTMLElement | null)[] = [];
