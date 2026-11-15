@@ -823,6 +823,21 @@ try {
     await carol.locator('.rail-close').click();
   });
 
+  await step('a click on a highlight in a page’s frame opens its thread where the frame finds no caret at the click', async () => {
+    await ensureCarol();
+    const page = (await api(carol, 'POST', '/api/docs', { title: 'No caret', type: 'html', content: '<!doctype html><title>No caret</title><body><p id="p1">We ship the thing in March.</p></body>' })).json;
+    threadOf(await api(carol, 'POST', '/api/operations/add_comment', { document: page.id, quote: 'the thing', text: 'Which thing, with no caret?' }));
+    await openDoc(carol, page.id);
+    const body = carol.frameLocator('.preview-pane iframe.page-frame').locator('body');
+    const framed = body.locator('mark.anima-mark[data-thread]', { hasText: 'the thing' });
+    await framed.waitFor({ timeout: 8000 });
+    await body.evaluate(() => { document.caretPositionFromPoint = undefined; document.caretRangeFromPoint = () => null; });
+    assert(!(await listOpen(carol)), 'the list of comments should be closed before the click');
+    await framed.click();
+    await carol.locator('.comment-rail.drawer.open .thread-card.active', { hasText: 'Which thing, with no caret?' }).waitFor({ state: 'visible', timeout: 5000 });
+    await carol.locator('.rail-close').click();
+  });
+
   await step('with the list of comments open on Open, a click on a resolved thread’s highlight shows its card and marks All', async () => {
     await ensureCarol();
     const d = (await api(carol, 'POST', '/api/docs', { title: 'Settled', content: '# Settled\n\nThe first claim is here.\n\nThe second claim is there.\n' })).json;
@@ -842,6 +857,25 @@ try {
     assert((await marked()) === 'All', `the marked tab should be All, not ${await marked()}`);
     await carol.locator('.rail-close').click();
     await carol.locator('.seg-btn[data-mode=edit]').click();
+  });
+
+  await step('a link to a resolved comment, opened in Edit mode with the comments beside the text, opens the list at its card', async () => {
+    await ensureCarol();
+    const d = (await api(carol, 'POST', '/api/docs', { title: 'Linked', content: '# Linked\n\nThe first claim is here.\n\nThe second claim is there.\n' })).json;
+    threadOf(await api(carol, 'POST', '/api/operations/add_comment', { document: d.id, quote: 'first claim', text: 'Still open.' }));
+    const done = threadOf(await api(carol, 'POST', '/api/operations/add_comment', { document: d.id, quote: 'second claim', text: 'Settled by the link.' }));
+    await api(carol, 'POST', '/api/operations/resolve_comment', { comment: done });
+    await openDoc(carol, d.id);
+    await carol.locator('.seg-btn[data-mode=edit]').click();
+    await carol.locator('.comment-rail.margin').waitFor({ state: 'attached', timeout: 5000 });
+    const p = await carolCtx.newPage();
+    p.on('pageerror', (e) => errors.push(`carol (link): ${e.message}`));
+    try {
+      await p.goto(`${ORIGIN}/d/${d.id}#comment-${done}`);
+      await p.locator('.comment-rail.drawer.open .thread-card.active.resolved', { hasText: 'Settled by the link.' }).waitFor({ state: 'visible', timeout: 8000 });
+    } finally {
+      await p.close();
+    }
   });
 
   const boxState = (p, sel) => p.evaluate((q) => {
@@ -971,6 +1005,26 @@ try {
     await carol.keyboard.press('Escape');
     await carol.locator(editBox).waitFor({ state: 'detached', timeout: 5000 });
     assert(!(await carol.locator('.thread-card.active .comment.root .comment-body').innerText()).includes('Not this.'), 'Escape keeps the saved text');
+  });
+
+  await step('a comment being edited and left without saving shows someone else’s reply at the next render', async () => {
+    await ensureCarol();
+    const { d, first, other } = await threadsDoc('Edit left', { beside: true });
+    await sharedWithBob(d);
+    await clockPage(async (p) => {
+      await p.clock.setSystemTime(new Date(Math.ceil(Date.now() / 60_000) * 60_000 + 1000));
+      await openCard(p, d, 'What do we think?');
+      await beginEdit(p);
+      await p.keyboard.insertText('An edit left unsaved.');
+      await api(bob, 'POST', '/api/operations/reply_comment', { comment: first, text: 'Bob replies meanwhile.' });
+      await received(p, 'Bob replies meanwhile.');
+      assert(!(await p.locator('.thread-card.active .comment.reply', { hasText: 'Bob replies meanwhile.' }).count()), 'while the box has the focus, its card should not show the reply yet');
+      await p.locator(editBox).evaluate((ta) => ta.blur());
+      await api(bob, 'POST', '/api/operations/reply_comment', { comment: other, text: 'Bob on the other thread.' });
+      await received(p, 'Bob on the other thread.');
+      await p.locator('.thread-card.active .comment.reply', { hasText: 'Bob replies meanwhile.' }).waitFor({ timeout: 5000 });
+      assert((await p.locator(editBox).inputValue()) === 'An edit left unsaved.', 'the edit box should keep its text');
+    });
   });
 
   await step('a suggestion’s text being revised keeps its focus, its text and its scroll across the minute’s tick; Save closes the box', async () => {
@@ -1112,7 +1166,7 @@ try {
         const edit = scope.locator('.anima-edit');
         const edited = await edit.waitFor({ timeout: 3000 }).then(() => edit.innerText(), () => null);
         if (edited !== text) wrong.push(`${where}, ${gap} ms apart, it edits ${edited === null ? 'nothing' : JSON.stringify(edited.slice(0, 40))}`);
-        const active = await activeId(carol);
+        const active = await carol.waitForFunction((t) => document.querySelector('.thread-card.active')?.getAttribute('data-id') === t, thread, { timeout: 3000 }).then(() => thread, () => activeId(carol));
         if (active !== thread) wrong.push(`${where}, ${gap} ms apart, the active thread is ${active}, not the highlight’s`);
         if (edited !== null) await carol.keyboard.press('Escape');
       }
@@ -1120,7 +1174,7 @@ try {
     assert(!wrong.length, wrong.join('; '));
   });
 
-  await step('a double-click on a highlight whose second click lands on the list of comments, on a card or on a tab, changes nothing there and starts no edit', async () => {
+  await step('a double-click on a highlight whose second click lands on the list of comments, on a card or on a tab, changes nothing there and starts no edit; a second double-click on that text, once it has slid out from under the list, edits it', async () => {
     await ensureCarol();
     const words = 'This last paragraph carries the comment that the double-click is on, and it runs over three lines of the page so that some of it sits under the list once the list comes in from the right.';
     const others = ['First paragraph to talk about.', 'Second paragraph to talk about.', 'Third paragraph to talk about.', 'Fourth paragraph to talk about.'];
@@ -1168,6 +1222,10 @@ try {
           await sleep(300);
         }
         assert(pt, `no line of the highlight reaches under where ${onto} of the list comes in`);
+        const at = await mark.evaluate((m, q) => {
+          const i = [...m.getClientRects()].findIndex((r) => r.left <= q.x && r.right >= q.x && r.top <= q.y && r.bottom >= q.y);
+          return i < 0 ? null : { i, dx: q.x - m.getClientRects()[i].left, dy: q.y - m.getClientRects()[i].top };
+        }, pt);
         const before = await resolvedCount();
         await doubleClick(p, pt.x, pt.y, 400);
         await sleep(300);
@@ -1179,6 +1237,14 @@ try {
         if (tab !== tabBefore) wrong.push(`on ${onto}: the marked tab is ${tab}, not ${tabBefore}`);
         if ((await resolvedCount()) !== before) wrong.push(`on ${onto}: the resolved threads changed`);
         if ((await p.locator('.anima-edit').count()) !== 0) wrong.push(`on ${onto}: an edit started under the list`);
+        if (onto !== 'a card') continue;
+        const again = at && await mark.evaluate((m, a) => { const r = m.getClientRects()[a.i]; return r ? { x: r.left + a.dx, y: r.top + a.dy, listLeft: window.innerWidth - 380 } : null; }, at);
+        if (!again || again.x >= again.listLeft - 10) { wrong.push(`on ${onto}: the clicked words didn't slide out from under the list (${JSON.stringify(again)})`); continue; }
+        await doubleClick(p, again.x, again.y, 150);
+        const edit = p.locator('.preview-body .anima-edit');
+        const edited = await edit.waitFor({ timeout: 3000 }).then(() => edit.innerText(), () => null);
+        if (edited !== words) wrong.push(`on ${onto}: a second double-click on the slid words edits ${edited === null ? 'nothing' : JSON.stringify(edited.slice(0, 40))}`);
+        if (edited !== null) await p.keyboard.press('Escape');
       }
     } finally {
       await p.close();
@@ -1200,13 +1266,17 @@ try {
       const scope = inFrame ? carol.frameLocator('.preview-pane iframe.page-frame').locator('body') : carol.locator('body');
       const mark = scope.locator('mark.anima-mark[data-thread]', { hasText: quote });
       await mark.waitFor({ timeout: 8000 });
+      if (inFrame) await carol.evaluate(() => { window.__frameSeen = []; window.addEventListener('message', (e) => { if (e.data?.anima === 'page') window.__frameSeen.push(e.data.type); }); });
       const box = await mark.boundingBox();
       const y = box.y + box.height / 2;
       await carol.mouse.move(box.x + box.width * 0.15, y);
       await carol.mouse.down();
       await carol.mouse.move(box.x + box.width * 0.6, y, { steps: 8 });
       await carol.mouse.up();
-      await sleep(600);
+      if (inFrame) {
+        await scope.evaluate(() => window.parent.postMessage({ anima: 'page', type: 'step-sentinel' }, '*'));
+        await carol.waitForFunction(() => window.__frameSeen.includes('step-sentinel'), null, { timeout: 5000 });
+      }
       assert(!(await listOpen(carol)), `in ${where}, the drag opened the list`);
       const bar = scope.locator('.anima-bar:not([hidden])');
       await bar.waitFor({ timeout: 3000 });

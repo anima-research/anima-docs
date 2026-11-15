@@ -328,7 +328,7 @@ export class CommentsRail {
     if (hidden) this.filter = 'all';
     if (missed) { this.searchEl.value = ''; this.query = ''; this.searchClear.hidden = true; }
     if (hidden || missed) this.renderHead();
-    if (this.layout === 'drawer' && !this.drawerOpen) this.setDrawer(true);
+    if (!this.drawerOpen && (this.layout === 'drawer' || t.resolved)) this.setDrawer(true);
     this.setActive(id, { scroll: true });
   }
 

@@ -101,7 +101,9 @@
   }
   function textAt(x, y) {
     var pos = document.caretPositionFromPoint ? document.caretPositionFromPoint(x, y) : null;
-    return pos ? pos.offsetNode : (document.caretRangeFromPoint ? document.caretRangeFromPoint(x, y).startContainer : null);
+    if (pos) return pos.offsetNode;
+    var r = document.caretRangeFromPoint ? document.caretRangeFromPoint(x, y) : null;
+    return r ? r.startContainer : null;
   }
   var firstText = null;
   document.addEventListener('click', function (e) {
