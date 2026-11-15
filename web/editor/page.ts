@@ -953,8 +953,9 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     return findQuote(view.state.doc.toString(), String(m.quote ?? ''), typeof m.prefix === 'string' ? m.prefix : null, typeof m.suffix === 'string' ? m.suffix : null, { html, markdown: !html, fold });
   }
   // What a rendered surface (the framed page or the preview) proposes. Nothing changes the document unconfirmed.
+  let opened = false;
   const proposals = {
-    openThread(id: string) { rail.setActive(id, { scroll: true }); },
+    openThread(id: string) { opened = true; rail.focusThread(id); },
     comment(m: { quote?: unknown; prefix?: unknown; suffix?: unknown }) {
       if (!atLeast(role, 'commenter')) return;
       const r = sourceRange(m, true);
@@ -999,6 +1000,11 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     edit: (p) => proposals.edit(p, () => renderPreview()),
   });
   cleanups.push(() => previewAnnotations?.destroy());
+  const onSequencePress = (e: MouseEvent) => { if (e.detail <= 1) opened = false; else if (opened) { e.preventDefault(); e.stopPropagation(); } };
+  const onSequenceClick = (e: MouseEvent) => { if (opened && e.detail > 1) { e.preventDefault(); e.stopPropagation(); } };
+  document.addEventListener('mousedown', onSequencePress, true);
+  document.addEventListener('click', onSequenceClick, true);
+  cleanups.push(() => { document.removeEventListener('mousedown', onSequencePress, true); document.removeEventListener('click', onSequenceClick, true); });
   // ⌘F / Ctrl-F anywhere on the page goes to the editor's search while the editor is on screen: the
   // browser's own find only sees the lines the editor has rendered, so it misses most of a long document.
   const onFindKey = (e: KeyboardEvent) => {
