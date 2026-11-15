@@ -391,6 +391,50 @@ try {
     await alice.getByRole('radio', { name: 'Edit mode' }).click();
   });
 
+  await step('a comment anchors on preview text the typographer changed, in a code span, and in a table cell’s input', async () => {
+    const p = await aliceCtx.newPage();
+    watch(p, 'alice-anchors');
+    await p.goto(`${ORIGIN}/`);
+    const d = await p.evaluate(() => fetch('/api/docs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: 'Anchors', content: "It's -- a test of snake_case, \u{1E900}_x and x_\u{1E900}.\n\nThe value is `my_var` here.\n\nSee [the guide](https://x.y/anchor) on anchor.\n\n| Name | Note |\n| --- | --- |\n| Cell alpha | Cell beta |" }) }).then((r) => r.json()));
+    await openDoc(p, d.id);
+    await p.getByRole('radio', { name: 'Preview mode' }).click();
+    await p.locator('.preview-body table').waitFor();
+    for (const shown of ['It’s – a test of snake_case, \u{1E900}_x and x_\u{1E900}', 'my_var', 'anchor']) {
+      await p.evaluate((needle) => {
+        const w = document.createTreeWalker(document.querySelector('.preview-body'), NodeFilter.SHOW_TEXT);
+        for (let n = w.nextNode(); n; n = w.nextNode()) {
+          const i = n.data.indexOf(needle);
+          if (i >= 0) { const r = document.createRange(); r.setStart(n, i); r.setEnd(n, i + needle.length); const s = getSelection(); s.removeAllRanges(); s.addRange(r); document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true })); return; }
+        }
+        throw new Error(`text not in preview: ${needle}`);
+      }, shown);
+      await p.locator('.anima-bar:not([hidden]) button', { hasText: 'Comment' }).click();
+      await p.locator('.thread-card.draft textarea').fill(`on ${shown}`);
+      await p.keyboard.press('ControlOrMeta+Enter');
+      await p.locator('.preview-body mark.anima-mark', { hasText: new RegExp('^' + shown.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$') }).waitFor();
+    }
+    await p.getByRole('radio', { name: 'Edit mode' }).click();
+    await p.locator('.editor-page .cm-content').click();
+    await p.keyboard.press('ControlOrMeta+Home');
+    await p.keyboard.press('Shift+End');
+    await p.locator('.cm-table-widget td', { hasText: 'Cell alpha' }).click();
+    const input = p.locator('input.cm-table-input');
+    await input.evaluate((el) => el.setSelectionRange(5, 10));
+    await p.locator('button.tb-comment').click();
+    await p.locator('.thread-card.draft textarea').fill('on alpha');
+    await p.keyboard.press('ControlOrMeta+Enter');
+    await p.locator('.thread-card:not(.draft)', { hasText: 'on alpha' }).waitFor();
+    await p.getByRole('radio', { name: 'Preview mode' }).click();
+    await p.locator('.preview-body table mark.anima-mark', { hasText: /^alpha$/ }).waitFor();
+    await p.getByRole('radio', { name: 'Edit mode' }).click();
+    await p.locator('.cm-table-widget td', { hasText: 'Cell beta' }).click();
+    await p.locator('input.cm-table-input').evaluate((el) => { el.value = ` ${el.value}`; el.setSelectionRange(0, 1); });
+    await p.locator('button.tb-comment').click();
+    await p.locator('.toast', { hasText: 'Select some text to comment on.' }).waitFor({ timeout: 4000 });
+    if (await p.locator('.thread-card.draft').count()) throw new Error('a draft opened on a cell\'s trimmed space');
+    await p.close();
+  });
+
   await step('history panel: recorded changes, a saved version named and viewed, by person', async () => {
     await alice.getByRole('button', { name: 'More document actions' }).click();
     await alice.getByRole('menuitem', { name: 'History' }).click();

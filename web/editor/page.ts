@@ -16,7 +16,7 @@ import { icon } from '../lib/icons';
 import { splitLabel } from '../lib/format';
 import { renderDocument } from '../lib/markdown';
 import { embedOf, wrapByType } from '../../src/mdext';
-import { findQuote, indexSource } from '../../src/quote';
+import { findQuote, indexSource, indexedText } from '../../src/quote';
 import { openFilesDialog } from './files';
 import { followLinks } from './followlinks';
 import { annotationLayer, type AnnotationLayer } from './annotate';
@@ -932,24 +932,32 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   // A thread's quote is a slice of the source; the rendered surface searches its own text, so the
   // quote is normalized the same way the source is when a selection is looked up (tags and markdown markers gone).
   const highlightThreads = () => {
+    const threads = latestThreads.filter((t) => t.quote && !t.orphaned);
+    if (!threads.length) return [];
     const html = isHtml();
-    return latestThreads.filter((t) => t.quote && !t.orphaned).map((t) => ({ id: t.id, quote: indexSource(t.quote ?? '', { html, markdown: !html }).text.trim(), resolved: t.resolved }));
+    const src = html ? '' : view.state.doc.toString();
+    const idx = html ? null : indexSource(src, { html: false, markdown: true, fold: true });
+    const shown = (t: Thread) => {
+      const r = idx ? rail.anchorOf(t.id) : null;
+      return (idx && r && r.to > r.from ? indexedText(idx, r.from, r.to) : indexSource(t.quote ?? '', { html, markdown: !html, fold: true }).text).trim();
+    };
+    return threads.map((t) => ({ id: t.id, quote: shown(t), resolved: t.resolved }));
   };
   function sendHighlights() {
     if (isHtml()) toFrame({ type: 'highlights', threads: highlightThreads() });
     else previewAnnotations?.setHighlights(highlightThreads());
   }
   /** The source range of a quote seen on the rendered document (the view's text, so positions are the editor's). */
-  function sourceRange(m: { quote?: unknown; prefix?: unknown; suffix?: unknown }) {
+  function sourceRange(m: { quote?: unknown; prefix?: unknown; suffix?: unknown }, fold = false) {
     const html = isHtml();
-    return findQuote(view.state.doc.toString(), String(m.quote ?? ''), typeof m.prefix === 'string' ? m.prefix : null, typeof m.suffix === 'string' ? m.suffix : null, { html, markdown: !html });
+    return findQuote(view.state.doc.toString(), String(m.quote ?? ''), typeof m.prefix === 'string' ? m.prefix : null, typeof m.suffix === 'string' ? m.suffix : null, { html, markdown: !html, fold });
   }
   // What a rendered surface (the framed page or the preview) proposes. Nothing changes the document unconfirmed.
   const proposals = {
     openThread(id: string) { rail.setActive(id, { scroll: true }); },
     comment(m: { quote?: unknown; prefix?: unknown; suffix?: unknown }) {
       if (!atLeast(role, 'commenter')) return;
-      const r = sourceRange(m);
+      const r = sourceRange(m, true);
       if (!r) {
         toast(isHtml() ? 'That text is not in the page’s source (the page may produce it when it runs); commenting on the document instead.' : 'That text is not in the document’s source; commenting on the document instead.', { kind: 'info', timeout: 5000 });
         void rail.commentOnDocument(); return;

@@ -6,6 +6,7 @@
 // a quote to comment on, a replacement to apply, a thread to open.
 
 import { h } from '../lib/dom';
+import { foldTypography } from '../../src/quote';
 
 export interface AnnotationProposal { quote: string; prefix: string; suffix: string }
 export interface AnnotationSink {
@@ -24,6 +25,7 @@ export interface AnnotationLayer {
 }
 
 const norm = (s: unknown) => String(s ?? '').replace(/\s+/g, ' ');
+const folded = (s: unknown) => norm(foldTypography(String(s ?? '')));
 interface Idx { text: string; map: { node: Text; offset: number }[] }
 
 export function annotationLayer(root: HTMLElement, sink: AnnotationSink): AnnotationLayer {
@@ -40,14 +42,14 @@ export function annotationLayer(root: HTMLElement, sink: AnnotationSink): Annota
     return out;
   }
   /** Whitespace-collapsed text of the root with, for each character, the text node and offset it came from. */
-  function index(): Idx {
+  function index(fold: boolean): Idx {
     const nodes = textNodes(); let s = ''; const map: Idx['map'] = []; let space = true;
     for (const node of nodes) {
       const t = node.data;
       for (let i = 0; i < t.length; i++) {
         const ch = t[i];
         if (/\s/.test(ch)) { if (space) continue; s += ' '; map.push({ node, offset: i }); space = true; }
-        else { s += ch; map.push({ node, offset: i }); space = false; }
+        else for (const f of fold ? foldTypography(ch) : ch) { s += f; map.push({ node, offset: i }); space = false; }
       }
     }
     return { text: s, map };
@@ -65,13 +67,13 @@ export function annotationLayer(root: HTMLElement, sink: AnnotationSink): Annota
     return idx.text.length;
   }
   function find(idx: Idx, quote: string, prefix?: string | null, suffix?: string | null, near?: number): { start: number; end: number } | null {
-    const q = norm(quote).trim();
+    const q = folded(quote).trim();
     if (!q) return null;
     let best: number | null = null, bestScore = -1, at = -1;
     while ((at = idx.text.indexOf(q, at + 1)) >= 0) {
       let score = 0;
-      if (prefix) { const p = norm(prefix); const before = idx.text.slice(Math.max(0, at - p.length), at); if (before === p) score += 4; else if (before.trim().slice(-12) === p.trim().slice(-12)) score += 2; }
-      if (suffix) { const sf = norm(suffix); const after = idx.text.slice(at + q.length, at + q.length + sf.length); if (after === sf) score += 4; else if (after.trim().slice(0, 12) === sf.trim().slice(0, 12)) score += 2; }
+      if (prefix) { const p = folded(prefix); const before = idx.text.slice(Math.max(0, at - p.length), at); if (before === p) score += 4; else if (before.trim().slice(-12) === p.trim().slice(-12)) score += 2; }
+      if (suffix) { const sf = folded(suffix); const after = idx.text.slice(at + q.length, at + q.length + sf.length); if (after === sf) score += 4; else if (after.trim().slice(0, 12) === sf.trim().slice(0, 12)) score += 2; }
       if (typeof near === 'number') score += 1 / (1 + Math.abs(at - near) / 50);
       if (score > bestScore) { bestScore = score; best = at; }
     }
@@ -87,6 +89,7 @@ export function annotationLayer(root: HTMLElement, sink: AnnotationSink): Annota
     const segs: { node: Text; from: number; to: number }[] = []; let cur: typeof segs[number] | null = null;
     for (let i = start; i < end; i++) {
       const m = idx.map[i]; if (!m) break;
+      if (cur && cur.node === m.node && m.offset < cur.to) continue;
       if (cur && cur.node === m.node && m.offset === cur.to) cur.to = m.offset + 1;
       else { cur = { node: m.node, from: m.offset, to: m.offset + 1 }; segs.push(cur); }
     }
@@ -102,7 +105,7 @@ export function annotationLayer(root: HTMLElement, sink: AnnotationSink): Annota
     unmark();
     for (const t of highlights) {
       if (!t.quote) continue;
-      const idx = index(); // rebuilt per thread: marking splits text nodes
+      const idx = index(true); // rebuilt per thread: marking splits text nodes
       const r = find(idx, t.quote, t.prefix, t.suffix);
       if (r) markRange(idx, r.start, r.end, t.id, !!t.resolved);
     }
@@ -123,8 +126,8 @@ export function annotationLayer(root: HTMLElement, sink: AnnotationSink): Annota
     if (!config.canComment || !sel || sel.isCollapsed || !sel.rangeCount || !norm(sel.toString()).trim() || root.hidden || !root.isConnected) { hideBar(); return; }
     const range = sel.getRangeAt(0);
     if (!root.contains(range.commonAncestorContainer) || bar.contains(range.commonAncestorContainer)) { hideBar(); return; }
-    const idx = index();
-    const q = norm(sel.toString()).trim();
+    const idx = index(true);
+    const q = folded(sel.toString()).trim();
     const near = posOf(idx, range.startContainer, range.startOffset);
     const r = find(idx, q, null, null, near);
     if (!r) { hideBar(); return; }
@@ -146,7 +149,7 @@ export function annotationLayer(root: HTMLElement, sink: AnnotationSink): Annota
   let editing: { span: HTMLElement; textNode: Text; original: string; quote: string; prefix: string; suffix: string } | null = null;
   function startEdit(textNode: Text) {
     if (!config.canEdit || editing || !textNode.data.trim()) return;
-    const idx = index();
+    const idx = index(false);
     let start = -1, end = -1;
     for (let i = 0; i < idx.map.length; i++) { if (idx.map[i].node === textNode) { if (start < 0) start = i; end = i + 1; } }
     if (start < 0) return;
