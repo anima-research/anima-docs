@@ -946,7 +946,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   }
   // What a rendered surface (the framed page or the preview) proposes. Nothing changes the document unconfirmed.
   const proposals = {
-    openThread(id: string) { rail.setActive(id, { scroll: true }); },
+    openThread(id: string) { rail.focusThread(id); },
     comment(m: { quote?: unknown; prefix?: unknown; suffix?: unknown }) {
       if (!atLeast(role, 'commenter')) return;
       const r = sourceRange(m);

@@ -777,6 +777,240 @@ try {
     await alice.locator('button.comments-btn').click();
   });
 
+  let carolCtx, carol;
+  async function ensureCarol() {
+    if (carol) return;
+    carolCtx = await browser.newContext({ viewport });
+    carol = await carolCtx.newPage();
+    carol.on('pageerror', (e) => errors.push(`carol: ${e.message}`));
+    carol.on('console', (m) => { if (m.type() === 'error') errors.push(`carol console: ${m.text()}`); });
+    await signIn(carol, 'Carol');
+  }
+  const threadOf = (r) => {
+    const m = /thread (\w+) created/.exec(r.json?.content?.[0]?.text ?? '');
+    assert(m, `add_comment: ${r.status} ${JSON.stringify(r.json).slice(0, 300)}`);
+    return m[1];
+  };
+  const listOpen = (p) => p.locator('.comment-rail.drawer.open').count().then((n) => n > 0);
+
+  await step('a click on a comment’s highlight opens the list of comments at its thread while the list is closed: in Preview, a resolved one too, and in a page’s frame', async () => {
+    await ensureCarol();
+    const d = (await api(carol, 'POST', '/api/docs', { title: 'Claims', content: '# Claims\n\nThe first claim is here.\n\nThe second claim is there.\n' })).json;
+    threadOf(await api(carol, 'POST', '/api/operations/add_comment', { document: d.id, quote: 'first claim', text: 'Still open.' }));
+    const done = threadOf(await api(carol, 'POST', '/api/operations/add_comment', { document: d.id, quote: 'second claim', text: 'Settled already.' }));
+    await api(carol, 'POST', '/api/operations/resolve_comment', { comment: done });
+    await openDoc(carol, d.id);
+    await carol.locator('.seg-btn[data-mode=preview]').click();
+    const mark = carol.locator('.preview-body mark.anima-mark[data-thread]', { hasText: 'first claim' });
+    await mark.waitFor({ timeout: 8000 });
+    assert(!(await listOpen(carol)), 'the list of comments should be closed before the click');
+    await mark.click();
+    await carol.locator('.comment-rail.drawer.open .thread-card.active', { hasText: 'Still open.' }).waitFor({ state: 'visible', timeout: 5000 });
+    await carol.locator('.rail-close').click();
+    await carol.locator('.comment-rail.drawer.open').waitFor({ state: 'detached', timeout: 5000 });
+    await carol.locator('.preview-body mark.anima-mark.resolved[data-thread]', { hasText: 'second claim' }).click();
+    await carol.locator('.comment-rail.drawer.open .thread-card.active.resolved', { hasText: 'Settled already.' }).waitFor({ state: 'visible', timeout: 5000 });
+    await carol.locator('.rail-close').click();
+    await carol.locator('.seg-btn[data-mode=edit]').click();
+    const page = (await api(carol, 'POST', '/api/docs', { title: 'Note', type: 'html', content: '<!doctype html><title>Note</title><body><p id="p1">We ship the thing in March.</p></body>' })).json;
+    threadOf(await api(carol, 'POST', '/api/operations/add_comment', { document: page.id, quote: 'the thing', text: 'Which thing?' }));
+    await openDoc(carol, page.id);
+    const framed = carol.frameLocator('.preview-pane iframe.page-frame').locator('mark.anima-mark[data-thread]', { hasText: 'the thing' });
+    await framed.waitFor({ timeout: 8000 });
+    assert(!(await listOpen(carol)), 'the list of comments should be closed before the click in the frame');
+    await framed.click();
+    await carol.locator('.comment-rail.drawer.open .thread-card.active', { hasText: 'Which thing?' }).waitFor({ state: 'visible', timeout: 5000 });
+    await carol.locator('.rail-close').click();
+  });
+
+  await step('with the list of comments open on Open, a click on a resolved thread’s highlight shows its card and marks All', async () => {
+    await ensureCarol();
+    const d = (await api(carol, 'POST', '/api/docs', { title: 'Settled', content: '# Settled\n\nThe first claim is here.\n\nThe second claim is there.\n' })).json;
+    threadOf(await api(carol, 'POST', '/api/operations/add_comment', { document: d.id, quote: 'first claim', text: 'Still open.' }));
+    const done = threadOf(await api(carol, 'POST', '/api/operations/add_comment', { document: d.id, quote: 'second claim', text: 'Settled already.' }));
+    await api(carol, 'POST', '/api/operations/resolve_comment', { comment: done });
+    await openDoc(carol, d.id);
+    await carol.locator('.seg-btn[data-mode=preview]').click();
+    const mark = carol.locator('.preview-body mark.anima-mark.resolved[data-thread]', { hasText: 'second claim' });
+    await mark.waitFor({ timeout: 8000 });
+    await carol.locator('button.comments-btn').click();
+    await carol.locator('.comment-rail.drawer.open .thread-card', { hasText: 'Still open.' }).waitFor({ timeout: 5000 });
+    const marked = () => carol.locator('.comment-rail .rail-filter .seg-btn[aria-selected="true"]').innerText();
+    assert((await marked()) === 'Open', `the list should start on Open, not ${await marked()}`);
+    await mark.click();
+    await carol.locator('.comment-rail.drawer.open .thread-card.active.resolved', { hasText: 'Settled already.' }).waitFor({ state: 'visible', timeout: 5000 });
+    assert((await marked()) === 'All', `the marked tab should be All, not ${await marked()}`);
+    await carol.locator('.rail-close').click();
+    await carol.locator('.seg-btn[data-mode=edit]').click();
+  });
+
+  const boxState = (p, sel) => p.evaluate((q) => {
+    const ta = document.querySelector(q);
+    return ta ? { focused: document.activeElement === ta, scrollTop: ta.scrollTop, value: ta.value } : null;
+  }, sel);
+  async function typeLong(p, sel) {
+    await p.keyboard.insertText(Array.from({ length: 30 }, (_, i) => `Line ${i + 1} of a long text.`).join('\n'));
+    await p.keyboard.press('ControlOrMeta+End');
+    const s = await boxState(p, sel);
+    assert(s?.focused && s.scrollTop > 0, `the box should be focused and scrolled to its end: ${JSON.stringify(s && { focused: s.focused, scrollTop: s.scrollTop })}`);
+    return s;
+  }
+  async function boxKept(p, sel, before, cause) {
+    const after = await boxState(p, sel);
+    assert(after, `after ${cause} the box is gone`);
+    assert(after.focused, `after ${cause} the box lost its focus`);
+    assert(after.scrollTop === before.scrollTop, `after ${cause} the box scrolled from ${before.scrollTop} to ${after.scrollTop}`);
+    assert(after.value === before.value, `after ${cause} the box’s text changed`);
+    await p.keyboard.type(' More.');
+    const typed = await boxState(p, sel);
+    assert(typed.value === `${before.value} More.`, `typing after ${cause} should go on at the end of the text`);
+    return typed;
+  }
+  const markCard = (p, id) => p.evaluate((i) => { window.__cardMarks = { ...window.__cardMarks, [i]: document.querySelector(`.thread-card[data-id="${i}"] .card-comments > *`) }; }, id);
+  const cardRendered = (p, id) => p.evaluate((i) => document.querySelector(`.thread-card[data-id="${i}"] .card-comments > *`) !== window.__cardMarks[i], id);
+  const received = (p, body) => p.waitForFunction((b) => window.__anima.nodes.allThreads().some((t) => t.comments.some((c) => c.body === b)), body, { timeout: 8000 });
+  async function sharedWithBob(d) {
+    const bobSub = (await api(bob, 'GET', '/api/me')).json.you.sub;
+    assert((await api(carol, 'POST', `/api/docs/${d.id}/share`, { who: bobSub, role: 'commenter' })).status === 200, 'share with Bob');
+  }
+  async function threadsDoc(title, { beside = false, extra = '' } = {}) {
+    const d = (await api(carol, 'POST', '/api/docs', { title, content: `# ${title}\n\nA line to talk about.\n\nAnother line.\n${extra}` })).json;
+    const first = threadOf(await api(carol, 'POST', '/api/operations/add_comment', { document: d.id, quote: 'A line to talk about', text: 'What do we think?' }));
+    const other = beside ? threadOf(await api(carol, 'POST', '/api/operations/add_comment', { document: d.id, quote: 'Another line', text: 'A thread beside it.' })) : null;
+    return { d, first, other };
+  }
+  async function clockPage(fn) {
+    const p = await carolCtx.newPage();
+    p.on('pageerror', (e) => errors.push(`carol (clock): ${e.message}`));
+    await p.clock.install();
+    try { await fn(p); } finally { await p.close(); }
+  }
+  const replyBox = '.thread-card.active textarea.reply';
+  const editBox = '.thread-card.active textarea[aria-label="Edit comment"]';
+  const reviseBox = '.thread-card.active textarea[aria-label="Suggested text"]';
+  async function openCard(p, d, text) {
+    await openDoc(p, d.id);
+    await p.locator('.seg-btn[data-mode=edit]').click();
+    await p.locator('.comment-rail.margin .thread-card', { hasText: text }).click();
+    await p.locator('.comment-rail.margin .thread-card.active', { hasText: text }).waitFor({ timeout: 5000 });
+  }
+  async function beginEdit(p) {
+    await p.locator('.thread-card.active .comment.root').getByRole('button', { name: 'More comment actions' }).click();
+    await p.getByRole('menuitem', { name: 'Edit', exact: true }).click();
+    await p.locator(editBox).waitFor({ timeout: 5000 });
+    await p.waitForFunction((q) => document.activeElement === document.querySelector(q), editBox, { timeout: 5000 });
+    await p.keyboard.press('ControlOrMeta+a');
+  }
+
+  await step('a reply being typed keeps its focus, its text and its scroll when the minute’s tick renders its card again', async () => {
+    await ensureCarol();
+    const { d, first } = await threadsDoc('Reply at the tick');
+    await clockPage(async (p) => {
+      await openCard(p, d, 'What do we think?');
+      await p.locator(replyBox).click();
+      const before = await typeLong(p, replyBox);
+      await markCard(p, first);
+      await p.clock.fastForward(60_000);
+      assert(await cardRendered(p, first), 'the minute’s tick should render the card again');
+      await boxKept(p, replyBox, before, 'the minute’s tick');
+    });
+  });
+
+  await step('a reply being typed keeps its focus, its text and its scroll when someone else’s reply renders its card again, which shows that reply', async () => {
+    await ensureCarol();
+    const { d, first } = await threadsDoc('Reply beside Bob');
+    await sharedWithBob(d);
+    await openCard(carol, d, 'What do we think?');
+    await carol.locator(replyBox).click();
+    const before = await typeLong(carol, replyBox);
+    await markCard(carol, first);
+    await api(bob, 'POST', '/api/operations/reply_comment', { comment: first, text: 'Bob chimes in.' });
+    await carol.locator('.thread-card.active .comment.reply', { hasText: 'Bob chimes in.' }).waitFor({ timeout: 8000 });
+    assert(await cardRendered(carol, first), 'Bob’s reply should render the card again');
+    await boxKept(carol, replyBox, before, 'Bob’s reply');
+  });
+
+  await step('a comment being edited keeps its focus, its text and its scroll across the minute’s tick and someone else’s reply; Save shows the saved text and the reply', async () => {
+    await ensureCarol();
+    const { d, first, other } = await threadsDoc('Edit at the tick', { beside: true });
+    await sharedWithBob(d);
+    await clockPage(async (p) => {
+      await openCard(p, d, 'What do we think?');
+      await beginEdit(p);
+      let state = await typeLong(p, editBox);
+      await markCard(p, other);
+      await p.clock.fastForward(60_000);
+      assert(await cardRendered(p, other), 'the minute’s tick should render the other card again');
+      state = await boxKept(p, editBox, state, 'the minute’s tick');
+      await api(bob, 'POST', '/api/operations/reply_comment', { comment: first, text: 'Bob chimes in.' });
+      await received(p, 'Bob chimes in.');
+      await boxKept(p, editBox, state, 'Bob’s reply');
+      await p.locator('.thread-card.active .comment-edit button', { hasText: 'Save' }).click();
+      await p.locator(editBox).waitFor({ state: 'detached', timeout: 5000 });
+      await p.locator('.thread-card.active .comment.root .comment-body', { hasText: 'Line 30 of a long text. More. More.' }).waitFor({ timeout: 5000 });
+      await p.locator('.thread-card.active .comment.reply', { hasText: 'Bob chimes in.' }).waitFor({ timeout: 5000 });
+    });
+  });
+
+  await step('a comment being edited keeps its focus across someone else’s reply; Ctrl+Enter saves it and shows the reply; Escape closes the box', async () => {
+    await ensureCarol();
+    const { d, first } = await threadsDoc('Edit beside Bob');
+    await sharedWithBob(d);
+    await openCard(carol, d, 'What do we think?');
+    await beginEdit(carol);
+    const state = await typeLong(carol, editBox);
+    await api(bob, 'POST', '/api/operations/reply_comment', { comment: first, text: 'Bob chimes in.' });
+    await received(carol, 'Bob chimes in.');
+    await boxKept(carol, editBox, state, 'Bob’s reply');
+    await carol.keyboard.press('ControlOrMeta+Enter');
+    await carol.locator(editBox).waitFor({ state: 'detached', timeout: 5000 });
+    await carol.locator('.thread-card.active .comment.root .comment-body', { hasText: 'Line 30 of a long text. More.' }).waitFor({ timeout: 5000 });
+    await carol.locator('.thread-card.active .comment.reply', { hasText: 'Bob chimes in.' }).waitFor({ timeout: 5000 });
+    await beginEdit(carol);
+    await carol.keyboard.type('Not this.');
+    await carol.keyboard.press('Escape');
+    await carol.locator(editBox).waitFor({ state: 'detached', timeout: 5000 });
+    assert(!(await carol.locator('.thread-card.active .comment.root .comment-body').innerText()).includes('Not this.'), 'Escape keeps the saved text');
+  });
+
+  await step('a suggestion’s text being revised keeps its focus, its text and its scroll across the minute’s tick; Save closes the box', async () => {
+    await ensureCarol();
+    const { d, other } = await threadsDoc('Revise at the tick', { beside: true, extra: '\nIntro about apples and figs.\n' });
+    const s = await api(carol, 'POST', '/api/operations/suggest_edit', { document: d.id, edits: [{ old_text: 'apples', new_text: 'pears' }] });
+    assert(!s.json.isError, `suggest_edit: ${JSON.stringify(s.json).slice(0, 200)}`);
+    await clockPage(async (p) => {
+      await openCard(p, d, 'pears');
+      await p.locator('.thread-card.active').getByRole('button', { name: 'More suggestion actions' }).click();
+      await p.getByRole('menuitem', { name: 'Edit suggested text' }).click();
+      await p.locator(reviseBox).waitFor({ timeout: 5000 });
+      await p.waitForFunction((q) => document.activeElement === document.querySelector(q), reviseBox, { timeout: 5000 });
+      await p.keyboard.press('ControlOrMeta+a');
+      const state = await typeLong(p, reviseBox);
+      await markCard(p, other);
+      await p.clock.fastForward(60_000);
+      assert(await cardRendered(p, other), 'the minute’s tick should render the other card again');
+      await boxKept(p, reviseBox, state, 'the minute’s tick');
+      await p.locator('.thread-card.active .comment-edit button', { hasText: 'Save' }).click();
+      await p.locator(reviseBox).waitFor({ state: 'detached', timeout: 5000 });
+      await p.waitForFunction(() => window.__anima.nodes.allThreads().some((t) => t.suggestion?.text.endsWith('Line 30 of a long text. More.')), null, { timeout: 5000 });
+    });
+  });
+
+  await step('a click on Reopen shows the reopened thread in its card at once', async () => {
+    await ensureCarol();
+    const { d, first } = await threadsDoc('Reopen');
+    await api(carol, 'POST', '/api/operations/resolve_comment', { comment: first });
+    await openDoc(carol, d.id);
+    await carol.locator('button.comments-btn').click();
+    await carol.locator('.comment-rail .rail-filter .seg-btn', { hasText: 'All' }).click();
+    await carol.locator('.comment-rail.drawer.open .thread-card.resolved', { hasText: 'What do we think?' }).click();
+    const card = carol.locator(`.thread-card[data-id="${first}"]`);
+    await card.locator('.card-banner.resolved button', { hasText: 'Reopen' }).click();
+    await card.locator('.resolve-btn').waitFor({ timeout: 5000 });
+    assert((await card.locator('.card-banner.resolved').count()) === 0, 'the reopened card still shows its Resolved banner');
+    await carol.locator('.rail-close').click();
+  });
+
   await step('Preview shows open suggestions as applied: the result, with the inserted text highlighted; the bar hides and shows them', async () => {
     const d = (await api(alice, 'POST', '/api/docs', { title: 'Fruit', content: '# Fruit\n\nIntro about apples and figs.\n' })).json;
     const bobSub = (await api(bob, 'GET', '/api/me')).json.you.sub;

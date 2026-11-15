@@ -323,7 +323,7 @@ export class CommentsRail {
   focusThread(id: string) {
     const t = this.threads.find((x) => x.id === id);
     if (!t) return;
-    if (t.resolved && this.filter === 'open') this.filter = 'all';
+    if (t.resolved && this.filter === 'open') { this.filter = 'all'; this.renderHead(); }
     if (this.layout === 'drawer' && !this.drawerOpen) this.setDrawer(true);
     this.setActive(id, { scroll: true });
   }
@@ -636,6 +636,8 @@ export class CommentsRail {
     card.el.classList.toggle('unanchored', !t.rel);
     card.el.classList.toggle('suggestion', !!t.suggestion);
     if (sig === card.sig) return;
+    const focus = document.activeElement;
+    if (focus && (focus === card.revising || [...card.editing.values()].includes(focus as HTMLTextAreaElement))) return;
     card.sig = sig;
     const ctx = this.mentionCtx(t);
     const parts: (HTMLElement | null)[] = [];
@@ -695,14 +697,12 @@ export class CommentsRail {
         card.reply = h('div.card-reply', null, avatar(this.deps.me, 24), h('div.card-reply-main', null, input, actions));
         card.replyInput = input;
       }
-      card.el.append(card.reply);
     } else if (card.reply && !(card.replyInput?.value.trim())) {
       card.reply.remove();
       card.reply = null;
       card.replyInput = null;
-    } else if (card.reply) {
-      card.el.append(card.reply);
     }
+    if (card.reply && card.el.lastChild !== card.reply) card.el.append(card.reply);
   }
 
   /** A suggestion card's top: state, author, the change, actions, and the author's note. */
