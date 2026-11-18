@@ -46,7 +46,8 @@ export function gitHttp(app: App, deps: {
 }) {
   const actorOf = (req: IncomingMessage): Actor | null => {
     const h = String(req.headers.authorization ?? '');
-    const basic = /^Basic\s+(.+)$/i.exec(h), bearer = /^Bearer\s+(.+)$/i.exec(h);
+    // One token after the scheme, no spaces in it (base64, or a bearer token): nothing for the pattern to try twice.
+    const basic = /^Basic +(\S+)$/i.exec(h), bearer = /^Bearer +(\S+)$/i.exec(h);
     const plain = basic ? Buffer.from(basic[1], 'base64').toString('utf8') : '';
     const secret = basic ? plain.slice(plain.indexOf(':') + 1) : bearer ? bearer[1] : '';
     if (!secret) return null;

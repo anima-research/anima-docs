@@ -45,7 +45,11 @@ const LFS_EXTS = ['pdf', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'heic', 'h
 /** `*.[pP][dD][fF]`: an extension in any case (IMG_0001.JPG is as common as .jpg). */
 const anyCase = (ext: string) => [...ext].map((c) => (/[a-z]/.test(c) ? `[${c}${c.toUpperCase()}]` : c)).join('');
 export const DEFAULT_ATTRIBUTES = `# Files of these kinds are kept with Git LFS (https://git-lfs.com): install it before cloning.\n# Anima Docs adds a line here for any other file over ${BLOB_MAX / 1024 / 1024} MB.\n${LFS_EXTS.map((e) => `*.${anyCase(e)} ${LFS_ATTR}`).join('\n')}\n`;
-/** A line that makes exactly this path an LFS object. */
+/**
+ * A line that makes exactly this path an LFS object. Two layers, on purpose: the path is first made a literal
+ * pattern (glob characters escaped), and the pattern is then written as a quoted string (backslashes and quotes
+ * escaped), which is how .gitattributes takes a pattern with spaces in it. git undoes them in the reverse order.
+ */
 const exactAttribute = (path: string) => `"/${path.replace(/[\\*?[]/g, '\\$&').replace(/[\\"]/g, '\\$&')}" ${LFS_ATTR}`;
 
 export const lfsPointer = (oid: string, size: number) => `version https://git-lfs.github.com/spec/v1\noid sha256:${oid}\nsize ${size}\n`;
