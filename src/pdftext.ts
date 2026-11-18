@@ -21,9 +21,14 @@ export class PdfText {
   /** Where each word sits on its page (one page, or all): for placing something beside given words. Null when unreadable. */
   words(file: string, page?: number): Promise<PageWords[] | null> {
     if (!this.available) return Promise.resolve(null);
-    return new Promise((resolve) => {
-      execFile('pdftotext', ['-q', '-enc', 'UTF-8', '-bbox', ...(page ? ['-f', String(page), '-l', String(page)] : []), file, '-'], { maxBuffer: 512 * 1024 * 1024, timeout: 60_000 },
-        (err, stdout) => resolve(err ? null : parseWords(stdout, page ?? 1)));
+    const range = page ? ['-f', String(page), '-l', String(page)] : [];
+    const run = (cmd: string, args: string[]) => new Promise<string | null>((resolve) => { execFile(cmd, args, { maxBuffer: 512 * 1024 * 1024, timeout: 60_000 }, (err, stdout) => resolve(err ? null : stdout)); });
+    // The words come placed as the page is shown (turned, if the page is); the page's size comes as it is
+    // before turning, so each page's rotation is asked for too, and a page on its side has its sides swapped.
+    return Promise.all([run('pdftotext', ['-q', '-enc', 'UTF-8', '-cropbox', '-bbox', ...range, file, '-']), run('pdfinfo', [...(page ? range : ['-f', '1', '-l', '100000']), file])]).then(([xml, info]) => {
+      if (xml === null) return null;
+      const turned = new Set([...(info ?? '').matchAll(/^Page\s+(\d+) rot:\s+(\d+)/gm)].filter((m) => Number(m[2]) % 180 === 90).map((m) => Number(m[1])));
+      return parseWords(xml, page ?? 1).map((p) => (turned.has(p.page) ? { ...p, width: p.height, height: p.width } : p));
     });
   }
 
@@ -59,7 +64,7 @@ export interface PageWords { page: number; width: number; height: number; words:
 
 const entity = (s: string) => s.replace(/&(amp|lt|gt|quot|#39|apos);/g, (_, e) => ({ amp: '&', lt: '<', gt: '>', quot: '"', '#39': "'", apos: "'" } as Record<string, string>)[e]);
 
-/** pdftotext -bbox: each page's size and each word's box, in points from the page's top left. */
+/** pdftotext -bbox -cropbox: each page's size and each word's box, in points from the top left of the page as it is shown. */
 function parseWords(xml: string, first: number): PageWords[] {
   const out: PageWords[] = [];
   const pageRe = /<page width="([\d.]+)" height="([\d.]+)">([\s\S]*?)<\/page>/g;

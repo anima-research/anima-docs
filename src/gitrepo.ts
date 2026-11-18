@@ -189,11 +189,11 @@ export class GitRepos {
     return this.lock(docId, () => this.sync(docId, o));
   }
 
-  private async sync(docId: string, o: { by?: string; message?: string } = {}): Promise<string | null> {
+  private async sync(docId: string, o: { by?: string; message?: string; /** The commit is `by`'s own doing (a restore), not only others' waiting changes. */ own?: boolean } = {}): Promise<string | null> {
     const waiting = this.waiting.get(docId);
     if (waiting) { clearTimeout(waiting.timer); this.waiting.delete(docId); }
     // The commit names everyone whose changes it holds (several people within one quiet spell share one).
-    const authors = waiting?.by.size ? [...waiting.by] : o.by ? [o.by] : [];
+    const authors = [...new Set([...(o.own && o.by ? [o.by] : []), ...(waiting?.by.size ? waiting.by : o.by ? [o.by] : [])])];
     const by = o.by ?? authors[authors.length - 1] ?? '';
     const dir = await this.ensure(docId);
     const head = await this.head(dir);
@@ -471,7 +471,7 @@ export class GitRepos {
         this.record(docId, entries, made, by, false);
       })();
       const short = commit.slice(0, 7);
-      return this.sync(docId, { by, message: at === null ? `Restore the collection as of ${short}` : `Restore ${at} as of ${short}` });
+      return this.sync(docId, { by, own: true, message: at === null ? `Restore the collection as of ${short}` : `Restore ${at} as of ${short}` });
     });
   }
 

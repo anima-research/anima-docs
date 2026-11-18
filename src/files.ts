@@ -79,6 +79,8 @@ const under = (dir: string): [string, string] => [`${dir}/`, `${dir}0`];
 export class DocFiles {
   /** Told when a collection's files change, and by whom (its repository commits them: gitrepo.ts). */
   onChange: ((docId: string, by: string) => void) | null = null;
+  /** Told when files of a collection got new paths (what points at a file by its path follows: signature fields). */
+  onMoved: ((docId: string, moves: [from: string, to: string][]) => void) | null = null;
   constructor(private db: DB, private media: Media) {}
 
   isCollection(docId: string): boolean {
@@ -124,12 +126,14 @@ export class DocFiles {
   }
 
   /** The same from a stream: the bytes go to disk as they arrive. */
-  async putStream(docId: string, path: string, body: AsyncIterable<Uint8Array>, by: string, opts: { maxBytes: number }): Promise<DocFile> {
+  async putStream(docId: string, path: string, body: AsyncIterable<Uint8Array>, by: string, opts: { maxBytes: number; /** The stored version (media id) this save replaces; another by then is a conflict. */ expect?: string }): Promise<DocFile> {
     const collection = this.isCollection(docId);
     const p = this.room(docId, path, collection);
     const info = await this.media.putStream(body, by, docId, { name: p.split('/').pop()!, maxBytes: opts.maxBytes, asFile: collection });
-    // While it streamed, another upload may have made this name a folder, or a folder above it a file.
+    // While it streamed, another upload may have made this name a folder, or a folder above it a file;
+    // or someone else saved this file first (nothing awaits between this check and the write).
     if (collection) this.checkFree(docId, p);
+    if (opts.expect !== undefined && (this.get(docId, p)?.mediaId ?? '') !== opts.expect) throw new Fault(412, 'This file has changed since you opened it.');
     return this.record(docId, p, info, by, collection);
   }
 
@@ -197,6 +201,7 @@ export class DocFiles {
         ins.run(docId, t, r.mediaId, mimeFor(t, r.mime), r.size, now, by);
       }
     })();
+    if (collection) this.onMoved?.(docId, rows.map((r) => [r.path, file ? dst : dst + r.path.slice(src.length)]));
     if (collection) this.touch(docId, by, now);
     return rows.length;
   }

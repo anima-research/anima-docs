@@ -585,6 +585,14 @@ export class Comments extends EventEmitter {
     return n;
   }
 
+  /** Files of a collection got new paths: the signature fields on them follow, and open pages hear of it. */
+  filesMoved(docId: string, moves: [from: string, to: string][]) {
+    const upd = this.db.prepare(`UPDATE comments SET field = json_set(field, '$.path', ?) WHERE doc_id = ? AND field IS NOT NULL AND json_extract(field, '$.path') = ?`);
+    let n = 0;
+    for (const [from, to] of moves) n += upd.run(to, docId, from).changes;
+    if (n) this.emit('refresh', docId);
+  }
+
   // ------------------------------------------------------------------ reads
 
   threads(docId: string, opts: { includeResolved?: boolean; threadId?: string } = {}): Thread[] {

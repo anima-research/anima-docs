@@ -66,6 +66,20 @@ test('an agent asks a person to sign a PDF: a field beside the words it names, a
   const page = /\((d[A-Za-z0-9]+)\)/.exec(await op('create_document', { title: 'A page' }))![1];
   assert.match(await op('add_comment', { document: page, field: 'signature', file: 'x.pdf', near: 'x' }), /go on PDFs in a file collection/);
   assert.match(await op('add_comment', { document: page }), /text is required/);
+  assert.match(await op('add_comment', { document: id, field: 'initial', file: 'deals/Lease 2026.pdf', near: 'Signature:' }), /field is "signature" or "initials"/);
+  assert.match(await op('add_comment', { document: id, field: 'signature', file: 'deals/Lease 2026.pdf', near: 'Signature:', page: 3 }), /has 1 page; there is no page 3/);
+  assert.match(await op('add_comment', { document: id, field: 'signature', file: 'deals/Lease 2026.pdf', page: 1, box: [1, 0.5, 0.2, 0.05] }), /a box inside the page/);
+  // Who is asked must be able to sign: a person, with edit access (the signed PDF is a new version of the file).
+  const bob = await signIn('Bob');
+  assert.equal((await fetch(`${S.base}/api/docs/${id}/share`, { method: 'POST', headers: H({ Cookie: ann }), body: JSON.stringify({ who: '@Bob', role: 'commenter' }) })).status, 200, bob);
+  assert.match(await op('add_comment', { document: id, field: 'initials', file: 'deals/Lease 2026.pdf', near: 'Initial here', assign_to: '@Bob' }), /Assigned to Bob\. They cannot edit this collection.*share it with them as an editor/s);
+  assert.match(await op('add_comment', { document: id, field: 'initials', file: 'deals/Lease 2026.pdf', near: 'Initial here', assign_to: '@Scout' }), /who is not a person/);
+
+  // A file that is renamed, or whose folder is, takes its places to sign with it.
+  assert.equal(await op('move_file', { document: id, from: 'deals', to: 'signed deals' }), 'Moved deals to signed deals.');
+  assert.equal(S.app.comments.get(thread)!.field!.path, 'signed deals/Lease 2026.pdf');
+  await op('move_file', { document: id, from: 'signed deals/Lease 2026.pdf', to: 'deals/Lease 2026.pdf' });
+  assert.equal(S.app.comments.get(thread)!.field!.path, 'deals/Lease 2026.pdf');
 
   // The agent sees its requests; when the person has signed, the thread is answered and closed.
   const open = await op('list_comments', { document: id });
@@ -92,7 +106,28 @@ test('a signature is kept for its owner alone: their browser session reads and w
     assert.equal((await fetch(`${S.base}/api/me/signature`, { headers: { Authorization: `Bearer ${token}` } })).status, 403);
     assert.equal((await fetch(`${S.base}/api/me/signature`, { method: 'PUT', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'image/png' }, body: PNG })).status, 403);
   }
+  // A token beside a session does not make it a browser's request.
+  assert.equal((await fetch(`${S.base}/api/me/signature`, { headers: { Cookie: ann, Authorization: `Bearer ${S.token('Scout')}` } })).status, 403);
   assert.equal((await fetch(`${S.base}/api/me/signature`)).status, 401);
   assert.equal((await fetch(`${S.base}/api/me/signature`, { method: 'DELETE', headers: { Cookie: ann, Origin: S.base } })).status, 200);
   assert.equal((await fetch(`${S.base}/api/me/signature`, { headers: { Cookie: ann } })).status, 404);
+});
+
+test('two saves made from the same version: the one that lands second is refused, however the uploads overlap', async () => {
+  const ann = await signIn('Ann');
+  const doc = await (await fetch(`${S.base}/api/docs`, { method: 'POST', headers: H({ Cookie: ann }), body: JSON.stringify({ title: 'Race', type: 'files' }) })).json();
+  const url = `${S.base}/api/docs/${doc.id}/files/form.pdf`;
+  const first = await (await fetch(url, { method: 'PUT', headers: { Cookie: ann, Origin: S.base }, body: 'version one' })).json();
+  const from = { Cookie: ann, Origin: S.base, 'If-Match': `"f${first.mediaId}"` };
+  // A slow upload starts (and passes the check made before its bytes are taken)…
+  let finish!: () => void;
+  const held = new Promise<void>((r) => { finish = r; });
+  const slow = fetch(url, { method: 'PUT', headers: from, duplex: 'half', body: new ReadableStream({ async start(c) { c.enqueue(new TextEncoder().encode('the slow ')); await held; c.enqueue(new TextEncoder().encode('one')); c.close(); } }) } as RequestInit);
+  await new Promise((r) => setTimeout(r, 150));
+  // …a quick one from the same version lands meanwhile…
+  assert.equal((await fetch(url, { method: 'PUT', headers: from, body: 'the quick one' })).status, 201);
+  // …and the slow one, arriving second, does not replace it.
+  finish();
+  assert.equal((await slow).status, 412);
+  assert.equal(await (await fetch(`${S.base}/p/${doc.id}/form.pdf`, { headers: { Cookie: ann } })).text(), 'the quick one');
 });

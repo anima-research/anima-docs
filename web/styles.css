@@ -1580,3 +1580,7 @@ button.card-field { width: 100%; text-align: left; cursor: pointer; font: inheri
 button.card-field:hover { text-decoration: underline; }
 @media (prefers-color-scheme: dark) { .sign-chip:not(.mine) { color: #f5c451; } }
 @media (max-width: 760px) { .sign-bar .btn-label { display: none; } .sign-pages { padding: 12px 6px 60px; } }
+
+.sign.saving .sign-pages, .sign.saving .sign-tool { pointer-events: none; }
+.sign.saving .sign-pages { opacity: 0.75; }
+.sign-field.others, .sign-field.others:hover { background: rgba(120, 130, 150, 0.16); border-color: #8a93a3; color: #586173; cursor: default; }

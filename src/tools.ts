@@ -896,13 +896,17 @@ export const TOOLS: ToolDef[] = [
       const id = need(a, 'document');
       app.docs.require(id, actor, 'commenter');
       if (a.field) {
-        const kind = (a.field === 'initials' ? 'initials' : 'signature') as FieldKind;
+        if (a.field !== 'signature' && a.field !== 'initials') throw new Fault(400, 'field is "signature" or "initials".');
+        const kind = a.field as FieldKind;
         const path = need(a, 'file');
         if (!a.near && !a.box) throw new Fault(400, 'Say where the field goes: near (words on the page it belongs beside), or page and box.');
         if (a.box && !a.page) throw new Fault(400, 'With box, give the page too.');
         const field = a.box ? await boxField(app, id, { kind, path, page: Number(a.page), box: a.box }) : await placeField(app, id, { kind, path, near: String(a.near), page: a.page ? Number(a.page) : undefined, occurrence: a.occurrence });
         const { comment, warnings } = app.comments.create(id, actor, { body: typeof a.text === 'string' ? a.text : '', assignee: a.assign_to ?? null, field });
-        const who = comment.assignee ? ` Assigned to ${app.principals.label(comment.assignee)}.` : ' It is assigned to nobody: assign_to the person who should sign, or tell them.';
+        const asked = comment.assignee ? app.principals.get(comment.assignee) : null;
+        const who = !asked ? ' It is assigned to nobody: assign_to the person who should sign, or tell them.'
+          : asked.kind !== 'human' ? ` Assigned to ${app.principals.label(asked.sub)}, who is not a person: a signature is drawn and placed by a person in the browser.`
+            : `${` Assigned to ${app.principals.label(asked.sub)}.`}${atLeast(app.docs.role(id, { sub: asked.sub, admin: false }), 'editor') ? '' : ' They cannot edit this collection, and signing saves a new version of the file: share it with them as an editor (share_document) first.'}`;
         return text(`${describeField(field)} placed${a.near ? ` beside “${a.near}”` : ''} (thread ${comment.id}).${who}\nThey sign at ${app.config.origin}/d/${id}?at=${encodeURIComponent(field.path)} — nothing reaches them outside Anima Docs, so send them that address. You hear in this thread when it is signed.${warnings.length ? `\nNote: ${warnings.join(' ')}` : ''}`);
       }
       const anchor = a.quote ? app.comments.anchorFromQuote(id, String(a.quote), { occurrence: a.occurrence, nearLine: a.near_line }) : null;

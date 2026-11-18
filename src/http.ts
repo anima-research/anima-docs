@@ -912,10 +912,11 @@ export function createHttp(app: App) {
             // A collection's folder goes with everything in it (?folder=1).
             if (method === 'DELETE') { send(200, url.searchParams.has('folder') ? { removed: app.files.removeFolder(id, decodeURIComponent(fm[1]), a.sub) } : { removed: app.files.remove(id, decodeURIComponent(fm[1]), a.sub) }); return; }
             // A save made from a version that is no longer the current one (someone else changed the file since) is refused: If-Match names the version.
+            // Checked here before the bytes are taken, and again when they have arrived (two saves at once: one of them loses).
             const match = String(req.headers['if-match'] ?? '');
             if (match) { const cur = app.files.get(id, app.files.path(id, decodeURIComponent(fm[1]))); if (`"f${cur?.mediaId ?? ''}"` !== match) throw new Fault(412, 'This file has changed since you opened it.'); }
             // Streamed to disk: a large file must not sit in memory.
-            const f = await app.files.putStream(id, decodeURIComponent(fm[1]), req, a.sub, { maxBytes: app.config.uploadMaxBytes });
+            const f = await app.files.putStream(id, decodeURIComponent(fm[1]), req, a.sub, { maxBytes: app.config.uploadMaxBytes, expect: /^"f(.*)"$/.exec(match)?.[1] });
             send(201, { ...f, url: fileUrl(f) });
             return;
           }

@@ -178,10 +178,8 @@ try {
 
   await step('saving makes the next version of the file: words, pictures and a flat form are in it', async () => {
     await alice.getByRole('button', { name: 'Save', exact: true }).click();
-    const said = alice.locator('.toast').last();
-    await said.waitFor();
-    assert((await said.textContent()).includes('Signed and saved'), `after Save the page said: ${await said.textContent()}`);
-    await alice.locator('iframe.coll-pdf').waitFor();
+    // Saved when the signing view has given way to the file as it now is (a toast would be gone before a slow machine looked).
+    await alice.locator('iframe.coll-pdf').waitFor().catch(async (e) => { throw new Error(`the signing view did not close; the page said: ${await alice.locator('.toast').allTextContents()} (${e.message.split('\n')[0]})`); });
     const b64 = await alice.evaluate(async (i) => { const b = new Uint8Array(await (await fetch(`/p/${i}/to%20sign/Lease%202026.pdf`, { cache: 'no-store' })).arrayBuffer()); let s = ''; for (const x of b) s += String.fromCharCode(x); return btoa(s); }, id);
     const out = join(WORK, 'signed.pdf');
     writeFileSync(out, Buffer.from(b64, 'base64'));

@@ -66,7 +66,11 @@ const isHidden = (path: string) => path.startsWith('.') || path.includes('/.');
 
 /** Filling and signing PDFs is a bundle of its own (pdf.js, pdf-lib), fetched the first time it is needed. */
 let signModule: Promise<typeof import('../pdfsign')> | null = null;
-const loadSign = () => { const url = '/pdfsign.js'; return (signModule ??= import(url) as Promise<typeof import('../pdfsign')>); };
+const loadSign = () => {
+  const url = '/pdfsign.js';
+  // A fetch that failed (the connection dropped) is tried again the next time, not remembered.
+  return (signModule ??= (import(url) as Promise<typeof import('../pdfsign')>).catch((e) => { signModule = null; throw e; }));
+};
 
 export function collectionView(opts: {
   docId: string; canEdit: boolean; guest: boolean;
@@ -344,7 +348,10 @@ export function collectionView(opts: {
     main.replaceChildren(h('div.coll-view', null, head, stage));
   }
 
+  let signTurn = 0;
   async function openSigner(f: DocFile, stage: HTMLElement) {
+    // Of several openings under way (the page drew again while one was loading), only the last one stays.
+    const turn = ++signTurn;
     stage.className = 'coll-stage kind-sign';
     stage.replaceChildren(spinner(22));
     const done = () => { signer?.destroy(); signer = null; signing = null; signClosed = f.path; render(); };
@@ -362,12 +369,14 @@ export function collectionView(opts: {
           catch (e) { throw e instanceof ApiError && e.status === 412 ? new Error('Someone else changed this file while you were filling it in. Close, open it again, and fill in the new one.') : e; }
           files = files.map((x) => (x.path === nf.path ? nf : x));
           // Each place signed is answered and closed: whoever asked hears it in their thread.
-          for (const s of signed) await opts.request({ type: 'comment.reply', comment: s.id, body: s.kind === 'signature' ? 'Signed.' : 'Initialled.', resolve: true }).catch(() => undefined);
+          let unanswered = 0;
+          for (const s of signed) await opts.request({ type: 'comment.reply', comment: s.id, body: s.kind === 'signature' ? 'Signed.' : 'Initialled.', resolve: true }).catch(() => { unanswered++; });
           toast(signed.length ? 'Signed and saved' : 'Saved', { kind: 'success', timeout: 2500 });
+          if (unanswered) toast(`The PDF is signed and saved, but ${unanswered === 1 ? 'the request' : `${unanswered} requests`} could not be marked as done: resolve ${unanswered === 1 ? 'it' : 'them'} in Comments so whoever asked knows.`, { kind: 'error', timeout: 0 });
         },
         close: done,
       });
-      if (destroyed || shown !== f.path || signing !== f.path) { view.destroy(); return; }
+      if (destroyed || turn !== signTurn || shown !== f.path || signing !== f.path) { view.destroy(); return; }
       signer?.destroy();
       signer = view;
       stage.replaceChildren(view.el);
@@ -596,8 +605,11 @@ export function collectionView(opts: {
   const onUnload = (e: BeforeUnloadEvent) => { if (unsaved()) { e.preventDefault(); e.returnValue = ''; } };
   window.addEventListener('beforeunload', onUnload);
 
+  /** The places to sign on the file shown, as last drawn. */
+  let shownFields = '';
   function render() {
     if (destroyed) return;
+    shownFields = shown ? JSON.stringify(fieldsOf(shown)) : '';
     if (editor && shown !== editor.path) { editor.view.destroy(); editor = null; }
     if (signer && shown !== signing) { signer.destroy(); signer = null; signing = null; }
     el.classList.toggle('viewing', !!shown);
@@ -617,11 +629,19 @@ export function collectionView(opts: {
   return {
     el,
     setCanEdit(next) { if (next === canEdit) return; canEdit = next; if (!(editor && shown === editor.path) && !signer) render(); },
-    setThreads() { if (signer && signing) signer.setFields(fieldsOf(signing)); else if (loaded && !(editor && shown === editor.path)) render(); },
+    setThreads() {
+      if (signer && signing) { signer.setFields(fieldsOf(signing)); return; }
+      if (!loaded) return;
+      // An open file is left as it is (a video playing, a PDF being read) unless its own places to sign changed.
+      const key = shown ? JSON.stringify(fieldsOf(shown)) : '';
+      if (shown && key === shownFields) return;
+      if (!(editor && shown === editor.path)) render();
+    },
     open(path) { if (fileAt(path)) show(path); },
     destroy() {
       // Going to another page with edits not saved: one question, and the save goes on after the view is gone.
       if (editor && editor.view.state.doc.toString() !== editor.saved && window.confirm(`Save your changes to ${baseName(editor.path)}?`)) void editor.save();
+      if (signer?.dirty() && window.confirm(`Save what you filled in on ${baseName(signing ?? '')}?`)) void signer.save();
       destroyed = true;
       editor?.view.destroy();
       signer?.destroy();

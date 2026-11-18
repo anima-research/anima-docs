@@ -68,6 +68,8 @@ export class Realtime {
     app.trees.on('changed', (e: { tree: string }) => this.broadcastTree(e.tree));
     app.docs.on('meta', (e: { docId: string; kind: string }) => this.broadcastMeta(e.docId, e.kind));
     app.comments.on('event', (e: CommentEvent) => this.broadcastThreads(e.docId, e));
+    // Threads changed without an event of their own (a file a signature field is on was moved).
+    app.comments.on('refresh', (docId: string) => { const room = this.rooms.get(docId); if (room) for (const c of room.conns.values()) this.sendTo(c, { type: 'threads', threads: this.threadsFor(c) }); });
     app.docs.on('failed', (e: { docId: string }) => this.closeRoom(e.docId, 4500, 'Save failed; reconnecting'));
     app.principals.on('role', (e: { sub: string }) => { this.reauthorize(e.sub); for (const id of this.rooms.keys()) this.recheckRoom(id); });
     app.principals.on('renamed', (e: { sub: string }) => this.renamed(e.sub));

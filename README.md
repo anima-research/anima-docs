@@ -305,7 +305,7 @@ A document of type **files** is a place for files: PDFs, photos, datasets, anyth
 
 ## Run
 
-Node 22.12+.
+Node 22.13+.
 
 ```sh
 npm install

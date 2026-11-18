@@ -12,10 +12,11 @@
 // kept by the server for them alone, and put on a page only by them, here.
 
 import * as pdfjs from 'pdfjs-dist';
-import { PDFDocument, StandardFonts, degrees, type PDFFont, type PDFImage, type PDFPage } from '@cantoo/pdf-lib';
+import { PDFDocument, PDFName, StandardFonts, degrees, type PDFFont, type PDFImage, type PDFPage } from '@cantoo/pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
 import { h } from './lib/dom';
 import { icon } from './lib/icons';
+import { pageMapper, shownBox } from './pdfgeometry';
 
 pdfjs.GlobalWorkerOptions.workerSrc = '/pdfjs/pdf.worker.min.mjs';
 
@@ -38,7 +39,14 @@ export interface SignOptions {
   save(pdf: Uint8Array, signed: { id: string; kind: StampKind }[]): Promise<void>;
   close(): void;
 }
-export interface SignView { el: HTMLElement; dirty(): boolean; setFields(fields: SignField[]): void; destroy(): void }
+export interface SignView {
+  el: HTMLElement;
+  dirty(): boolean;
+  /** Save what has been filled in and placed (as the Save button does). */
+  save(): Promise<void>;
+  setFields(fields: SignField[]): void;
+  destroy(): void;
+}
 
 type Tool = 'none' | 'text' | 'date' | StampKind;
 interface Stamp { png: Uint8Array; url: string; ratio: number }
@@ -46,7 +54,7 @@ interface TextItem { type: 'text'; page: number; x: number; y: number; size: num
 interface ImageItem { type: 'image'; page: number; x: number; y: number; w: number; h: number; kind: StampKind; stamp: Stamp; fieldId: string | null; el: HTMLElement }
 type Item = TextItem | ImageItem;
 interface FormValue { type: 'text' | 'check' | 'radio' | 'choice'; value: string | boolean; initial: string | boolean }
-interface Page { n: number; w: number; h: number; el: HTMLElement; canvas: HTMLCanvasElement; layer: HTMLElement; drawn: number; proxy: pdfjs.PDFPageProxy | null }
+interface Page { n: number; w: number; h: number; el: HTMLElement; canvas: HTMLCanvasElement; layer: HTMLElement; drawn: number; opening: Promise<pdfjs.PDFPageProxy> | null }
 
 /** Sizes on the page, in points (1/72 inch). */
 const TEXT_SIZE = 11, STAMP_WIDTH: Record<StampKind, number> = { signature: 150, initials: 56 };
@@ -100,7 +108,7 @@ export async function mountSign(o: SignOptions): Promise<SignView> {
     el.dataset.tool = t;
     updateHint();
   }
-  const openFields = () => [...fields, ...ownFields].filter((f) => !items.some((i) => i.type === 'image' && i.fieldId === f.id));
+  const openFields = () => [...fields, ...ownFields].filter((f) => (f.forMe || !f.assignee) && !items.some((i) => i.type === 'image' && i.fieldId === f.id));
   function updateHint() {
     const open = openFields();
     nextBtn.hidden = !open.length;
@@ -121,16 +129,16 @@ export async function mountSign(o: SignOptions): Promise<SignView> {
     const canvas = h('canvas.sign-canvas');
     const layer = h('div.sign-layer');
     const pageEl = h('div.sign-page', { 'data-page': String(n) }, canvas, layer);
-    pages.push({ n, w: 612, h: 792, el: pageEl, canvas, layer, drawn: 0, proxy: null });
+    pages.push({ n, w: 612, h: 792, el: pageEl, canvas, layer, drawn: 0, opening: null });
     pagesEl.append(pageEl);
   }
   const sized = new ResizeObserver((entries) => { for (const e of entries) { const p = pages[Number((e.target as HTMLElement).dataset.page) - 1]; p.el.style.setProperty('--pt', `${e.contentRect.width / p.w}px`); void draw(p); } });
   const seen = new IntersectionObserver((entries) => { for (const e of entries) if (e.isIntersecting) void draw(pages[Number((e.target as HTMLElement).dataset.page) - 1]); }, { root: pagesEl, rootMargin: '600px 0px' });
 
-  /** Read a page: its size, its form fields. */
-  async function open(p: Page) {
-    if (p.proxy) return p.proxy;
-    const proxy = p.proxy = await pdf.getPage(p.n);
+  /** Read a page: its size, its form fields. Once, however many ask at once (a resize and a scroll both do). */
+  const open = (p: Page) => (p.opening ??= read(p));
+  async function read(p: Page) {
+    const proxy = await pdf.getPage(p.n);
     const vp = proxy.getViewport({ scale: 1 });
     p.w = vp.width; p.h = vp.height;
     p.el.style.aspectRatio = `${p.w} / ${p.h}`;
@@ -161,7 +169,7 @@ export async function mountSign(o: SignOptions): Promise<SignView> {
         const input = h('input.sign-check', { type: a.checkBox ? 'checkbox' : 'radio', name: `f-${name}`, 'aria-label': a.alternativeText || name, checked: a.checkBox ? v.value === true : v.value === on });
         input.addEventListener('change', () => { v.value = a.checkBox ? input.checked : on; changed(); });
         place(input);
-      } else if (a.fieldType === 'Ch' && Array.isArray(a.options)) {
+      } else if (a.fieldType === 'Ch' && a.combo && !a.multiSelect && Array.isArray(a.options)) {
         const start = String(Array.isArray(a.fieldValue) ? a.fieldValue[0] ?? '' : a.fieldValue ?? '');
         if (!form.has(name)) form.set(name, { type: 'choice', value: start, initial: start });
         const select = h('select.sign-input', { 'aria-label': a.alternativeText || name, style: 'font-size: calc(var(--pt) * 10)' }, h('option', { value: '' }, ''), ...a.options.map((op: { exportValue: string; displayValue: string }) => h('option', { value: op.exportValue }, op.displayValue)));
@@ -199,9 +207,10 @@ export async function mountSign(o: SignOptions): Promise<SignView> {
     for (const f of [...fields, ...ownFields]) {
       const p = pages[f.page - 1];
       if (!p || items.some((i) => i.type === 'image' && i.fieldId === f.id)) continue;
-      const who = f.assignee && !f.forMe ? ` (for ${f.assignee})` : '';
-      const node = h('button.sign-field', { type: 'button', 'data-field': f.id, class: `${f.kind}${f.forMe ? ' mine' : ''}`, title: [f.by ? `Asked by ${f.by}${who}` : '', f.note].filter(Boolean).join(': '), onclick: (e: MouseEvent) => { e.stopPropagation(); void placeInField(f); } },
-        icon(f.kind === 'signature' ? 'suggest' : 'tag', 14), h('span', null, `${WORD[f.kind].ask}${who}`));
+      // A place asked of someone else is theirs: shown, not signable here.
+      const others = !!f.assignee && !f.forMe;
+      const node = h('button.sign-field', { type: 'button', 'data-field': f.id, class: `${f.kind}${f.forMe ? ' mine' : ''}${others ? ' others' : ''}`, disabled: others, title: [f.by ? `Asked by ${f.by}${others ? ` of ${f.assignee}` : ''}` : '', f.note].filter(Boolean).join(': '), onclick: (e: MouseEvent) => { e.stopPropagation(); void placeInField(f); } },
+        icon(f.kind === 'signature' ? 'suggest' : 'tag', 14), h('span', null, others ? `For ${f.assignee}` : WORD[f.kind].ask));
       node.style.left = `${f.x * 100}%`; node.style.top = `${f.y * 100}%`; node.style.width = `${f.w * 100}%`; node.style.height = `${f.h * 100}%`;
       p.layer.append(node);
     }
@@ -221,7 +230,7 @@ export async function mountSign(o: SignOptions): Promise<SignView> {
 
   // ------------------------------------------------------------------ what the person adds
 
-  function wire(item: Item, grip: HTMLElement) {
+  function wire(item: Item, grip: HTMLElement, dropped?: () => void) {
     const p = pages[item.page - 1];
     const put = () => { item.el.style.left = `${item.x * 100}%`; item.el.style.top = `${item.y * 100}%`; if (item.type === 'image') { item.el.style.width = `${item.w * 100}%`; item.el.style.height = `${item.h * 100}%`; } };
     put();
@@ -232,7 +241,7 @@ export async function mountSign(o: SignOptions): Promise<SignView> {
       const dx = e.clientX - item.x * box.width, dy = e.clientY - item.y * box.height;
       grip.setPointerCapture(e.pointerId);
       const move = (m: PointerEvent) => { item.x = clamp((m.clientX - dx) / box.width, 0, 0.99); item.y = clamp((m.clientY - dy) / box.height, 0, 0.99); put(); };
-      const up = () => { grip.removeEventListener('pointermove', move); grip.removeEventListener('pointerup', up); grip.removeEventListener('pointercancel', up); };
+      const up = () => { grip.removeEventListener('pointermove', move); grip.removeEventListener('pointerup', up); grip.removeEventListener('pointercancel', up); dropped?.(); };
       grip.addEventListener('pointermove', move); grip.addEventListener('pointerup', up); grip.addEventListener('pointercancel', up);
     });
     item.el.addEventListener('click', (e) => e.stopPropagation());
@@ -273,7 +282,13 @@ export async function mountSign(o: SignOptions): Promise<SignView> {
     const node = h('div.sign-item.image', null, grip, corner);
     const item: ImageItem = { type: 'image', el: node, ...p };
     node.append(h('span.sign-item-tools', null, itemButton('Remove', '×', () => removeItem(item))));
-    const put = wire(item, grip);
+    // Dragged out of the place it was asked for, it no longer answers that request (the place shows again).
+    const put = wire(item, grip, () => {
+      const f = item.fieldId ? [...fields, ...ownFields].find((x) => x.id === item.fieldId) : null;
+      if (!f) return;
+      const cx = item.x + item.w / 2, cy = item.y + item.h / 2;
+      if (cx < f.x || cx > f.x + f.w || cy < f.y || cy > f.y + f.h) { item.fieldId = null; drawFields(); }
+    });
     const page = pages[item.page - 1];
     corner.addEventListener('pointerdown', (e) => {
       e.preventDefault(); e.stopPropagation();
@@ -319,14 +334,14 @@ export async function mountSign(o: SignOptions): Promise<SignView> {
   async function getStamp(kind: StampKind, again = false): Promise<Stamp | null> {
     if (!again && stamps.has(kind)) return stamps.get(kind)!;
     if (!again) {
-      const r = await fetch(`/api/me/${kind}`, { credentials: 'same-origin' });
-      if (r.ok) { const s = await loadStamp(new Uint8Array(await r.arrayBuffer())); stamps.set(kind, s); return s; }
-      if (r.status !== 404) { o.host.toast('Your saved signature could not be read. Sign in again in this browser.', 'error'); return null; }
+      const r = await fetch(`/api/me/${kind}`, { credentials: 'same-origin' }).catch(() => null);
+      if (r?.ok) { const s = await loadStamp(new Uint8Array(await r.arrayBuffer())); stamps.set(kind, s); return s; }
+      if (r?.status !== 404) { o.host.toast(r ? 'Your saved signature could not be read. Sign in again in this browser.' : 'Could not reach the server for your saved signature. Check your connection.', 'error'); return null; }
     }
     const png = await drawStamp(kind);
     if (!png) return null;
-    const put = await fetch(`/api/me/${kind}`, { method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'image/png' }, body: png as BodyInit });
-    if (!put.ok) o.host.toast(`Your ${WORD[kind].noun} could not be kept for next time; ${kind === 'signature' ? 'it is' : 'they are'} used for this document.`, 'info');
+    const put = await fetch(`/api/me/${kind}`, { method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'image/png' }, body: png as BodyInit }).catch(() => null);
+    if (!put?.ok) o.host.toast(`Your ${WORD[kind].noun} could not be kept for next time; ${kind === 'signature' ? 'it is' : 'they are'} used for this document.`, 'info');
     const s = await loadStamp(png);
     stamps.set(kind, s);
     return s;
@@ -404,13 +419,7 @@ export async function mountSign(o: SignOptions): Promise<SignView> {
   // ------------------------------------------------------------------ writing it into the PDF
 
   /** A point of the page as shown (points from its top left) in the page's own space, whatever its rotation and crop. */
-  function mapper(page: PDFPage) {
-    const rot = ((page.getRotation().angle % 360) + 360) % 360;
-    const c = page.getCropBox();
-    const shown = rot % 180 ? { w: c.height, h: c.width } : { w: c.width, h: c.height };
-    const at = (u: number, v: number) => (rot === 90 ? { x: c.x + v, y: c.y + u } : rot === 180 ? { x: c.x + c.width - u, y: c.y + v } : rot === 270 ? { x: c.x + c.width - v, y: c.y + c.height - u } : { x: c.x + u, y: c.y + c.height - v });
-    return { rot, shown, at };
-  }
+  const mapper = (page: PDFPage) => pageMapper(page.getRotation().angle, shownBox(page.getCropBox(), page.getMediaBox()));
 
   /** Text as a picture, for writing a script the fonts here do not hold. */
   async function textPicture(text: string, size: number): Promise<{ png: Uint8Array; w: number; h: number }> {
@@ -427,7 +436,7 @@ export async function mountSign(o: SignOptions): Promise<SignView> {
     return { png: new Uint8Array(await blob.arrayBuffer()), w: w / k, h: hh / k };
   }
 
-  async function build(): Promise<{ bytes: Uint8Array; signed: { id: string; kind: StampKind }[]; missed: string[] }> {
+  async function build(): Promise<{ bytes: Uint8Array; signed: { id: string; kind: StampKind }[]; missed: string[]; open: boolean }> {
     const doc = await PDFDocument.load(original);
     const texts = items.filter((i): i is TextItem => i.type === 'text').map((i) => ({ item: i, text: (i.body.innerText ?? '').replace(/ /g, ' ').replace(/\n+$/, '') })).filter((t) => t.text.trim());
     const typed = [...texts.map((t) => t.text), ...[...form.values()].filter((v) => v.type === 'text' && v.value !== v.initial).map((v) => String(v.value))].join('');
@@ -450,7 +459,13 @@ export async function mountSign(o: SignOptions): Promise<SignView> {
       try { if (f.hasXFA()) f.deleteXFA(); } catch { /* none */ }
       for (const [name, v] of changedFields) {
         try {
-          if (v.type === 'text') { const t = f.getTextField(name); t.setText(String(v.value)); if (!plain && holds(String(v.value))) t.updateAppearances(font); }
+          if (v.type === 'text') {
+            // A value no font here can write is left out and said: writing it would fail the whole save.
+            if (!holds(String(v.value))) { missed.push(name); continue; }
+            const t = f.getTextField(name);
+            t.setText(String(v.value));
+            if (!plain) t.updateAppearances(font);
+          }
           else if (v.type === 'check') { const c = f.getCheckBox(name); if (v.value) c.check(); else c.uncheck(); }
           else if (v.type === 'radio') f.getRadioGroup(name).select(String(v.value));
           else { const d = f.getDropdown(name); if (v.value) d.select(String(v.value)); else d.clear(); }
@@ -488,23 +503,30 @@ export async function mountSign(o: SignOptions): Promise<SignView> {
       if (i.fieldId && !i.fieldId.startsWith('own:')) signed.push({ id: i.fieldId, kind: i.kind });
     }
     // Signed: what was filled in becomes part of the page, no longer fields someone can change.
-    if (items.some((i) => i.type === 'image') && form.size) { try { doc.getForm().flatten(); } catch { /* left as fields */ } }
-    return { bytes: await doc.save(), signed, missed };
+    let open = false;
+    if (items.some((i) => i.type === 'image') && doc.catalog.has(PDFName.of('AcroForm')) && doc.getForm().getFields().length) {
+      try { doc.getForm().flatten(); } catch { open = true; }
+    }
+    return { bytes: await doc.save(), signed, missed, open };
   }
 
   async function save() {
     if (saving || !dirty()) return;
     saving = true; changed();
     saveBtn.textContent = 'Saving…';
+    // Nothing changes under a save: what is typed while it runs would not be in it.
+    el.classList.add('saving');
+    (document.activeElement as HTMLElement | null)?.blur?.();
     try {
-      const { bytes, signed, missed } = await build();
+      const { bytes, signed, missed, open } = await build();
       await o.save(bytes, signed);
+      if (open) o.host.toast('Saved and signed, but this PDF’s form fields could not be made final: they can still be edited in the file.', 'info');
       if (missed.length) o.host.toast(`Saved, but ${missed.length === 1 ? 'one field' : `${missed.length} fields`} could not be filled in this PDF (${missed.slice(0, 3).join(', ')}): type over ${missed.length === 1 ? 'it' : 'them'} with Text.`, 'info');
       items.length = 0; form.clear();
       o.close();
     } catch (e) {
       o.host.toast(e instanceof Error && /encrypt/i.test(e.message) ? 'This PDF is protected and cannot be filled in here.' : e instanceof Error ? e.message : 'Could not save.', 'error');
-    } finally { saving = false; saveBtn.textContent = 'Save'; changed(); }
+    } finally { saving = false; el.classList.remove('saving'); saveBtn.textContent = 'Save'; changed(); }
   }
   async function leave() {
     if (dirty() && !(await o.host.confirm(`Leave ${o.name}?`, 'What you filled in and placed has not been saved.', 'Leave'))) return;
@@ -517,18 +539,25 @@ export async function mountSign(o: SignOptions): Promise<SignView> {
   // The first page gives every page its size before any is drawn (the layout does not jump as pages arrive).
   const first = await open(pages[0]);
   const fv = first.getViewport({ scale: 1 });
-  for (const p of pages) { if (!p.proxy) { p.w = fv.width; p.h = fv.height; } p.el.style.aspectRatio = `${p.w} / ${p.h}`; sized.observe(p.el); seen.observe(p.el); }
+  for (const p of pages) { if (!p.opening) { p.w = fv.width; p.h = fv.height; } p.el.style.aspectRatio = `${p.w} / ${p.h}`; sized.observe(p.el); seen.observe(p.el); }
   // Every page with a place to sign is read now, so its fields are there to be found.
   await Promise.all([...new Set(fields.map((f) => f.page))].filter((n) => n >= 1 && n <= pages.length).map((n) => open(pages[n - 1])));
   drawFields();
   setTool('none');
   changed();
   requestAnimationFrame(() => { if (fields.some((f) => f.forMe)) goToField(); });
+  // The rest of the pages are read one after another, so the PDF's own places to sign are all counted.
+  void (async () => { for (const p of pages) { if (destroyed) return; await open(p).catch(() => undefined); } })();
 
   return {
     el,
     dirty,
-    setFields(next) { fields = next; drawFields(); },
+    save,
+    setFields(next) {
+      fields = next;
+      for (const i of items) if (i.type === 'image' && i.fieldId && !i.fieldId.startsWith('own:') && !next.some((f) => f.id === i.fieldId)) i.fieldId = null;
+      drawFields();
+    },
     destroy() {
       destroyed = true;
       sized.disconnect(); seen.disconnect();

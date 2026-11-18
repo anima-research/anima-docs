@@ -28,10 +28,10 @@ export function cleanField(f: unknown): FileField {
   const page = Number(o.page);
   const x = frac(o.x), y = frac(o.y);
   let w = frac(o.w), h = frac(o.h);
+  w = Math.min(w, 1 - x); h = Math.min(h, 1 - y);
   if (!kind || typeof o.path !== 'string' || !o.path || !Number.isInteger(page) || page < 1 || [x, y, w, h].some(Number.isNaN) || w < 0.005 || h < 0.003) {
     throw new Fault(400, 'A field needs a kind (signature or initials), a file, a page and a box inside the page.');
   }
-  w = Math.min(w, 1 - x); h = Math.min(h, 1 - y);
   const r = (n: number) => Math.round(n * 1e5) / 1e5;
   return { kind, path: o.path, page, x: r(x), y: r(y), w: r(w), h: r(h) };
 }
@@ -55,6 +55,8 @@ const norm = (s: string) => s.toLowerCase().normalize('NFKD').replace(/[^\p{L}\p
 export async function placeField(app: App, docId: string, p: { kind: FieldKind; path: string; near: string; page?: number; occurrence?: number }): Promise<FileField> {
   const f = fieldFile(app, docId, p.path);
   const at = app.media.locate(f.mediaId);
+  const count = at && p.page ? (await app.pdf.pages(f.mediaId, at.file))?.length : undefined;
+  if (count && p.page! > count) throw new Fault(400, `${f.path} has ${count} page${count === 1 ? '' : 's'}; there is no page ${p.page}.`);
   const pages = at ? await app.pdf.words(at.file, p.page) : null;
   if (!pages) throw new Fault(409, `The text of ${f.path} cannot be read here, so a field cannot be placed by its words: give page and box.`);
   const want = p.near.split(/\s+/).map(norm).filter(Boolean);
