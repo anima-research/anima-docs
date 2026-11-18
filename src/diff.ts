@@ -196,25 +196,27 @@ function sheetChanges(docs: Documents, principals: Principals, docId: string, ba
   const doc = docs.ydoc(docId);
   const to = opts.to ?? Y.snapshot(doc);
   const authorBy = new Map<string, string | null>();
+  const shapers = new Set<string>();
   const c = atSnapshots(doc, [base, to], () => {
     const found = bookChanges(sheetStoreAt(doc, base), sheetStoreAt(doc, to));
-    const visible = (item: Y.Item, s: Y.Snapshot) => (s.sv.get(item.id.client) ?? 0) > item.id.clock && !Y.isDeleted(s.ds, item.id);
-    // Who wrote the value a cell has at the end; for a cell that was cleared, who cleared it.
-    const entries = (doc.getMap('cells') as unknown as { _map: Map<string, Y.Item> })._map;
-    for (const x of found.cells) {
-      if (!x.key) continue;
-      let atBase: Y.Item | null = null, who: string | null | undefined;
-      for (let item: Y.Item | null = entries.get(x.key) ?? null; item && who === undefined; item = item.left as Y.Item | null) {
-        if (visible(item, to)) who = docs.ownerOfClient(docId, item.id.client);
-        else if (!atBase && visible(item, base)) atBase = item;
+    const there = (item: Y.Item, s: Y.Snapshot) => (s.sv.get(item.id.client) ?? 0) > item.id.clock;
+    // Who gave an entry the value it has at the end; for one that was emptied or removed, who did that.
+    // (The newest record that existed at the end is the last word on the entry.)
+    const who = (map: string, key: string): string | null => {
+      const entries = (doc.getMap(map) as unknown as { _map: Map<string, Y.Item> })._map;
+      for (let item: Y.Item | null = entries.get(key) ?? null; item; item = item.left as Y.Item | null) {
+        if (there(item, to)) return Y.isDeleted(to.ds, item.id) ? docs.deleterOf(docId, item.id.client, item.id.clock) : docs.ownerOfClient(docId, item.id.client);
       }
-      authorBy.set(x.key, who ?? (atBase ? docs.deleterOf(docId, atBase.id.client, atBase.id.clock) : null));
-    }
+      return null;
+    };
+    for (const x of found.cells) if (x.key) authorBy.set(x.key, who('cells', x.key));
+    // Rows, columns, sheets, names, formats: their authors count too (a change of shape alone is still someone's change).
+    for (const e of found.entries.slice(0, 5000)) { if (e.map !== 'cells') { const a = who(e.map, e.key); if (a) shapers.add(a); } }
     return found;
   });
   if (!c.cells.length && !c.notes.length) return { changed: false, text: '', authors: [], hunks: 0, added: 0, removed: 0 };
   const authorOf = (key: string) => authorBy.get(key) ?? null;
-  const authors = new Set<string>();
+  const authors = new Set<string>(shapers);
   const show = (v: string) => (v === '' ? '(empty)' : v.length > 80 ? `${v.slice(0, 80)}…` : v).replace(/\n/g, '⏎');
   let added = 0, removed = 0;
   const lines = c.cells.map((x) => {

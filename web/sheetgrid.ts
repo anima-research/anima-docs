@@ -149,7 +149,8 @@ export function sheetView(deps: SheetDeps): SheetView {
   function paintNow() {
     if (destroyed) return;
     const s = sheet();
-    if (!s) { cellsEl.replaceChildren(); return; }
+    el.classList.toggle('no-sheets', !s);
+    if (!s) { cellsEl.replaceChildren(); colHead.replaceChildren(corner); rowHead.replaceChildren(); nameBox.textContent = ''; fx.value = ''; stats.textContent = ''; return; }
     const r0 = clamp(Math.floor(scroll.scrollTop / ROW_H) - OVERSCAN, 0, s.rows.length - 1);
     const r1 = clamp(Math.ceil((scroll.scrollTop + scroll.clientHeight) / ROW_H) + OVERSCAN, 0, s.rows.length - 1);
     const c0 = clamp(colAt(scroll.scrollLeft) - 1, 0, s.cols.length - 1);
@@ -286,7 +287,7 @@ export function sheetView(deps: SheetDeps): SheetView {
     const s = book.byId.get(id);
     if (!s || !canEdit) return;
     const name = await deps.promptDialog({ title: 'Rename sheet', label: 'Name', value: s.name, confirmLabel: 'Rename', maxLength: 31 });
-    if (name && name.trim() && name.trim() !== s.name) change(() => { renameSheet(doc, book, book.byId.get(id)!, name); });
+    if (name && name.trim() && name.trim() !== s.name) change(() => { const now = book.byId.get(id); if (now) renameSheet(doc, book, now, name); });
   }
   function tabMenu(id: string, anchor: HTMLElement) {
     if (!canEdit) return;
@@ -296,7 +297,7 @@ export function sheetView(deps: SheetDeps): SheetView {
         const s = book.byId.get(id);
         if (!s) return;
         void deps.confirmDialog({ title: `Delete “${s.name}”?`, message: 'The sheet and everything in it goes. Formulas on other sheets that point into it will read #REF!. History keeps it: it can be restored.', confirmLabel: 'Delete', danger: true })
-          .then((ok) => { if (ok) change(() => { deleteSheet(doc, book, book.byId.get(id)!); }); });
+          .then((ok) => { if (ok) change(() => { const now = book.byId.get(id); if (now) deleteSheet(doc, book, now); }); });
       } },
     ]);
   }
@@ -329,7 +330,7 @@ export function sheetView(deps: SheetDeps): SheetView {
     }
     if (changed(maps.widths)) layout();
     placeEditor();
-    selectionChanged();
+    if (sheet()) selectionChanged(); else { if (editing) endEdit(false); paint(); }
   }
   doc.on('afterTransaction', onTransaction);
   const onAwareness = () => paintOverlay();
@@ -650,8 +651,9 @@ export function sheetView(deps: SheetDeps): SheetView {
   });
   formatBtn.addEventListener('click', () => {
     if (!canEdit) return;
-    const s = sheet(), current = formatOf(book, s, sel.aR, sel.aC);
-    deps.openMenu(formatBtn, FORMATS.map((f) => ({ label: f.label, hint: f.sample, checked: f.code === current, onSelect: () => { change(() => { setFormat(doc, s, rect(), f.code); }); sink.focus(); } })));
+    // The sheet and the selection as they are when the menu opens: what the person is looking at when choosing.
+    const s = sheet(), where = rect(), current = formatOf(book, s, sel.aR, sel.aC);
+    deps.openMenu(formatBtn, FORMATS.map((f) => ({ label: f.label, hint: f.sample, checked: f.code === current, onSelect: () => { change(() => { setFormat(doc, s, where, f.code); }); sink.focus(); } })));
   });
 
   // ------------------------------------------------------------------ life

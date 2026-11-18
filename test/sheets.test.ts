@@ -96,20 +96,29 @@ test('agents read a sheet as values, a part of it, or what was typed', async () 
     const all = await tool('read_document', { document: d.id });
     assert.match(all, /“Ledger” \(d\w+, spreadsheet\)/);
     assert.match(all, /Sheets: Sheet1 \(5 rows × 3 columns filled; 100 × 26 in all\)/);
-    assert.match(all, /<<<SHEET\n\tA\tB\tC\n1\tdate\titem\tamount\n2\t2026-01-05\tRent\t1,200.00\n3\t2026-01-07\tFood, drink\t80.50\n4\t2026-01-09\tBooks\t40.00\n5\ttotal\t\t1,320.50\nSHEET>>>/);
+    assert.match(all, /\nValues \(pass formulas: true for what was typed\)\./);
+    assert.match(all, /<<<SHEET Sheet1!A1:C5\n\tA\tB\tC\n1\tdate\titem\tamount\n2\t2026-01-05\tRent\t1,200.00\n3\t2026-01-07\tFood, drink\t80.50\n4\t2026-01-09\tBooks\t40.00\n5\ttotal\t\t1,320.50\nSHEET>>>/);
     const part = await tool('read_document', { document: d.id, range: 'B2:C3', formulas: true });
-    assert.match(part, /Showing Sheet1!B2:C3 — what was typed/);
-    assert.match(part, /\n\tB\tC\n2\tRent\t1200\n3\tFood, drink\t80.5\nSHEET>>>/);
+    assert.match(part, /\nWhat was typed \(formulas as written\)\./);
+    assert.match(part, /<<<SHEET Sheet1!B2:C3\n\tB\tC\n2\tRent\t1200\n3\tFood, drink\t80.5\nSHEET>>>/);
     assert.match(await tool('read_document', { document: d.id, range: 'C5', formulas: true }), /5\t=SUM\(C2:C4\)/);
     await assert.rejects(tool('read_document', { document: d.id, range: 'Nowhere!A1' }), /No sheet “Nowhere”\. Sheets: Sheet1/);
     assert.match(await tool('list_documents', {}), /\[spreadsheet\]/);
+    // A read without a range shows every sheet; a sheet called like a cell or a column is still found by its name.
+    await tool('edit_sheet', { document: d.id, changes: [{ add_sheet: 'Q1' }, { add_sheet: 'Jan' }, { set: 'Q1!A1', value: 'first quarter' }, { set: 'Jan!B2', value: 'x'.repeat(5000) }] });
+    const both = await tool('read_document', { document: d.id });
+    assert.match(both, /<<<SHEET Sheet1!A1:C5\n[\s\S]*<<<SHEET 'Q1'!A1:A1\n\tA\n1\tfirst quarter\nSHEET>>>\n<<<SHEET Jan!A1:B2\n/);
+    assert.match(both, /2\t\tx{2000}… \(3,000 more characters: read this cell alone\)/);
+    assert.match(await tool('read_document', { document: d.id, range: 'Q1' }), /<<<SHEET 'Q1'!A1:A1\n\tA\n1\tfirst quarter\n/);
+    assert.match(await tool('read_document', { document: d.id, range: 'Jan' }), /<<<SHEET Jan!A1:B2\n/);
+    assert.equal((await tool('read_document', { document: d.id, range: 'Jan!B2' })).match(/x+/g)!.sort((x, y) => y.length - x.length)[0].length, 5000);
   } finally { app.close(); }
 });
 
 test('edit_sheet: cells, appended rows, inserts, deletes, sorting, sheets; one call is all or nothing', async () => {
   const { app, d, tool } = setup();
   try {
-    const grid = async (range?: string) => /<<<SHEET\n[^\n]*\n([\s\S]*)\nSHEET>>>/.exec(await tool('read_document', { document: d.id, range, formulas: true }))?.[1].split('\n').map((l) => l.split('\t').slice(1).join('|')) ?? [];
+    const grid = async (range?: string) => /<<<SHEET [^\n]*\n[^\n]*\n([\s\S]*?)\nSHEET>>>/.exec(await tool('read_document', { document: d.id, range, formulas: true }))?.[1].split('\n').map((l) => l.split('\t').slice(1).join('|')) ?? [];
     let out = await tool('edit_sheet', { document: d.id, changes: [
       { append: [['2026-01-03', 'Paper', 12], ['2026-01-02', 'Ink', true]] },
       { set: 'D1', value: 'double' }, { set: 'D2', values: [['=C2*2'], ['=C3*2']] },
@@ -129,6 +138,9 @@ test('edit_sheet: cells, appended rows, inserts, deletes, sorting, sheets; one c
     await assert.rejects(tool('edit_sheet', { document: d.id, changes: [{ set: 'A1', value: 'CHANGED' }, { delete_sheet: 'Nope' }] }), /Change 2: No sheet “Nope”.* Nothing was changed\./);
     await assert.rejects(tool('edit_sheet', { document: d.id, changes: [{ add_sheet: 'ledger' }] }), /already a sheet named “Ledger”/);
     await assert.rejects(tool('edit_sheet', { document: d.id, changes: [{ frobnicate: 1 }] }), /not a change I know/);
+    await assert.rejects(tool('edit_sheet', { document: d.id, changes: [{ set: 'A1', value: 1, append: [[2]] }] }), /one change does one thing; this one has set and append/);
+    await assert.rejects(tool('edit_sheet', { document: d.id, changes: [{ sort: 'A2:D6', by: 'C2' }] }), /by is a column letter/);
+    await assert.rejects(tool('edit_sheet', { document: d.id, changes: [{ delete_rows: 1, count: 500 }] }), /keeps at least one row/);
     assert.equal(app.docs.text(d.id), before);
     assert.equal(app.docs.get(d.id)!.rev, rev);
     await assert.rejects(tool('edit_document', { document: d.id, edits: [{ append: 'x' }] }), /use edit_sheet/);
@@ -136,6 +148,9 @@ test('edit_sheet: cells, appended rows, inserts, deletes, sorting, sheets; one c
     await assert.rejects(tool('add_comment', { document: d.id, quote: 'Rent', text: 'why?' }), /name the cells/);
     assert.match(await tool('add_comment', { document: d.id, text: 'Is D4 right?' }), /Comment thread \w+ created/);
     assert.match(await tool('search', { query: 'opening', document: d.id }), /Opening/);
+    // Messages say what was done, not what was asked.
+    assert.match(await tool('edit_sheet', { document: d.id, changes: [{ add_sheet: " 'Sales/2026' " }] }), /Added sheet “Sales 2026”\./);
+    assert.match(await tool('edit_sheet', { document: d.id, sheet: 'Sales 2026', changes: [{ delete_rows: 99, count: 10 }] }), /Deleted rows 99–100 of 'Sales 2026'\./);
   } finally { app.close(); }
 });
 
@@ -183,11 +198,46 @@ test('what changed is told by cell with who wrote it; history restores and undoe
     const made = [...v2.matchAll(/^\s+(h\d+)\s/gm)].map((m) => m[1]).at(-2)!; // the last listed is where history begins: nothing yet
     await tool('restore_version', { document: d.id, version: made, at: 'after' });
     assert.equal(app.docs.text(d.id), '## Sheet1\ndate\titem\tamount\n2026-01-05\tRent\t1200\n2026-01-07\tFood, drink\t80.5\n2026-01-09\tBooks\t40');
+    // A row an agent added, written into by a person afterwards: taking the row back would take her entry with it.
+    await sleep(80);
+    await tool('edit_sheet', { document: d.id, changes: [{ insert_rows: 2 }] });
+    await sleep(80);
+    const added = /^\s+(h\d+)\s/m.exec(await tool('versions', { document: d.id }))![1];
+    await as(ann)('edit_sheet', { document: d.id, changes: [{ set: 'A2', value: 'hers' }] });
+    await assert.rejects(tool('undo_change', { document: d.id, change: added }), /put content into rows, columns or a sheet that this change added/);
+    await as(ann)('edit_sheet', { document: d.id, changes: [{ set: 'A2', value: '' }] });
+    assert.match(await tool('undo_change', { document: d.id, change: added }), /Undid h\d+/);
+    // A change of shape alone has an author too; a change of format alone can be restored away.
+    await tool('read_document', { document: d.id });
+    await sleep(80);
+    await as(ann)('edit_sheet', { document: d.id, changes: [{ rename_sheet: 'Sheet1', to: 'Ledger' }, { format: 'C:C', as: '0.00' }] });
+    await sleep(80);
+    const shaped = await tool('changes', { document: d.id });
+    assert.match(shaped, /0 cells by Ann[^\n]*:\nSheet “Sheet1” was renamed “Ledger”\.\nLedger: number formats changed\./);
+    const fmt = /^\s+(h\d+)\s/m.exec(await tool('versions', { document: d.id }))![1];
+    assert.match(await tool('restore_version', { document: d.id, version: fmt, at: 'before' }), /Restored h\d+ \(before it\)/);
+    assert.equal(app.sheets.book(d.id).sheets[0].name, 'Sheet1');
+    assert.doesNotMatch(await tool('read_document', { document: d.id }), /1200\.00/);
     const v = app.docs.saveVersion(d.id, ann, 'clean');
     await tool('edit_sheet', { document: d.id, changes: [{ delete_rows: 2, count: 2 }, { add_sheet: 'Scratch' }] });
     await tool('restore_version', { document: d.id, version: v.id });
     assert.equal(app.sheets.book(d.id).sheets.length, 1);
     assert.match(app.docs.text(d.id), /Rent\t1200\n2026-01-07/);
+    // Back to where history begins, before the first sheet was made: an empty book says so, and can be given a sheet.
+    const all = [...(await tool('versions', { document: d.id, limit: 100 })).matchAll(/^\s+(h\d+)\s/gm)].map((m) => m[1]);
+    await tool('restore_version', { document: d.id, version: all.at(-1)!, at: 'after' });
+    assert.match(await tool('read_document', { document: d.id }), /This spreadsheet has no sheets/);
+    await assert.rejects(tool('edit_sheet', { document: d.id, changes: [{ set: 'A1', value: 1 }] }), /no sheets/);
+    assert.equal((await app.sheets.xlsx(d.id)).length > 1000, true);
+    await tool('edit_sheet', { document: d.id, changes: [{ add_sheet: 'Sheet1' }, { set: 'A1', value: 'again' }] });
+    assert.match(await tool('read_document', { document: d.id }), /1\tagain/);
+    // An anchored comment or a suggestion cannot be put on a spreadsheet by any route.
+    assert.throws(() => app.comments.create(d.id, ann, { body: 'x', anchor: { start: new Uint8Array(), end: new Uint8Array(), quote: 'q' } as any }), /whole document/);
+    // A spreadsheet that cannot be made is not left half made.
+    const count = () => app.docs.list(ann, { limit: 500 }).length;
+    const n = count();
+    assert.throws(() => app.docs.create(ann, 'Too long', `ok,${'x'.repeat(40_000)}`, 'sheet'), /at most 32,767/);
+    assert.equal(count(), n);
   } finally { app.close(); }
 });
 
@@ -196,7 +246,7 @@ test('the Excel file holds values, formulas with their results, formats and widt
   try {
     const ann = S.app.principals.admit({ sub: 'human:test:ann', name: 'Ann', kind: 'human', issuer: 'test.local', scopes: [], claims: {}, exp: Date.now() / 1000 + 3600 }, 'web');
     const d = S.app.docs.create(ann, 'Q1 / Ledger', 'date\titem\tamount\n2026-01-05\tRent\t1200\n2026-01-07\tFood\t80.5', 'sheet');
-    S.app.sheets.apply(d.id, ann, [{ set: 'A4', values: [['total', '', '=SUM(C2:C3)'], ['share', '', '=C2/C4'], ['bad', '', '=1/0']] }, { format: 'C2:C4', as: '€#,##0.00' }, { format: 'C5', as: '0.0%' }, { add_sheet: 'Notes & such' }, { set: "'Notes & such'!A1", value: '=Sheet1!C4' }]);
+    S.app.sheets.apply(d.id, ann, [{ set: 'A4', values: [['total', '', '=SUM(C2:C3)'], ['share', '', '=C2/C4'], ['bad', '', '=1/0']] }, { format: 'C2:C4', as: '€#,##0.00' }, { format: 'C5', as: '0.0%' }, { format: 'D:D', as: '"€"#,##0.00' }, { add_sheet: 'Notes & such' }, { set: "'Notes & such'!A1", value: '=Sheet1!C4' }]);
     S.app.docs.editSheet(d.id, ann, (doc) => { const s = readBook(liveStore(doc)).sheets[0]; doc.getMap('widths').set(`${s.id}:${s.cols[1]}`, 225); });
     const agent = S.token('Quill');
     const quill = S.app.verify(agent);
@@ -218,9 +268,12 @@ test('the Excel file holds values, formulas with their results, formats and widt
     assert.equal(ws.getCell('C5').numFmt, '0.0%');
     assert.deepEqual(ws.getCell('C6').value, { formula: '1/0', result: { error: '#DIV/0!' } });
     assert.equal(ws.getColumn(2).width, 30);
+    assert.equal(ws.getColumn(4).numFmt, '"€"#,##0.00', 'a column\'s format goes with the column, quoted once');
     assert.deepEqual(wb.getWorksheet('Notes & such')!.getCell('A1').value, { formula: 'Sheet1!C4', result: 1280.5 });
     // On a published page a spreadsheet is its values, as tables.
-    assert.equal(S.app.sheets.markdown(d.id).split('\n\n## ')[0], '## Sheet1\n\n| date | item | amount |\n| --- | --- | --: |\n| 2026-01-05 | Rent | €1,200.00 |\n| 2026-01-07 | Food | €80.50 |\n| total |  | €1,280.50 |\n| share |  | 93.7% |\n| bad |  | #DIV/0! |');
+    assert.equal(S.app.sheets.markdown(d.id).split('\n\n## ')[0], '## Sheet1\n\n| date | item | amount |\n| --- | --- | --: |\n| 2026\\-01\\-05 | Rent | €1,200\\.00 |\n| 2026\\-01\\-07 | Food | €80\\.50 |\n| total |  | €1,280\\.50 |\n| share |  | 93\\.7% |\n| bad |  | \\#DIV/0\\! |');
+    S.app.sheets.apply(d.id, ann, [{ set: 'B2', value: '**Rent** [x](http://e) <b>|\\|' }]);
+    assert.match(S.app.sheets.markdown(d.id), /\| \\\*\\\*Rent\\\*\\\* \\\[x\\\]\\\(http:\/\/e\\\) \\<b\\>\\\|\\\\\\\| \|/);
     const md = await fetch(`${S.base}/api/docs/${S.app.docs.create(ann, 'Note', 'x').id}/export.xlsx`, { headers: { Authorization: `Bearer ${S.token('Quill')}` } });
     assert.notEqual(md.status, 200);
   } finally { await S.close(); }

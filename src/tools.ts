@@ -369,14 +369,14 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: 'read_document', featureSet: 'docs.read', toolClass: 'notes',
-    description: 'Read a document\'s markdown. A full read also resets what "changed since you last looked" is measured from. Use section or from_line/to_line for part of a long document. A spreadsheet reads as its cells, a row per line (range for one sheet or part of one).',
+    description: 'Read a document\'s markdown. A full read also resets what "changed since you last looked" is measured from. Use section or from_line/to_line for part of a long document. A spreadsheet reads as its cells, sheet by sheet, a row per line (range for one sheet or part of one).',
     inputSchema: { type: 'object', required: ['document'], properties: {
       ...docArg,
       section: S('Read only this section: heading text, "## Heading", or "Parent > Child".'),
       from_line: { type: 'integer', minimum: 1 }, to_line: { type: 'integer', minimum: 1 },
       line_numbers: { type: 'boolean', description: 'Prefix lines with numbers (default false; quote text without them when editing).' },
       raw: { type: 'boolean', description: 'For an html page: the HTML source itself instead of its markdown companion (index.md).' },
-      range: S('For a spreadsheet: a sheet name, or cells such as "B2:D40", "B:D" or "Ledger!A1:F90" (default: the first sheet, as far as it is filled).'),
+      range: S('For a spreadsheet: a sheet name, or cells such as "B2:D40", "B:D" or "Ledger!A1:F90" (default: every sheet, as far as it is filled).'),
       formulas: { type: 'boolean', description: 'For a spreadsheet: show what was typed into each cell (formulas as written) instead of its value.' },
       comments: { type: 'boolean', description: 'Append open comment threads (default true).' },
       suggestions: S('Open suggestions: "list" (default: listed after the document, in full), "inline" (shown in place as CriticMarkup {~~old~>new~~} {++added++} {--deleted--} {>>id<<}; for reading only, quote the plain text when editing), or "none".', { enum: ['list', 'inline', 'none'] }),
@@ -397,6 +397,7 @@ export const TOOLS: ToolDef[] = [
         const threads = a.comments !== false && atLeast(role, 'commenter') ? app.comments.threads(id) : [];
         if (threads.length) out.push(`\nOpen comments (${threads.length}):\n${threads.map((t) => threadText(app, t)).join('\n\n')}`);
         if (!r.partial) app.attention.markRead(actor.sub, id, { comments: a.comments !== false && atLeast(role, 'commenter') });
+        if (!r.partial && !app.attention.isWatching(actor.sub, id) && app.attention.settings(actor.sub, id).comments === 'off') out.push(`\n(You are not watching this document, so new comments on it will not reach you. watch {"document":"${id}"} — comments wake you, edits stay quiet.)`);
         return text(out.join('\n'));
       }
       if (doc.type === 'html' && !a.raw) {
@@ -713,7 +714,7 @@ export const TOOLS: ToolDef[] = [
     run(app, actor, a) {
       const id = need(a, 'document');
       const { doc } = app.docs.require(id, actor, 'editor');
-      if (doc.type !== SHEET) throw new Fault(400, `“${doc.title}” is not a spreadsheet; edit_document changes its text.`);
+      if (doc.type !== SHEET) throw new Fault(400, `“${doc.title}” is not a spreadsheet.`);
       const { done, client, deleteSet } = app.sheets.apply(id, { sub: actor.sub, via: 'mcpl' }, a.changes as SheetEdit[], typeof a.sheet === 'string' ? a.sheet : undefined);
       // Your own change is not news to you; what others changed meanwhile still is.
       app.attention.noteOwnEdit(actor.sub, id, client, deleteSet);

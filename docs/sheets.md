@@ -40,8 +40,8 @@ widths  <sheet>:<col>          -> column width, px
   keys are ordered by id; inserting between them gives the later ones fresh keys).
 - **Formulas point at ids.** `=SUM(C2:C9)` is stored as `=SUM(⟦r1.c3⟧:⟦r8.c3⟧)`. Addresses exist
   only at the edges: what people and agents read and type, what the formula engine is given, what
-  goes into Excel. So an insert or a delete rewrites no formula, and a formula typed while someone
-  else inserts a row above still means what its author saw. A reference past the end of the sheet
+  goes into Excel. So an insert rewrites no formula (a delete or a sort rewrites only those of §3),
+  and a formula typed while someone else inserts a row above still means what its author saw. A reference past the end of the sheet
   grows the sheet (up to 1,000 rows, 100 columns) or stays an address.
 
 ## 3. Where addresses still decide
@@ -59,8 +59,9 @@ the affected formulas, in the same transaction:
   that cell without needing `$`.
 
 These rewrites are ordinary cell writes: if someone edits the same formula in the same instant,
-one of the two versions stays, and a stale one shows as `#REF!` or a visibly different range, not
-as a silently wrong number in a data cell.
+one of the two versions stays. A stale one usually shows as `#REF!` or a different range in the
+formula bar, but it can also be a range that still evaluates, over other rows than its author
+meant. What cannot happen is a data cell (a number someone typed) changing value or row.
 
 ## 4. Everything else is derived
 
@@ -72,7 +73,8 @@ as a silently wrong number in a data cell.
   an entry into one record once all are overwritten, and `typeMapGetAllSnapshot` alone then
   misreads the entry's past. Restore and undo work entry by entry (`diffStores`): restore makes
   every entry what it was; undo puts back each entry a change touched, and is refused if one of
-  them was written again since.
+  them now holds something else than the change left there, or if rows, columns or a sheet the
+  change added have had content put into them since.
 - **What changed.** `bookChanges` compares two states by id: rows, columns and sheets added or
   removed, then each cell with what it held, addressed as the sheet stands now. Cells are compared
   as stored, so a formula is not "changed" because a row was inserted above it.

@@ -226,7 +226,7 @@ export class Nodes extends EventEmitter {
   /** A new section: a node with no name, owned by the parent's owner, mounted at the end of the parent (or just created). */
   createSection(parent: string, actor: Actor, opts: { content?: string; type?: string; mount?: boolean; title?: string } = {}): DocMeta {
     const { doc } = this.docs.require(parent, actor, 'editor');
-    if ((opts.type ?? doc.type) === SHEET) throw new Fault(400, NO_SHEET_SECTIONS);
+    if (doc.type === SHEET || opts.type === SHEET) throw new Fault(400, NO_SHEET_SECTIONS);
     const child = this.docs.createNode(actor, { title: opts.title ?? '', content: opts.content ?? '', type: opts.type ?? doc.type, owner: doc.ownerSub });
     if (opts.mount !== false) this.mount(parent, child.id, actor, { fresh: true });
     return this.docs.get(child.id)!;
@@ -279,6 +279,7 @@ export class Nodes extends EventEmitter {
    */
   split(parent: string, actor: Actor, offset: number, opts: { title?: string } = {}): DocMeta {
     const { doc } = this.docs.require(parent, actor, 'editor');
+    if (doc.type === SHEET) throw new Fault(400, NO_SHEET_SECTIONS);
     const text = this.docs.text(parent);
     if (!(Number.isInteger(offset) && offset >= 0 && offset <= text.length)) throw new Fault(400, `Split position ${offset} is outside the document (length ${text.length}).`);
     const inMarker = scanMounts(text).find((m) => offset > m.from && offset < m.to);

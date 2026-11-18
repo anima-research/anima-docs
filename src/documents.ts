@@ -11,7 +11,7 @@ import { diffChars, diffLines } from 'diff';
 import type { DB } from './db.js';
 import { Fault } from './auth.js';
 import { isGuest, type Actor, type Principals } from './principals.js';
-import { MAX_CELL_CHARS, SHEET, SHEET_MAPS, bookText, diffStores, initBook, liveStore, parseTsv, readBook, restoreStore, setBlock, type SheetMap, type Store } from './sheet.js';
+import { MAX_CELLS, MAX_CELL_CHARS, MAX_COLS, MAX_ROWS, SHEET, SHEET_MAPS, bookText, diffStores, initBook, liveStore, parseTsv, readBook, restoreStore, setBlock, type SheetMap, type Store } from './sheet.js';
 
 export type Role = 'viewer' | 'commenter' | 'editor' | 'owner';
 /** Retired: every document is 'restricted' (v12); kept as a type for old clients. */
@@ -76,7 +76,6 @@ const meta = (r: DocRow): DocMeta => ({ id: r.id, title: r.title, type: r.type ?
 export const NODE_TYPES = ['markdown', 'html', 'latex', 'text', 'files', 'sheet'];
 /** Types whose content is not one text: a document is made as one of these and stays one. */
 const FIXED_TYPES: Record<string, string> = { files: 'File collection', sheet: 'Spreadsheet' };
-const MAX_SHEET_CELLS = 1_000_000;
 const SHEET_KEY = /^[0-9A-Za-z:]{1,64}$/;
 
 /**
@@ -267,6 +266,10 @@ export class Documents extends EventEmitter {
     if (isGuest(actor.sub)) throw new Fault(403, 'Sign in with Archipelago to create documents.');
     const type = p.type ?? 'markdown';
     if (!NODE_TYPES.includes(type)) throw new Fault(400, `type must be one of ${NODE_TYPES.join(', ')}.`);
+    // A spreadsheet's first rows, given as text (tabs or commas between cells, one row per line): checked before the document exists.
+    const rows = type === SHEET && p.content?.trim() ? parseTsv(p.content, /\t/.test(p.content) ? '\t' : ',') : [];
+    if (rows.length > MAX_ROWS || rows.some((r) => r.length > MAX_COLS)) throw new Fault(413, `A sheet holds at most ${MAX_ROWS.toLocaleString('en')} rows and ${MAX_COLS.toLocaleString('en')} columns.`);
+    if (rows.some((r) => r.some((v) => v.length > MAX_CELL_CHARS))) throw new Fault(413, `A cell holds at most ${MAX_CELL_CHARS.toLocaleString('en')} characters.`);
     const id = `d${randomBytes(6).toString('base64url').replace(/[-_]/g, 'x')}`;
     const now = Date.now();
     const clean = p.title.trim().slice(0, 300);
@@ -274,8 +277,7 @@ export class Documents extends EventEmitter {
     this.db.prepare(`INSERT INTO documents (id, title, type, owner_sub, general_access, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
       .run(id, clean, type, p.owner ?? actor.sub, access, now, now);
     if (type === SHEET) {
-      // A new spreadsheet has one sheet; content given as text (tabs or commas between cells, one row per line) fills it.
-      const rows = p.content?.trim() ? parseTsv(p.content, /\t/.test(p.content) ? '\t' : ',') : [];
+      // A new spreadsheet has one sheet.
       this.editSheet(id, actor, (doc) => { initBook(doc); if (rows.length) { const book = readBook(liveStore(doc)); setBlock(doc, book, book.sheets[0].id, 0, 0, rows); } });
     } else if (p.content && type !== 'files') this.edit(id, actor, (text) => text.insert(0, p.content!));
     this.emit('meta', { docId: id, kind: 'created', by: actor.sub });
@@ -310,6 +312,7 @@ export class Documents extends EventEmitter {
     this.emit('meta', { docId, kind: 'deleted', by: actor.sub });
     const doc = this.live.get(docId);
     if (doc) { doc.destroy(); this.live.delete(docId); }
+    this.sheetText.delete(docId);
   }
 
   /**
@@ -873,30 +876,48 @@ export class Documents extends EventEmitter {
     const refuse = (): never => { throw new Fault(400, 'Only cell values are accepted in a spreadsheet.'); };
     const byClient = new Map<number, Y.Item[]>();
     for (const s of fresh) { let list = byClient.get(s.id.client); if (!list) byClient.set(s.id.client, list = []); list.push(s); }
-    const placed = new Map<Y.Item, { map: string; key: string }>();
-    const place = (s: Y.Item, depth = 0): { map: string; key: string } => {
+    for (const list of byClient.values()) list.sort((x, y) => x.id.clock - y.id.clock);
+    /** The item of this update that holds `id` (its client's items are in clock order). */
+    const inUpdate = (id: Y.ID): Y.Item | null => {
+      const list = byClient.get(id.client);
+      if (!list) return null;
+      let lo = 0, hi = list.length - 1;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1, x = list[mid];
+        if (id.clock < x.id.clock) hi = mid - 1; else if (id.clock >= x.id.clock + x.length) lo = mid + 1; else return x;
+      }
+      return null;
+    };
+    type Place = { map: string; key: string };
+    const SEEKING: Place = { map: '', key: '' };
+    const placed = new Map<Y.Item, Place>();
+    const place = (s: Y.Item, depth = 0): Place => {
       const done = placed.get(s);
+      if (done === SEEKING || depth > 1000) return refuse(); // items naming each other, or a chain no editor produces
       if (done) return done;
-      let at: { map: string; key: string };
+      placed.set(s, SEEKING);
+      let at: Place;
       const parent = s.parent as unknown;
       if (typeof parent === 'string') at = { map: parent, key: s.parentSub ?? '' };
-      else if (parent !== null || depth > 10_000) return refuse(); // a nested type
+      else if (parent !== null) return refuse(); // a nested type
       else {
         const prev = s.origin ?? s.rightOrigin;
         if (!prev) return refuse();
-        const inUpdate = byClient.get(prev.client)?.find((x) => prev.clock >= x.id.clock && prev.clock < x.id.clock + x.length);
-        if (inUpdate) at = place(inUpdate, depth + 1);
+        const here = inUpdate(prev);
+        if (here) at = place(here, depth + 1);
         else {
-          const item = Y.getItem(doc.store, prev);
-          const type = item.parent as Y.AbstractType<unknown>;
-          if (!(item instanceof Y.Item) || type._item !== null) return refuse();
+          let item: unknown;
+          try { item = Y.getItem(doc.store, prev); } catch { return refuse(); }
+          const type = item instanceof Y.Item ? item.parent as Y.AbstractType<unknown> : null;
+          if (!(item instanceof Y.Item) || !type || type._item !== null) return refuse();
           at = { map: Y.findRootTypeKey(type), key: item.parentSub ?? '' };
         }
       }
       placed.set(s, at);
       return at;
     };
-    let cells = 0;
+    const cells = doc.getMap('cells');
+    const added = new Set<string>();
     for (const s of fresh) {
       const { map, key } = place(s);
       if (!(SHEET_MAPS as readonly string[]).includes(map) || !SHEET_KEY.test(key)) refuse();
@@ -904,10 +925,13 @@ export class Documents extends EventEmitter {
       if (content instanceof Y.ContentDeleted) continue;
       // One record may hold several successive values of its entry (a client that keeps overwritten values sends them joined).
       const values: unknown[] = content instanceof Y.ContentAny && content.arr.length ? content.arr : [undefined];
-      for (const v of values) if (typeof v === 'string' ? v.length > MAX_CELL_CHARS : !(typeof v === 'number' && Number.isFinite(v))) refuse();
-      if (map === 'cells') cells++;
+      // A width is a number; everything else is text: what was typed, a number format, a name, an order key.
+      const longest = map === 'cells' ? MAX_CELL_CHARS : map === 'fmt' ? 60 : 200;
+      for (const v of values) if (map === 'widths' ? !(typeof v === 'number' && v > 0 && v < 10_000) : !(typeof v === 'string' && v.length <= longest)) refuse();
+      if (map === 'cells' && !cells.has(key)) added.add(key);
     }
-    if (cells && doc.getMap('cells').size + cells > MAX_SHEET_CELLS) throw new Fault(413, `A spreadsheet holds at most ${MAX_SHEET_CELLS.toLocaleString('en')} filled cells.`);
+    // Only cells that were empty count toward the limit: at the limit, what is there can still be edited.
+    if (added.size && cells.size + added.size > MAX_CELLS) throw new Fault(413, `A spreadsheet holds at most ${MAX_CELLS.toLocaleString('en')} filled cells.`);
   }
 
   /**
@@ -1001,6 +1025,13 @@ export class Documents extends EventEmitter {
     return delta.map((d) => (typeof d.insert === 'string' ? d.insert : '')).join('');
   }
 
+  /** Whether the document is, right now, what it was at a snapshot (for a spreadsheet: every stored entry, formats and widths included). */
+  isAt(docId: string, snap: Y.Snapshot): boolean {
+    if (!this.isSheet(docId)) return this.textAt(docId, snap) === this.text(docId);
+    const doc = this.ydoc(docId);
+    return diffStores(liveStore(doc), sheetStoreAt(doc, snap)).length === 0;
+  }
+
   /** Make the document what it was at a snapshot, as one labelled edit by `actor` (history is kept). */
   restoreTo(docId: string, actor: Pick<Actor, 'sub'> & { via?: ChangeOrigin['via'] }, snap: Y.Snapshot, label: string) {
     if (this.isSheet(docId)) return this.editSheet(docId, { sub: actor.sub, via: actor.via, label }, (doc) => { restoreStore(doc, sheetStoreAt(doc, snap)); });
@@ -1030,6 +1061,15 @@ export class Documents extends EventEmitter {
     const live = liveStore(doc);
     if (changes.every((c) => live.get(c.map, c.key) === c.before)) throw new Fault(409, 'That change is no longer in the document.');
     if (changes.some((c) => live.get(c.map, c.key) !== c.after)) throw new Fault(409, 'Later edits changed the same cells, so this change can’t be undone on its own. Restore an earlier state instead, or undo it by hand.');
+    // Taking back rows, columns or sheets this change added would take with them whatever was put into them since.
+    const gone = new Set(changes.filter((c) => c.before === undefined && (c.map === 'rows' || c.map === 'cols' || c.map === 'sheets')).map((c) => `${c.map}/${c.key}`));
+    if (gone.size) {
+      const own = new Set(changes.filter((c) => c.map === 'cells').map((c) => c.key));
+      for (const [key] of live.entries('cells')) {
+        const [sheet, row, col] = key.split(':');
+        if (!own.has(key) && (gone.has(`sheets/${sheet}`) || gone.has(`rows/${sheet}:${row}`) || gone.has(`cols/${sheet}:${col}`))) throw new Fault(409, 'Later edits put content into rows, columns or a sheet that this change added, so it can’t be undone on its own. Restore an earlier state instead, or undo it by hand.');
+      }
+    }
     return this.editSheet(docId, { sub: actor.sub, via: actor.via, label }, (d) => {
       for (const c of changes) { const m = d.getMap(c.map); if (c.before === undefined) m.delete(c.key); else m.set(c.key, c.before); }
     });
@@ -1073,5 +1113,6 @@ export class Documents extends EventEmitter {
     if (doc) { doc.destroy(); this.live.delete(docId); }
     this.sheetText.delete(docId);
     this.lastUsed.delete(docId);
+    if (doc) this.emit('unloaded', { docId });
   }
 }

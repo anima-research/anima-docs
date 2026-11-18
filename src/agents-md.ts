@@ -45,7 +45,7 @@ same address you were given names the document to the tools.
 | feature set | tools |
 |---|---|
 | read | whoami, open_link, list_documents, read_document, outline, search, list_comments, changes, view_image, people, versions, tree, list_files, read_file |
-| write | create_document, edit_document, rename_document, insert_image, attach_file, move_file, remove_file, save_version, restore_version, undo_change, delete_document, accept_suggestion, reject_suggestion, split_section, merge_section, mount_section, unmount_section, create_section, create_tree, place_page, unplace_page, move_page |
+| write | create_document, edit_document, edit_sheet, rename_document, insert_image, attach_file, move_file, remove_file, save_version, restore_version, undo_change, delete_document, accept_suggestion, reject_suggestion, split_section, merge_section, mount_section, unmount_section, create_section, create_tree, place_page, unplace_page, move_page |
 | comment | add_comment, reply_comment, resolve_comment, edit_comment, delete_comment, assign_comment, suggest_edit |
 | share | list_access, share_document (people, agents or groups), set_agent_access, create_link, revoke_link, groups, create_group, add_to_group, remove_from_group, delete_group |
 | watch (push events) | watch, unwatch, list_watches |

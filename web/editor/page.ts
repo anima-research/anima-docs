@@ -366,6 +366,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   let sheet: SheetView | null = null;
   let sheetAsked = false;
   let sheetClosed = false;
+  let sheetTries = 0;
   const body = h('div.doc-body', null, editPane, previewPane, filesPane, sheetPane, overlay);
   const app = h('div.doc-app', null, h('div.doc-chrome', null, header, h('div.doc-toolbar-wrap', null, toolbar)), body);
   pageEl.append(syncVeil);
@@ -1194,7 +1195,8 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     if (sheetAsked) return;
     sheetAsked = true;
     sheetPane.replaceChildren(h('div.coll-loading', null, spinner(22)));
-    const url = '/sheet.js';
+    // A second try asks under another address: a failed module load is remembered for the address it failed at.
+    const url = `/sheet.js${sheetTries++ ? `?try=${sheetTries}` : ''}`;
     const start = (m: typeof import('../sheetgrid')) => {
       if (sheetClosed) return;
       sheet = m.sheetView({

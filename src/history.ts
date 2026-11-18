@@ -207,7 +207,7 @@ export class History {
     this.flush(docId);
     const cp = this.get(docId, seq);
     const snap = at === 'after' ? this.snapshotAfter(docId, seq) : this.snapshotBefore(docId, seq);
-    if (this.docs.textAt(docId, snap) === this.docs.text(docId)) throw new Fault(409, 'The document already reads exactly like that.');
+    if (this.docs.isAt(docId, snap)) throw new Fault(409, 'The document already reads exactly like that.');
     void cp;
     return this.docs.restoreTo(docId, { sub: actor.sub, via: actor.via ?? 'mcpl' }, snap, `Restored to ${at === 'after' ? 'just after' : 'just before'} h${seq}`);
   }

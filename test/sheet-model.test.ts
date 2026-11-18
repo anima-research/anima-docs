@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as Y from 'yjs';
 import {
-  addSheet, bookChanges, bookText, colIndex, colName, decodeFormula, deleteRows, deleteCols, encodeFormula, grids, initBook, input, insertCols, insertRows,
+  addSheet, bookChanges, bookText, colIndex, colName, decodeFormula, deleteRows, deleteCols, deleteSheet, encodeFormula, grids, initBook, input, insertCols, insertRows,
   liveStore, mapRefs, parseRange, parseTsv, readBook, renameSheet, reorderRows, restoreStore, setBlock, setFormat, setInput, shiftFormula, stored, toTsv,
 } from '../src/sheet.js';
 import { sheetStoreAt } from '../src/documents.js';
@@ -190,6 +190,53 @@ test('sheets: formulas across sheets follow a rename; a removed sheet leaves #RE
   assert.equal(t.value('Summary!A1'), '30');
   assert.throws(() => t.doc.transact(() => { const b = t.read(); renameSheet(t.doc, b, b.sheets[1], 'ledger 2026'); }), /already a sheet/);
   assert.equal(bookText(t.read()), '## Ledger 2026\n10\n20\n\n## Summary\n=SUM(\'Ledger 2026\'!A1:A2)');
+  // A name that reads as a cell is written in quotes, as Excel needs it.
+  t.doc.transact(() => { const b = t.read(); assert.equal(renameSheet(t.doc, b, b.sheets[0], " 'Q1/2026' "), 'Q1 2026'); });
+  t.doc.transact(() => { const b = t.read(); renameSheet(t.doc, b, b.sheets[0], 'Q1'); });
+  assert.equal(t.at('Summary!A1'), "=SUM('Q1'!A1:A2)");
+  assert.equal(t.value('Summary!A1'), '30');
+  t.put('Summary!A2', "='Q1'!A1+1");
+  assert.equal(t.value('Summary!A2'), '11');
+  t.doc.transact(() => { const b = t.read(); deleteSheet(t.doc, b, b.sheets[0]); });
+  assert.equal(t.at('A1'), '=SUM(#REF!)');
+  assert.equal(t.value('A1'), '#REF!');
+  assert.throws(() => t.doc.transact(() => { const b = t.read(); deleteSheet(t.doc, b, b.sheets[0]); }), /at least one sheet/);
+});
+
+test('whole rows ("2:3") are references like any other', () => {
+  const t = book([['x', '1'], ['y', '2'], ['z', '4'], ['=SUM(2:3)', '=SUM($1:1)', '=COUNTA(Sheet1!1:2)']]);
+  assert.ok(!/\d:\d/.test(stored(t.read(), t.first(), 3, 0)));
+  assert.equal(t.at('A4'), '=SUM(2:3)');
+  assert.equal(t.value('A4'), '6');
+  t.doc.transact(() => { insertRows(t.doc, t.first(), 1, 1); });
+  assert.deepEqual([t.at('A5'), t.at('B5'), t.at('C5')], ['=SUM(3:4)', '=SUM($1:1)', '=COUNTA(Sheet1!1:3)']);
+  assert.equal(shiftFormula('=SUM(2:3)+SUM($5:6)+1.5+A1', 2, 0), '=SUM(4:5)+SUM($5:8)+1.5+A3');
+});
+
+test('a sort of rows that share an order key (inserted at one place by two people at once) still puts each formula on its own row', () => {
+  const t = pair([['n', 'f'], ['9', '']]);
+  const add = (doc: Y.Doc, n: string) => doc.transact(() => { const b = readBook(liveStore(doc)); const [id] = insertRows(doc, b.sheets[0], 2, 1); const s = readBook(liveStore(doc)).sheets[0]; setBlock(doc, readBook(liveStore(doc)), s.id, s.rowAt.get(id)!, 0, [[n, `=A${s.rowAt.get(id)! + 1}*10`]]); });
+  add(t.doc, '1'); add(t.doc2, '2');
+  t.both();
+  const s = t.first();
+  assert.equal(s.rowKeys[2], s.rowKeys[3], 'the two rows share a key');
+  const rows = () => grids(t.read()).get(s.id)!.slice(1, 4);
+  const before = rows();
+  assert.deepEqual(before.map((r) => r[1]).slice(1), ['=A3*10', '=A4*10']);
+  // Reverse rows 2..4: 9 goes last, the two tied rows swap.
+  t.doc.transact(() => { reorderRows(t.doc, t.read(), t.first(), 1, [3, 2, 1]); });
+  assert.deepEqual(rows(), [[before[2][0], '=A2*10'], [before[1][0], '=A3*10'], ['9']]);
+  const calc = new Calc(t.read());
+  assert.deepEqual([1, 2].map((r) => calc.shown(t.first(), r, 1).text), [String(Number(before[2][0]) * 10), String(Number(before[1][0]) * 10)]);
+  calc.destroy();
+  t.both();
+});
+
+test('a block is written whole or not at all', () => {
+  const t = book([['keep']]);
+  assert.throws(() => t.doc.transact(() => { setBlock(t.doc, t.read(), t.first().id, 0, 0, [['changed', 'x'.repeat(40_000)]]); }), /at most 32,767/);
+  assert.equal(t.at('A1'), 'keep');
+  assert.equal(t.first().rows.length, 100);
 });
 
 test('values: numbers, dates, percentages, money, text, errors; formats', () => {
@@ -211,6 +258,9 @@ test('values: numbers, dates, percentages, money, text, errors; formats', () => 
   assert.equal(formatNumber(-0.001, '0.00', noDate), '0.00');
   assert.equal(formatNumber(1, 'yyyy-mm-dd hh:mm', noDate), '2026-03-04 15:07');
   assert.equal(formatNumber(1, 'dd/mm/yy', noDate), '04/03/26');
+  // Accounts write negatives in brackets: the second section of the code.
+  assert.deepEqual([1234.5, -1234.5, 0].map((v) => formatNumber(v, '#,##0.00;[Red](#,##0.00);"-"', noDate)), ['1,234.50', '(1,234.50)', '-']);
+  assert.equal(formatNumber(1.5, `0.${'0'.repeat(50)}`, noDate), (1.5).toFixed(20));
 });
 
 test('the calculator follows cell writes without being rebuilt', () => {
@@ -239,6 +289,10 @@ test('changes between two states are told in a spreadsheet’s terms; a restore 
   assert.deepEqual(c.notes, ['Sheet1: row 2 added.', 'Sheet1: column F (as lettered before) removed.', 'Sheet “Notes” was added.']);
   // The total's formula is not listed: it still points at the same cells.
   assert.deepEqual(c.cells.map((x) => `${x.where}: ${x.before} -> ${x.after}`), ['Sheet1!A2:  -> z', 'Sheet1!B2:  -> 26', 'Sheet1!B3: 1 -> 5']);
+  // A change of looks only is a change too.
+  const snap2 = Y.snapshot(t.doc);
+  t.doc.transact(() => { setFormat(t.doc, t.first(), { top: 0, left: 1, bottom: 0, right: 1 }, '0.00'); t.doc.getMap('widths').set(`${t.first().id}:${t.first().cols[0]}`, 200); });
+  assert.deepEqual(bookChanges(at(snap2), liveStore(t.doc)).notes, ['Sheet1: number formats and column widths changed.']);
   t.doc.transact(() => { restoreStore(t.doc, at(snap)); });
   assert.equal(bookText(t.read()), textBefore);
   assert.equal(t.read().sheets.length, 1);

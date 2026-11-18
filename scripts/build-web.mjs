@@ -38,7 +38,8 @@ const options = {
   target: ['es2021', 'chrome100', 'firefox100', 'safari15'],
   minify: !watch,
   sourcemap: true,
-  legalComments: 'none',
+  // Licence notices of what is bundled stay in the files (the spreadsheet bundle carries HyperFormula, GPL-3.0).
+  legalComments: 'eof',
   logLevel: 'info',
   define: { 'process.env.NODE_ENV': JSON.stringify(watch ? 'development' : 'production') },
 };

@@ -21,9 +21,10 @@
 //
 // Formulas are stored with their references as ids, not addresses:
 // "=SUM(C2:C9)" is kept as "=SUM(⟦r1.c3⟧:⟦r8.c3⟧)". A reference therefore
-// follows its cell when rows are inserted, removed or sorted, with nothing to
-// rewrite, and it stays right when that happens while someone else is editing
-// the formula. Addresses exist only at the edges: what a person or an agent
+// follows its cell when rows are inserted or removed, with nothing to rewrite,
+// and it stays right when that happens while someone else is editing the
+// formula. (Removing the end of a range, and sorting, do write formulas: see
+// deleteLines and reorderRows.) Addresses exist only at the edges: what a person or an agent
 // reads and types, what the formula engine is given, what goes into Excel.
 //
 // This module runs in the server and in the browser; it imports nothing that
@@ -42,6 +43,8 @@ export const MAX_COLS = 1_000;
 export const MAX_SHEETS = 50;
 /** Excel's limit for the text of one cell. */
 export const MAX_CELL_CHARS = 32_767;
+/** Filled cells in one spreadsheet, all sheets together. */
+export const MAX_CELLS = 1_000_000;
 export const NEW_ROWS = 100;
 export const NEW_COLS = 26;
 
@@ -72,6 +75,9 @@ export interface Book {
   byName: Map<string, Sheet>;
 }
 
+/** A sheet name people can use in formulas and Excel accepts: no \ / ? * [ ] :, no apostrophe at either end, at most 31 characters. */
+export const validName = (name: string) => name.replace(/[\\/?*[\]:]/g, ' ').replace(/\s+/g, ' ').trim().replace(/^'+|'+$/g, '').trim().slice(0, 31).trim() || 'Sheet';
+
 type Keyed = { id: string; key: string };
 const inOrder = (a: Keyed, b: Keyed) => (a.key < b.key ? -1 : a.key > b.key ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 
@@ -97,9 +103,9 @@ export function readBook(store: Store): Book {
   for (const { id } of ids) {
     const r = rows.get(id) ?? [], c = cols.get(id) ?? [];
     // Two people may have given two sheets one name at the same moment: the later one gets a number.
-    const wanted = String(store.get('names', id) ?? 'Sheet').trim() || 'Sheet';
+    const wanted = validName(String(store.get('names', id) ?? ''));
     let name = wanted;
-    for (let n = 2; book.byName.has(name.toLowerCase()); n++) name = `${wanted} (${n})`;
+    for (let n = 2; book.byName.has(name.toLowerCase()); n++) name = `${wanted.slice(0, 31 - ` (${n})`.length)} (${n})`;
     const sheet: Sheet = {
       id, name,
       rows: r.map((x) => x.id), rowKeys: r.map((x) => x.key),
@@ -147,7 +153,7 @@ export function colIndex(name: string): number {
 }
 export const a1 = (row: number, col: number) => `${colName(col)}${row + 1}`;
 /** A sheet's name as a formula writes it. */
-export const quoteSheet = (name: string) => (/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ? name : `'${name.replace(/'/g, "''")}'`);
+export const quoteSheet = (name: string) => (/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) && !/^([A-Za-z]{1,3}\d+|[Rr]\d*[Cc]?\d*|true|false)$/i.test(name) ? name : `'${name.replace(/'/g, "''")}'`);
 
 export interface Rect { top: number; left: number; bottom: number; right: number }
 /** "B2", "B2:D9", "B:D" or "Ledger!B2:D9" -> the sheet (null: none named) and a rectangle, bottom/right -1 for an open end. */
@@ -184,6 +190,7 @@ const colOf = (word: string): Corner | null => {
   const m = COL.exec(word);
   return m ? { col: colIndex(m[2]), row: null, absCol: !!m[1], absRow: false } : null;
 };
+const ROWS = /(\$?)([1-9]\d{0,6}):(\$?)([1-9]\d{0,6})(?![\d.:])/y;
 const wordAt = (text: string, at: number): string => { WORD.lastIndex = at; return WORD.exec(text)?.[0] ?? ''; };
 /** The end of the quoted run starting at `at` (the quote doubled is a quote inside it). */
 const quotedEnd = (text: string, at: number, quote: string): number => {
@@ -202,6 +209,10 @@ export function mapRefs(formula: string, fn: (ref: Ref, text: string) => string)
   const n = formula.length;
   /** A reference starting at `at` (after any sheet prefix): its end and what it is. */
   const refAt = (at: number): { end: number; a: Corner; b: Corner | null } | null => {
+    // Whole rows: "2:5", "$2:$5".
+    ROWS.lastIndex = at;
+    const rows = ROWS.exec(formula);
+    if (rows) return { end: at + rows[0].length, a: { col: null, row: Number(rows[2]) - 1, absCol: false, absRow: !!rows[1] }, b: { col: null, row: Number(rows[4]) - 1, absCol: false, absRow: !!rows[3] } };
     const w = wordAt(formula, at);
     if (!w) return null;
     const end = at + w.length;
@@ -227,7 +238,7 @@ export function mapRefs(formula: string, fn: (ref: Ref, text: string) => string)
     } else if (wordAt(formula, i)) {
       const w = wordAt(formula, i);
       if (formula[i + w.length] === '!') { sheet = w; at = i + w.length + 1; }
-    } else {
+    } else if (!(ROWS.lastIndex = i, ROWS.test(formula))) {
       NUMBER.lastIndex = i;
       const num = NUMBER.exec(formula)?.[0] ?? ch;
       out += num; i += num.length; continue;
@@ -496,35 +507,57 @@ export function reorderRows(doc: Y.Doc, book: Book, sheet: Sheet, from: number, 
       const a = place(ref.a), b = ref.b ? place(ref.b) : null;
       return a.row !== null && a.row < 0 || (b && b.row !== null && b.row < 0) ? REF_ERROR : `${prefixOf(original)}${cornerText(a)}${b ? `:${cornerText(b)}` : ''}`;
     });
-    return { sheetId: f.sheet.id, row: inside ? newIndex.get(f.row)! : f.row, col: f.col, text };
+    return { sheetId: f.sheet.id, rowId: f.sheet.rows[f.row], col: f.col, text };
   });
+  // The places' own keys, when they tell the places apart. Rows inserted at one place by two people at once share a
+  // key (their order is then by id): such a block gets fresh keys, or the rows would not land where they are sent.
+  const keys = sheet.rowKeys;
+  const distinct = (i: number) => i < 0 || i + 1 >= keys.length || keys[i] < keys[i + 1];
+  let slots = keys.slice(from, to + 1);
   const m = doc.getMap('rows');
-  order.forEach((was, i) => { if (was !== from + i) m.set(`${sheet.id}:${sheet.rows[was]}`, sheet.rowKeys[from + i]); });
+  if (![...slots.keys()].every((i) => distinct(from + i)) || !distinct(from - 1)) {
+    const rest = [...keys.slice(0, from), ...keys.slice(to + 1)];
+    const made = keysAt(rest, from, order.length);
+    slots = made.fresh;
+    for (const [i, key] of made.rekey) m.set(`${sheet.id}:${sheet.rows[i + order.length]}`, key);
+  }
+  order.forEach((was, i) => { if (sheet.rowKeys[was] !== slots[i]) m.set(`${sheet.id}:${sheet.rows[was]}`, slots[i]); });
   const after = readBook(book.store);
-  for (const f of formulas) setInput(doc, after, after.byId.get(f.sheetId)!, f.row, f.col, f.text);
+  for (const f of formulas) {
+    const home = after.byId.get(f.sheetId)!;
+    const row = home.rowAt.get(f.rowId);
+    if (row !== undefined) setInput(doc, after, home, row, f.col, f.text);
+  }
 }
 
 export function addSheet(doc: Y.Doc, book: Book, name: string, rows = NEW_ROWS, cols = NEW_COLS): string {
+  return addSheetNamed(doc, book, name, rows, cols).id;
+}
+/** Add a sheet; returns its id and the name it was given (see validName). */
+export function addSheetNamed(doc: Y.Doc, book: Book, name: string, rows = NEW_ROWS, cols = NEW_COLS): { id: string; name: string } {
   if (book.sheets.length >= MAX_SHEETS) throw new Error(`A spreadsheet holds at most ${MAX_SHEETS} sheets.`);
   const id = newId(4, (x) => book.byId.has(x));
   const last = book.sheets.length ? (book.store.get('sheets', book.sheets[book.sheets.length - 1].id) as string) : null;
   doc.getMap('sheets').set(id, generateNKeysBetween(last, null, 1)[0]);
-  doc.getMap('names').set(id, cleanName(book, name, null));
-  const empty: Sheet = { id, name, rows: [], rowKeys: [], cols: [], colKeys: [], rowAt: new Map(), colAt: new Map() };
+  const clean = cleanName(book, name, null);
+  doc.getMap('names').set(id, clean);
+  const empty: Sheet = { id, name: clean, rows: [], rowKeys: [], cols: [], colKeys: [], rowAt: new Map(), colAt: new Map() };
   insertRows(doc, empty, 0, rows);
   insertCols(doc, empty, 0, cols);
-  return id;
+  return { id, name: clean };
 }
 
-/** A sheet name people can use in formulas: no \ / ? * [ ] :, at most 31 characters (Excel's rules), not another sheet's. */
+/** The name a sheet gets (see validName); refused if another sheet has it. */
 function cleanName(book: Book, name: string, self: string | null): string {
-  const clean = name.replace(/[\\/?*[\]:]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 31) || 'Sheet';
+  const clean = validName(name);
   const other = book.byName.get(clean.toLowerCase());
   if (other && other.id !== self) throw new Error(`There is already a sheet named “${other.name}”.`);
   return clean;
 }
-export function renameSheet(doc: Y.Doc, book: Book, sheet: Sheet, name: string) {
-  doc.getMap('names').set(sheet.id, cleanName(book, name, sheet.id));
+export function renameSheet(doc: Y.Doc, book: Book, sheet: Sheet, name: string): string {
+  const clean = cleanName(book, name, sheet.id);
+  doc.getMap('names').set(sheet.id, clean);
+  return clean;
 }
 export function deleteSheet(doc: Y.Doc, book: Book, sheet: Sheet) {
   if (book.sheets.length <= 1) throw new Error('A spreadsheet keeps at least one sheet.');
@@ -553,6 +586,8 @@ export function setBlock(doc: Y.Doc, book: Book, sheetId: string, row: number, c
   let sheet = book.byId.get(sheetId)!;
   let rows = row + block.length, cols = col + block.reduce((n, r) => Math.max(n, r.length), 0);
   if (rows > MAX_ROWS || cols > MAX_COLS) throw new Error(`That reaches past the largest sheet (${MAX_ROWS.toLocaleString('en')} rows, ${MAX_COLS.toLocaleString('en')} columns).`);
+  // Checked before anything is written: a block goes in whole or not at all.
+  if (block.some((line) => line.some((text) => text.length > MAX_CELL_CHARS))) throw new Error(`A cell holds at most ${MAX_CELL_CHARS.toLocaleString('en')} characters.`);
   for (const line of block) for (const text of line) { const far = reach(text, sheet); rows = Math.max(rows, far.row + 1); cols = Math.max(cols, far.col + 1); }
   if (ensureSize(doc, sheet, Math.min(rows, MAX_ROWS), Math.min(cols, MAX_COLS))) { book = readBook(book.store); sheet = book.byId.get(sheetId)!; }
   block.forEach((line, i) => line.forEach((text, j) => setInput(doc, book, sheet, row + i, col + j, text)));
@@ -604,7 +639,7 @@ export function restoreStore(doc: Y.Doc, target: Store): number {
 
 /** One line of a change list, addressed as the newer book stands (or the older one, for what is gone). */
 export interface CellChange { where: string; before: string; after: string; key?: string }
-export interface BookChanges { cells: CellChange[]; notes: string[] }
+export interface BookChanges { cells: CellChange[]; notes: string[]; /** Every stored entry that differs (for who changed what). */ entries: EntryChange[] }
 
 /** What changed between two states of a book, in a spreadsheet's terms: cells, rows, columns, sheets. */
 export function bookChanges(a: Store, b: Store): BookChanges {
@@ -615,7 +650,7 @@ export function bookChanges(a: Store, b: Store): BookChanges {
   const runs = (indexes: number[]): string => {
     const out: string[] = [];
     for (let i = 0; i < indexes.length; i++) { let j = i; while (j + 1 < indexes.length && indexes[j + 1] === indexes[j] + 1) j++; out.push(i === j ? `${indexes[i] + 1}` : `${indexes[i] + 1}–${indexes[j] + 1}`); i = j; }
-    return out.join(', ');
+    return out.length > 12 ? `${out.slice(0, 12).join(', ')} and ${out.length - 12} more runs` : out.join(', ');
   };
   const colRuns = (indexes: number[]) => runs(indexes).replace(/\d+/g, (d) => colName(Number(d) - 1));
   for (const s of before.sheets) {
@@ -641,7 +676,16 @@ export function bookChanges(a: Store, b: Store): BookChanges {
     if (moved) notes.push(`${s.name}: rows were reordered.`);
   }
   // Cells are compared as stored (references as ids), so a formula does not count as changed because a row was inserted above it.
-  for (const c of diffStores(a, b)) {
+  const entries = diffStores(a, b);
+  const looks = new Map<string, { fmt: number; widths: number }>();
+  for (const c of entries) {
+    if (c.map === 'fmt' || c.map === 'widths') {
+      const sheet = after.byId.get(c.key.slice(0, c.key.indexOf(':')));
+      if (!sheet || !before.byId.has(sheet.id)) continue;
+      const n = looks.get(sheet.name) ?? { fmt: 0, widths: 0 };
+      n[c.map]++;
+      looks.set(sheet.name, n);
+    }
     if (c.map !== 'cells') continue;
     const [sid, rid, cid] = c.key.split(':');
     const sheet = after.byId.get(sid);
@@ -656,7 +700,8 @@ export function bookChanges(a: Store, b: Store): BookChanges {
   }
   const place = (w: string) => { const p = parseRange(w)!; return [p.sheet ?? '', p.rect.top, p.rect.left] as const; };
   cells.sort((x, y) => { const p = place(x.where), q = place(y.where); return p[0] < q[0] ? -1 : p[0] > q[0] ? 1 : p[1] - q[1] || p[2] - q[2]; });
-  return { cells, notes };
+  for (const [name, n] of looks) notes.push(`${name}: ${[n.fmt ? 'number formats' : '', n.widths ? 'column widths' : ''].filter(Boolean).join(' and ')} changed.`);
+  return { cells, notes, entries };
 }
 
 // ------------------------------------------------------------------ text in and out

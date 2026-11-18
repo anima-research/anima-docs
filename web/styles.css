@@ -1588,10 +1588,13 @@ button.card-field:hover { text-decoration: underline; }
 .doc-app.sheet-doc .doc-toolbar-wrap, .doc-app.sheet-doc .mode-switch, .doc-app.sheet-doc .edit-pane, .doc-app.sheet-doc .preview-pane { display: none; }
 .sheet-pane { flex: 1 1 0; min-width: 0; display: flex; background: var(--surface); }
 .sheet-pane[hidden] { display: none; }
+@media (min-width: 1100px) { .doc-app.panel-open .doc-body > .sheet-pane { margin-right: 380px; } }
+.sheet-view.no-sheets .sheet-overlay, .sheet-view.no-sheets .sheet-rowhead { display: none; }
 .sheet-pane > .coll-loading, .sheet-pane > .empty-state { margin: 12vh auto; }
 .sheet-view { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; font-size: 13px; }
 .sheet-view [hidden] { display: none; }
-.sheet-bar { display: flex; align-items: center; gap: 4px; padding: 4px 10px; border-bottom: 1px solid var(--border); min-height: 40px; }
+.sheet-bar { display: flex; align-items: center; gap: 4px; padding: 4px 10px; border-bottom: 1px solid var(--border); min-height: 40px; overflow-x: auto; }
+.sheet-bar > * { flex-shrink: 0; }
 .sheet-bar-sep { width: 1px; height: 20px; background: var(--border); margin: 0 4px; flex: none; }
 .sheet-format { min-width: 96px; justify-content: flex-start; }
 .sheet-name { min-width: 64px; padding: 0 8px; font-variant-numeric: tabular-nums; color: var(--text-2); white-space: nowrap; }

@@ -59,7 +59,8 @@ async function startServer() {
 const consoleErrors = [];
 function watch(page, who) {
   page.on('pageerror', (e) => consoleErrors.push(`[${who}] pageerror: ${e.message}`));
-  page.on('console', (m) => { if (m.type() === 'error' && !/Failed to load resource/.test(m.text())) consoleErrors.push(`[${who}] console: ${m.text()}`); });
+  // While the test holds a page offline, its failed attempts to reconnect are expected.
+  page.on('console', (m) => { if (m.type() === 'error' && !/Failed to load resource|ERR_INTERNET_DISCONNECTED/.test(m.text())) consoleErrors.push(`[${who}] console: ${m.text()}`); });
 }
 async function signIn(page, name) {
   await page.goto(`${ORIGIN}/`);
@@ -104,6 +105,8 @@ const nameBox = (page) => page.locator('.sheet-name').textContent();
 const paste = (page, text) => page.evaluate((t) => { const dt = new DataTransfer(); dt.setData('text/plain', t); document.querySelector('.sheet-sink').dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true })); }, text);
 /** Copy the selection; returns what went to the clipboard. */
 const copy = (page) => page.evaluate(() => { const dt = new DataTransfer(); document.querySelector('.sheet-sink').dispatchEvent(new ClipboardEvent('copy', { clipboardData: dt, bubbles: true, cancelable: true })); return dt.getData('text/plain'); });
+/** Close the page's socket to the server (the browser context is offline, so it cannot come back yet) and wait for the page to say so. */
+const cut = async (page) => { await page.evaluate(() => window.__cutSockets()); await until(() => page.evaluate(() => window.__socketsOpen() === 0), 'the page to be cut off'); };
 const menu = async (page, at, item, where = 'cell') => {
   if (where === 'cell') await click(page, at, { button: 'right' });
   else {
@@ -123,6 +126,13 @@ const browser = await chromium.launch({ headless: !process.env.SMOKE_HEADED });
 const viewport = { width: 1360, height: 860 };
 const aliceCtx = await browser.newContext({ viewport, colorScheme: 'light' });
 const bobCtx = await browser.newContext({ viewport, colorScheme: 'light' });
+// The test closes sockets itself: Chromium's offline switch does not cut one that is already open.
+for (const ctx of [aliceCtx, bobCtx]) await ctx.addInitScript(() => {
+  const Native = window.WebSocket, open = new Set();
+  window.WebSocket = class extends Native { constructor(...a) { super(...a); open.add(this); this.addEventListener('close', () => open.delete(this)); } };
+  window.__cutSockets = () => { for (const ws of open) ws.close(); };
+  window.__socketsOpen = () => [...open].filter((ws) => ws.readyState === Native.OPEN).length;
+});
 const alice = await aliceCtx.newPage();
 const bob = await bobCtx.newPage();
 watch(alice, 'alice'); watch(bob, 'bob');
@@ -258,6 +268,8 @@ try {
     // Bob inserts a row above while Alice is still typing in hers: her text lands in her row.
     await click(alice, 'G5'); await alice.keyboard.type('still typing');
     await menu(bob, '2', 'Insert a row above', 'row');
+    await until(async () => (await nameBox(alice)) === 'G6', 'Bob’s row to reach Alice while her entry is still open'); // her cell is G6 now
+    assert(await alice.locator('.sheet-editor').isVisible(), 'she is still typing');
     await alice.keyboard.press('Enter');
     await until(async () => (await cell(bob, 'G6')) === 'still typing', 'her entry in the row that moved down');
     await see(alice, ['G6'], ['still typing'], 'on her side too');
@@ -266,7 +278,9 @@ try {
     await see(bob, ['B2', 'B3'], ['Rent', 'Food'], 'Bob sees the row gone');
     // The same cell, both cut off from each other for a moment: one value wins on both sides, whole.
     await aliceCtx.setOffline(true); await bobCtx.setOffline(true);
-    await sleep(200);
+    // Their sockets are closed from here, so neither write can reach the other until both are made.
+    await alice.evaluate(() => window.dispatchEvent(new Event('offline'))); await bob.evaluate(() => window.dispatchEvent(new Event('offline')));
+    await cut(alice); await cut(bob);
     await click(alice, 'C3'); await type(alice, '111');
     await click(bob, 'C3'); await type(bob, '999');
     await aliceCtx.setOffline(false); await bobCtx.setOffline(false);

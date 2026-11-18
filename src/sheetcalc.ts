@@ -14,14 +14,16 @@ import { decodeFormula, formatOf, grids, stored, type Book, type Sheet } from '.
 function parseDateTime(text: string): Partial<DateTime> | undefined {
   const s = text.trim();
   const time = /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(s);
-  if (time) return Number(time[1]) < 24 && Number(time[2]) < 60 ? { hours: Number(time[1]), minutes: Number(time[2]), seconds: Number(time[3] ?? 0) } : undefined;
+  if (time) return Number(time[1]) < 24 && Number(time[2]) < 60 && Number(time[3] ?? 0) < 60 ? { hours: Number(time[1]), minutes: Number(time[2]), seconds: Number(time[3] ?? 0) } : undefined;
   const iso = /^(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?$/.exec(s);
   const dotted = iso ? null : /^(\d{1,2})\.(\d{1,2})\.(\d{4})$/.exec(s);
   if (!iso && !dotted) return undefined;
   const [year, month, day] = iso ? [Number(iso[1]), Number(iso[2]), Number(iso[3])] : [Number(dotted![3]), Number(dotted![2]), Number(dotted![1])];
   const d = new Date(Date.UTC(year, month - 1, day));
   if (d.getUTCFullYear() !== year || d.getUTCMonth() !== month - 1 || d.getUTCDate() !== day) return undefined;
-  return iso?.[4] === undefined ? { year, month, day } : { year, month, day, hours: Number(iso[4]), minutes: Number(iso[5]), seconds: Number(iso[6] ?? 0) };
+  if (iso?.[4] === undefined) return { year, month, day };
+  if (Number(iso[4]) > 23 || Number(iso[5]) > 59 || Number(iso[6] ?? 0) > 59) return undefined;
+  return { year, month, day, hours: Number(iso[4]), minutes: Number(iso[5]), seconds: Number(iso[6] ?? 0) };
 }
 
 const CONFIG: Partial<ConfigParams> = {
@@ -53,9 +55,18 @@ function general(v: number): string {
   return String(Number(v.toPrecision(12)));
 }
 
-/** A number written by an Excel format code: "#,##0.00", "0%", "$#,##0.00", "yyyy-mm-dd hh:mm", "@". */
+/**
+ * A number written by an Excel format code: "#,##0.00", "0%", "$#,##0.00", "yyyy-mm-dd hh:mm", "@".
+ * A code may have sections for positive, negative and zero ("#,##0.00;(#,##0.00)", as accounts write negatives);
+ * colours and conditions in brackets are left out.
+ */
 export function formatNumber(v: number, code: string, toDate: (n: number) => DateTime): string {
-  code = code.replace(/"/g, '');
+  const sections = code.replace(/\[[^\]]*\]/g, '').split(';');
+  if (sections.length > 1 && !isDateCode(sections[0])) {
+    if (v < 0 && sections[1]) return formatNumber(-v, sections[1], toDate);
+    if (v === 0 && sections[2]) return formatNumber(0, sections[2], toDate);
+  }
+  code = sections[0].replace(/"/g, '');
   if (!code || code === 'General') return general(v);
   if (code === '@') return general(v);
   if (isDateCode(code)) {
@@ -75,12 +86,12 @@ export function formatNumber(v: number, code: string, toDate: (n: number) => Dat
     });
   }
   const first = code.search(/[0#]/);
-  if (first < 0) return general(v);
+  if (first < 0) return code; // no place for digits: the code's own text (a dash for zero, say)
   const last = Math.max(code.lastIndexOf('0'), code.lastIndexOf('#'));
   const body = code.slice(first, last + 1), prefix = code.slice(0, first), suffix = code.slice(last + 1);
   const percent = code.includes('%');
   const dot = body.indexOf('.');
-  const decimals = dot < 0 ? 0 : body.length - dot - 1;
+  const decimals = Math.min(20, dot < 0 ? 0 : body.length - dot - 1);
   const n = Math.abs(percent ? v * 100 : v);
   let digits = n.toFixed(decimals);
   if (body.includes(',')) { const [int, frac] = digits.split('.'); digits = int.replace(/\B(?=(\d{3})+(?!\d))/g, ',') + (frac ? `.${frac}` : ''); }
