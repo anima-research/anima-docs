@@ -19,20 +19,22 @@ export class PdfText {
   }
 
   /** Whether the text is already made (reading it costs nothing). */
-  ready(mediaId: string): boolean { return existsSync(join(this.dir, `${mediaId}.txt`)); }
+  ready(mediaId: string): boolean { return existsSync(join(this.dir, `${mediaId}.txt`)) || existsSync(join(this.dir, `${mediaId}.txt.failed`)); }
 
   /** The pages' text, or null when the file cannot be read as a PDF. */
   pages(mediaId: string, file: string): Promise<string[] | null> {
     if (!this.available) return Promise.resolve(null);
     const out = join(this.dir, `${mediaId}.txt`);
     if (existsSync(out)) return Promise.resolve(split(readFileSync(out, 'utf8')));
+    // One that could not be read (damaged, or too slow) is not tried again: stored files do not change.
+    if (existsSync(`${out}.failed`)) return Promise.resolve(null);
     let reading = this.reading.get(mediaId);
     if (!reading) {
       reading = new Promise<string[] | null>((resolve) => {
         execFile('pdftotext', ['-q', '-enc', 'UTF-8', file, '-'], { maxBuffer: 256 * 1024 * 1024, timeout: 120_000 }, (err, stdout) => {
           this.reading.delete(mediaId);
-          if (err) { resolve(null); return; }
           mkdirSync(this.dir, { recursive: true });
+          if (err) { writeFileSync(`${out}.failed`, ''); resolve(null); return; }
           writeFileSync(`${out}.tmp`, stdout);
           renameSync(`${out}.tmp`, out);
           resolve(split(stdout));

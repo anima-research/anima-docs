@@ -12,7 +12,7 @@ import { startServer } from './server-harness.js';
 
 let S: Awaited<ReturnType<typeof startServer>>;
 const HOME = mkdtempSync(join(tmpdir(), 'adocs-git-home-'));
-before(async () => { S = await startServer({}, { gitSettleMs: 30 }); });
+before(async () => { S = await startServer(); });
 after(async () => { await S.close(); rmSync(HOME, { recursive: true, force: true }); });
 
 const hasLfs = (() => { try { execFileSync('git', ['lfs', 'version'], { stdio: 'ignore' }); return true; } catch { return false; } })();
@@ -183,20 +183,34 @@ test('a push is checked before it is accepted: one branch, forward only, large f
   // Nothing refused left a trace.
   assert.deepEqual(await c.paths(), ['.gitattributes', 'notes.md', 'ok.md']);
 
-  // If the check cannot run (the hook lost its execute bit, say), git would let the push through: it is undone, not taken in.
-  const hookFile = join(S.dir, 'git/hooks/pre-receive');
-  chmodSync(hookFile, 0o644);
-  const tipBefore = (await git(repo, ['ls-remote', 'origin', 'main'])).slice(0, 40);
+  // A name a collection cannot hold.
   await git(repo, ['fetch', '--quiet', 'origin']);
-  await git(repo, ['reset', '--quiet', '--hard', tipBefore]);
+  await git(repo, ['reset', '--quiet', '--hard', 'origin/main']);
+  writeFileSync(join(repo, 'back\\slash.md'), 'x\n');
+  assert.match(await attempt('a backslash'), /"back\\\\slash\.md" is not a file name a collection can hold/);
+  await git(repo, ['reset', '--quiet', '--hard', 'origin/main']);
+
+  // If the check cannot run (the hook lost its execute bit, say), git would let any push through: none is received.
+  const hookFile = join(S.dir, 'git/hooks/pre-receive');
   writeFileSync(join(repo, 'unchecked.md'), 'never looked at\n');
   await git(repo, ['add', '-A']); await git(repo, ['commit', '--quiet', '-m', 'unchecked']);
-  const errors: string[] = [];
   const logged = console.error;
-  console.error = (...m: unknown[]) => { errors.push(m.join(' ')); };
-  try { await git(repo, ['push', '--quiet', 'origin', 'HEAD:main']); } finally { console.error = logged; chmodSync(hookFile, 0o755); }
-  assert.ok(errors.some((e) => e.includes('moved main without being checked')), `the server noticed: ${errors.join(' | ')}`);
-  assert.equal((await git(repo, ['ls-remote', 'origin', 'main'])).slice(0, 40), tipBefore, 'main is where it was');
+  console.error = () => undefined;
+  chmodSync(hookFile, 0o644);
+  try { assert.match(await git(repo, ['push', 'origin', 'HEAD:main'], { fails: true }), /503/); } finally { chmodSync(hookFile, 0o755); console.error = logged; }
+  assert.deepEqual(await c.paths(), ['.gitattributes', 'notes.md', 'ok.md']);
+
+  // A push is checked at its tip. An earlier commit of it that holds what a collection cannot is in the history, and stays there.
+  await git(repo, ['reset', '--quiet', '--hard', 'origin/main']);
+  execFileSync('ln', ['-s', 'notes.md', join(repo, 'link.md')]);
+  await git(repo, ['add', '-A']); await git(repo, ['commit', '--quiet', '-m', 'with a link']);
+  const withLink = (await git(repo, ['rev-parse', 'HEAD'])).trim();
+  rmSync(join(repo, 'link.md'));
+  await git(repo, ['add', '-A']); await git(repo, ['commit', '--quiet', '-m', 'without it']);
+  await git(repo, ['push', '--quiet', 'origin', 'HEAD:main']);
+  const back = await fetch(`${S.base}/api/docs/${c.id}/git/restore`, { method: 'POST', headers: H({ Cookie: ann.cookie }), body: JSON.stringify({ commit: withLink }) });
+  assert.equal(back.status, 409);
+  assert.match((await back.json()).error, /cannot be restored: link\.md is a symbolic link/);
   assert.deepEqual(await c.paths(), ['.gitattributes', 'notes.md', 'ok.md']);
 
   // Who may: a viewer reads and cannot push; a stranger sees no repository; no password, no entry.
@@ -224,6 +238,18 @@ test('a push is checked before it is accepted: one branch, forward only, large f
 test('history: what changed and who; a deleted file, a folder and the whole collection can be brought back', async () => {
   const ann = await person('Ann');
   const c = await collection(ann.cookie, 'History');
+  // Two people within one quiet spell share a commit, and it names both.
+  {
+    const cara = await person('Cara');
+    const shared = await collection(ann.cookie, 'Shared');
+    const give = await fetch(`${S.base}/api/docs/${shared.id}/share`, { method: 'POST', headers: H({ Cookie: ann.cookie }), body: JSON.stringify({ who: '@Cara', role: 'editor' }) });
+    assert.equal(give.status, 200, await give.clone().text());
+    await shared.put('from ann.md', 'a');
+    assert.equal((await fetch(`${S.base}/api/docs/${shared.id}/files/${enc('from cara.md')}`, { method: 'PUT', headers: { Cookie: cara.cookie, Origin: S.base }, body: 'c' })).status, 201);
+    const [both] = await shared.log();
+    assert.equal(both.author, 'Ann, Cara');
+    assert.equal(both.message, 'Add 2 files');
+  }
   const restore = async (commit: string, path?: string) => { const r = await fetch(`${S.base}/api/docs/${c.id}/git/restore`, { method: 'POST', headers: H({ Cookie: ann.cookie }), body: JSON.stringify({ commit, path }) }); assert.equal(r.status, 200, await r.clone().text()); };
   await c.put('a.md', 'first\n');
   await c.put('papers/one.pdf', PDF);

@@ -21,7 +21,7 @@
 
 import { execFile, execFileSync, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { chmodSync, createReadStream, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { accessSync, chmodSync, constants, createReadStream, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { DB } from './db.js';
 import { Fault, type Identity } from './auth.js';
@@ -69,12 +69,13 @@ export class GitRepos {
   private root: string;
   private hooks: string;
   private chains = new Map<string, Promise<unknown>>();
-  private waiting = new Map<string, { by: string; timer: NodeJS.Timeout }>();
-  /** Pushes being received: the key their hook presents → the collection, and whether the hook's check passed. */
-  private pushes = new Map<string, { docId: string; passed: boolean }>();
+  /** Collections with changes not yet committed: who made them, and the timer that will commit. */
+  private waiting = new Map<string, { by: Set<string>; timer: NodeJS.Timeout }>();
+  /** Pushes being received: the key their hook presents → the collection. */
+  private pushes = new Map<string, string>();
 
   constructor(private db: DB, private media: Media, private files: DocFiles, private label: (sub: string) => string,
-    private opts: { dataDir: string; host: string; maxBytes: number; settleMs?: number }) {
+    private opts: { dataDir: string; host: string; maxBytes: number; settleMs?: number; requiredScopes?: string[]; passwordDays?: number }) {
     this.root = join(opts.dataDir, 'git');
     this.hooks = join(this.root, 'hooks');
     this.available = (() => { try { execFileSync('git', ['--version'], { stdio: 'ignore' }); return true; } catch { return false; } })();
@@ -88,6 +89,16 @@ export class GitRepos {
 
   dir(docId: string): string { return join(this.root, `${docId}.git`); }
 
+  /** Whether a push can be checked: the hook must be runnable (a volume mounted without exec permission makes it not). */
+  get canReceive(): boolean {
+    try { accessSync(join(this.hooks, 'pre-receive'), constants.X_OK); return true; } catch { return false; }
+  }
+
+  /** Commit whatever is waiting, everywhere (shutting down: the next start would otherwise fold it into a later commit). */
+  flushAll(): Promise<void> {
+    return Promise.all([...this.waiting.keys()].map((id) => this.flush(id).catch((e) => console.error('[git] commit failed', id, (e as Error).message)))).then(() => undefined);
+  }
+
   /** Configuration for a git process serving a push. */
   get receiveConfig(): string[] {
     return ['-c', `core.hooksPath=${this.hooks}`, '-c', 'receive.denyNonFastForwards=true', '-c', 'receive.denyDeletes=true', '-c', `receive.maxInputSize=${512 * 1024 * 1024}`];
@@ -97,7 +108,7 @@ export class GitRepos {
     return new Promise((resolve, reject) => {
       const child = execFile('git', ['-c', 'safe.directory=*', ...args], {
         env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', ...(dir ? { GIT_DIR: dir } : {}), ...o.env }, encoding: 'buffer', maxBuffer: 1024 * 1024 * 1024,
-      }, (err, stdout, stderr) => (err ? reject(new Error(`git ${args[0]}: ${String(stderr).trim() || err.message}`)) : resolve(stdout)));
+      }, (err, stdout, stderr) => (err ? reject(Object.assign(new Error(`git ${args[0]}: ${String(stderr).trim() || err.message}`), { exit: (err as { code?: unknown }).code })) : resolve(stdout)));
       child.stdin!.on('error', () => undefined);
       child.stdin!.end(o.input ?? '');
     });
@@ -123,7 +134,8 @@ export class GitRepos {
     return dir;
   }
   private head(dir: string): Promise<string | null> {
-    return this.run(dir, ['rev-parse', '--verify', '--quiet', BRANCH]).then((b) => b.toString().trim() || null, () => null);
+    // Exit 1 is git saying there is no such ref (a repository with no commits yet); anything else is a failure, not an empty repository.
+    return this.run(dir, ['rev-parse', '--verify', '--quiet', BRANCH]).then((b) => b.toString().trim() || null, (e) => { if ((e as { exit?: unknown }).exit === 1) return null; throw e; });
   }
   private tree(docId: string): Map<string, TreeRow> {
     const rows = this.db.prepare('SELECT path, oid, media_id, lfs FROM git_tree WHERE doc_id = ?').all(docId) as { path: string; oid: string; media_id: string; lfs: number }[];
@@ -161,7 +173,9 @@ export class GitRepos {
     if (was) clearTimeout(was.timer);
     const timer = setTimeout(() => void this.flush(docId).catch((e) => console.error('[git] commit failed', docId, (e as Error).message)), this.opts.settleMs ?? 5000);
     timer.unref();
-    this.waiting.set(docId, { by, timer });
+    const who = was?.by ?? new Set<string>();
+    if (by) who.add(by);
+    this.waiting.set(docId, { by: who, timer });
   }
 
   /** Bring the repository and the collection in step now. Returns the head commit. */
@@ -173,7 +187,9 @@ export class GitRepos {
   private async sync(docId: string, o: { by?: string; message?: string } = {}): Promise<string | null> {
     const waiting = this.waiting.get(docId);
     if (waiting) { clearTimeout(waiting.timer); this.waiting.delete(docId); }
-    const by = o.by ?? waiting?.by ?? '';
+    // The commit names everyone whose changes it holds (several people within one quiet spell share one).
+    const authors = waiting?.by.size ? [...waiting.by] : o.by ? [o.by] : [];
+    const by = o.by ?? authors[authors.length - 1] ?? '';
     const dir = await this.ensure(docId);
     const head = await this.head(dir);
     const synced = (this.db.prepare('SELECT head FROM git_head WHERE doc_id = ?').get(docId) as { head: string } | undefined)?.head ?? null;
@@ -249,7 +265,8 @@ export class GitRepos {
       const treeOid = (await this.run(dir, ['write-tree'], { env })).toString().trim();
       let commit = head;
       if (!head || treeOid !== (await this.run(dir, ['rev-parse', `${head}^{tree}`])).toString().trim()) {
-        const name = (by ? this.label(by) : 'Anima Docs').replace(/[<>\n]/g, '').trim() || 'Anima Docs';
+        const names = authors.map((sub) => this.label(sub).replace(/[<>\n]/g, '').trim()).filter(Boolean);
+        const name = names.length > 3 ? `${names.slice(0, 2).join(', ')} and ${names.length - 2} others` : names.join(', ') || 'Anima Docs';
         const who = { GIT_AUTHOR_NAME: name, GIT_AUTHOR_EMAIL: `noreply@${this.opts.host}`, GIT_COMMITTER_NAME: name, GIT_COMMITTER_EMAIL: `noreply@${this.opts.host}` };
         const message = o.message ?? describe(changed.map((r) => ({ path: r.path, mediaId: r.mediaId, isNew: !tree.has(r.path) })), removed.filter((p) => p !== ATTRIBUTES).map((p) => ({ path: p, mediaId: tree.get(p)!.mediaId })));
         commit = (await this.run(dir, ['commit-tree', treeOid, ...(head ? ['-p', head] : []), '-m', message], { env: who })).toString().trim();
@@ -344,22 +361,15 @@ export class GitRepos {
 
   /**
    * Receive a push: everything waiting is committed first (the client must see it to build on it), the
-   * push runs with a key its hook presents back here, and what it brought is taken in.
+   * push runs with a key its hook presents back here, and what it brought is taken in. The caller has
+   * checked canReceive: git skips a hook it cannot run, and an unchecked push must not be received.
    */
   push(docId: string, by: string, receive: (hookKey: string) => Promise<void>): Promise<void> {
     return this.lock(docId, async () => {
-      const before = await this.sync(docId);
+      await this.sync(docId);
       const key = randomBytes(24).toString('hex');
-      const push = { docId, passed: false };
-      this.pushes.set(key, push);
+      this.pushes.set(key, docId);
       try { await receive(key); } finally { this.pushes.delete(key); }
-      // main moved without the hook having passed the push (a hook that could not run): nothing unchecked is taken in.
-      const dir = this.dir(docId), now = await this.head(dir);
-      if (now !== before && !push.passed) {
-        console.error(`[git] ${docId}: a push moved main without being checked (is ${this.hooks} executable?); undone.`);
-        if (before) await this.run(dir, ['update-ref', BRANCH, before, now ?? ZERO]); else await this.run(dir, ['update-ref', '-d', BRANCH]);
-        return;
-      }
       await this.sync(docId, { by });
     });
   }
@@ -370,9 +380,8 @@ export class GitRepos {
    * has its object here; names are ones a collection can hold.
    */
   async preReceive(key: string, body: { updates?: string; objects?: string; alternates?: string }): Promise<{ ok: boolean; message?: string }> {
-    const push = this.pushes.get(key);
-    if (!push) return { ok: false, message: 'This push is not expected.' };
-    const docId = push.docId;
+    const docId = this.pushes.get(key);
+    if (!docId) return { ok: false, message: 'This push is not expected.' };
     const dir = this.dir(docId);
     const env: Record<string, string> = body.objects ? { GIT_OBJECT_DIRECTORY: body.objects, GIT_ALTERNATE_OBJECT_DIRECTORIES: body.alternates ?? '' } : {};
     const no = (message: string) => ({ ok: false, message });
@@ -390,21 +399,16 @@ export class GitRepos {
       // Every LFS pointer among the new files needs its object on the server (git-lfs uploads them before it pushes).
       const small = sizes.filter((o) => o.type === 'blob' && o.size <= POINTER_MAX && o.size > 0);
       const blobs = await this.blobs(dir, small.map((o) => o.oid), env);
-      const has = this.db.prepare('SELECT 1 FROM lfs_objects WHERE doc_id = ? AND oid = ?');
+      const has = this.db.prepare('SELECT size FROM lfs_objects WHERE doc_id = ? AND oid = ?');
       for (const o of small) {
         const p = parsePointer(blobs.get(o.oid) ?? Buffer.alloc(0));
-        if (p && !has.get(docId, p.oid)) return no(`${pathOf.get(o.oid)} is a Git LFS pointer, but its file was not uploaded. With git-lfs installed (git lfs install), run:\n  git lfs push --all origin main && git push`);
+        const stored = p ? has.get(docId, p.oid) as { size: number } | undefined : undefined;
+        if (p && stored && stored.size !== p.size) return no(`${pathOf.get(o.oid)} is a Git LFS pointer that gives its file's size as ${p.size} bytes; the file uploaded is ${stored.size}.`);
+        if (p && !stored) return no(`${pathOf.get(o.oid)} is a Git LFS pointer, but its file was not uploaded. With git-lfs installed (git lfs install), run:\n  git lfs push --all origin main && git push`);
       }
-      const entries = await this.lsTree(dir, tip, undefined, env);
-      if (entries.length > MAX_FILES_PER_COLLECTION) return no(`A collection holds at most ${MAX_FILES_PER_COLLECTION} files; this push has ${entries.length}.`);
-      for (const e of entries) {
-        if (e.type !== 'blob' || (e.mode !== '100644' && e.mode !== '100755')) return no(`${e.path} is a ${e.mode === '120000' ? 'symbolic link' : e.type === 'commit' ? 'submodule' : 'special file'}: a collection holds plain files only.`);
-        let fits = false;
-        try { fits = checkCollectionPath(e.path) === e.path; } catch { /* not a name a collection takes */ }
-        if (!fits) return no(`${JSON.stringify(e.path)} is not a file name a collection can hold (no backslashes, no names ending or starting with a space, composed Unicode).`);
-      }
+      const problem = treeProblem(await this.lsTree(dir, tip, undefined, env));
+      if (problem) return no(problem);
     }
-    push.passed = true;
     return { ok: true };
   }
 
@@ -415,7 +419,7 @@ export class GitRepos {
     if (!head) return [];
     if (o.before && !/^[0-9a-f]{40}$/.test(o.before)) throw new Fault(400, 'Not a commit.');
     const out = (await this.run(this.dir(docId), ['log', '-z', '--first-parent', '--diff-merges=first-parent', '--no-renames', '--name-status', '--format=%x1e%H%x1f%P%x1f%an%x1f%at%x1f%s',
-      '-n', String(Math.min(200, Math.max(1, o.limit ?? 50))), o.before ? `${o.before}~1` : BRANCH]).catch(() => Buffer.alloc(0))).toString('utf8');
+      '-n', String(Math.min(200, Math.max(1, o.limit ?? 50))), ...(o.before ? ['--skip=1', o.before] : [BRANCH])])).toString('utf8');
     return out.split('\x1e').filter(Boolean).map((rec) => {
       const end = rec.indexOf(NUL);
       const [oid, parents, author, at, message] = rec.slice(0, end).split('\x1f');
@@ -430,16 +434,25 @@ export class GitRepos {
    * Bring back what a commit held: the whole collection, or one file or folder of it. Nothing is rewritten:
    * the restored state is a new commit on top.
    */
-  restore(docId: string, commit: string, path: string | null, by: string): Promise<string | null> {
+  restore(docId: string, version: string, path: string | null, by: string, when: 'after' | 'before' = 'after'): Promise<string | null> {
     if (!this.available) throw new Fault(409, 'This server keeps no history of collections.');
-    if (!/^[0-9a-f]{40}$/.test(commit)) throw new Fault(400, 'Not a commit.');
+    const id = version.trim().toLowerCase();
+    if (!/^[0-9a-f]{7,40}$/.test(id)) throw new Fault(400, 'A version is a change id from the history (at least its first 7 characters).');
     return this.lock(docId, async () => {
       const head = await this.sync(docId);
       const dir = this.dir(docId);
-      if (!head || !(await this.run(dir, ['merge-base', '--is-ancestor', commit, head]).then(() => true, () => false))) throw new Fault(404, 'No such version of this collection.');
+      // git resolves the id: a prefix that fits two changes, or none, is refused by it.
+      const resolve = (rev: string) => this.run(dir, ['rev-parse', '--verify', '--quiet', `${rev}^{commit}`]).then((b) => b.toString().trim(), () => null);
+      const named = head ? await resolve(id) : null;
+      if (!named || !(await this.run(dir, ['merge-base', '--is-ancestor', named, head!]).then(() => true, () => false))) throw new Fault(404, `No change ${version} in this collection's history (or the id fits more than one: give more of it).`);
+      const commit = when === 'before' ? await resolve(`${named}~1`) : named;
+      if (!commit) throw new Fault(404, 'There is nothing before the first change.');
       const at = path === null ? null : checkCollectionPath(path);
       const entries = await this.lsTree(dir, commit, at ?? undefined);
       if (at !== null && !entries.length) throw new Fault(404, `${at} is not in that version.`);
+      // A push is checked at its tip; an earlier commit of it may hold what a collection cannot.
+      const problem = treeProblem(at === null ? entries : await this.lsTree(dir, commit));
+      if (problem) throw new Fault(409, `That version cannot be restored: ${problem}`);
       const made = await this.materialize(docId, dir, entries, by);
       const keep = new Set(entries.map((e) => e.path));
       this.db.transaction(() => {
@@ -475,20 +488,37 @@ export class GitRepos {
   mintToken(who: Identity): string {
     const token = `adg_${randomBytes(24).toString('base64url')}`;
     this.db.prepare('INSERT INTO git_tokens (sub, token_hash, identity, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(sub) DO UPDATE SET token_hash = excluded.token_hash, identity = excluded.identity, created_at = excluded.created_at')
-      .run(who.sub, createHash('sha256').update(token).digest('hex'), JSON.stringify(who), Date.now());
+      .run(who.sub, createHash('sha256').update(token).digest('hex'), JSON.stringify({ ...who, scopes: who.scopes.filter((s) => s !== 'docs:admin') }), Date.now());
     return token;
   }
-  tokenInfo(sub: string): { createdAt: number } | null {
+  tokenInfo(sub: string): { createdAt: number; expiresAt: number } | null {
     const r = this.db.prepare('SELECT created_at FROM git_tokens WHERE sub = ?').get(sub) as { created_at: number } | undefined;
-    return r ? { createdAt: r.created_at } : null;
+    return r ? { createdAt: r.created_at, expiresAt: r.created_at + (this.opts.passwordDays ?? 90) * 86400_000 } : null;
   }
   dropToken(sub: string) { this.db.prepare('DELETE FROM git_tokens WHERE sub = ?').run(sub); }
   identityOf(token: string): Identity | null {
-    const r = this.db.prepare('SELECT identity FROM git_tokens WHERE token_hash = ?').get(createHash('sha256').update(token).digest('hex')) as { identity: string } | undefined;
-    try { return r ? JSON.parse(r.identity) as Identity : null; } catch { return null; }
+    const r = this.db.prepare('SELECT identity, created_at FROM git_tokens WHERE token_hash = ?').get(createHash('sha256').update(token).digest('hex')) as { identity: string; created_at: number } | undefined;
+    // Like a session, it ends a fixed time after it was made: the person signs in again (their roles are re-read) and makes another.
+    if (!r || Date.now() - r.created_at > (this.opts.passwordDays ?? 90) * 86400_000) return null;
+    try {
+      const who = JSON.parse(r.identity) as Identity;
+      return (this.opts.requiredScopes ?? []).every((s) => who.scopes.includes(s)) ? who : null;
+    } catch { return null; }
   }
 
   close() { for (const w of this.waiting.values()) clearTimeout(w.timer); this.waiting.clear(); }
+}
+
+/** Why a tree cannot be a collection's files, or null: plain files only, names a collection holds, within its size. */
+function treeProblem(entries: GitEntry[]): string | null {
+  if (entries.length > MAX_FILES_PER_COLLECTION) return `A collection holds at most ${MAX_FILES_PER_COLLECTION} files; this has ${entries.length}.`;
+  for (const e of entries) {
+    if (e.type !== 'blob' || (e.mode !== '100644' && e.mode !== '100755')) return `${e.path} is a ${e.mode === '120000' ? 'symbolic link' : e.type === 'commit' ? 'submodule' : 'special file'}: a collection holds plain files only.`;
+    let fits = false;
+    try { fits = checkCollectionPath(e.path) === e.path; } catch { /* not a name a collection takes */ }
+    if (!fits) return `${JSON.stringify(e.path)} is not a file name a collection can hold (no backslashes, no names ending or starting with a space, composed Unicode).`;
+  }
+  return null;
 }
 
 function sha256(file: string): Promise<string> {

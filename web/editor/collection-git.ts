@@ -54,7 +54,12 @@ export function openHistoryDialog(docId: string, canEdit: boolean, onRestored: (
     try {
       const first = last === null;
       const { commits } = await api.gitLog(docId, last ?? undefined);
-      if (first && !commits.length) { list.replaceChildren(emptyState({ art: icon('history', 32, 'empty-art-icon'), title: 'No changes yet', text: 'Each change to the files is recorded here, with who made it.' })); return; }
+      if (first && !commits.length) {
+        const kept = await api.gitInfo(docId).then((i) => i.available, () => true);
+        list.replaceChildren(emptyState(kept ? { art: icon('history', 32, 'empty-art-icon'), title: 'No changes yet', text: 'Each change to the files is recorded here, with who made it.' }
+          : { art: icon('history', 32, 'empty-art-icon'), title: 'No history here', text: 'This server keeps collections without a history of their changes.' }));
+        return;
+      }
       list.append(...commits.map((c, i) => row(c, first && i === 0)));
       if (commits.length) last = commits[commits.length - 1].oid;
       more.hidden = commits.length < 50;
@@ -77,19 +82,20 @@ export function openCloneDialog(docId: string, canEdit: boolean, guest: boolean)
   void api.gitInfo(docId).then((info) => {
     if (!info.available) { body.replaceChildren(h('p.dialog-help', null, 'This server keeps collections without git.')); return; }
     const passwordBox = h('div.field');
-    const drawPassword = (made: number | null, fresh?: string) => {
+    const drawPassword = (made: number | null, ends: number | null, fresh?: string) => {
       const make = h('button.btn.sm', { type: 'button', onclick: async () => {
         if (made && !(await confirmDialog({ title: 'Make a new git password?', message: 'The one you have stops working, wherever it is saved.', confirmLabel: 'Make a new one' }))) return;
-        try { drawPassword(Date.now(), (await api.gitPassword()).password); } catch (e) { toast(errorMessage(e), { kind: 'error' }); }
+        try { const r = await api.gitPassword(); drawPassword(Date.now(), r.expiresAt, r.password); } catch (e) { toast(errorMessage(e), { kind: 'error' }); }
       } }, made ? 'Make a new one' : 'Make a git password');
+      const until = ends ? new Date(ends).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' }) : '';
       passwordBox.replaceChildren(
         fresh ? copyRow('Your git password', fresh, { secret: true }) : h('span.field-label', null, 'Password'),
-        h('p.meta', null, fresh ? 'Shown this once. git asks for it the first time and can remember it; any user name works. It opens every collection you can open, for git only.'
-          : made ? `You made a git password ${relTime(made)}. It is shown only when made; if it is lost, make a new one (the old one stops working).`
+        h('p.meta', null, fresh ? `Shown this once. git asks for it the first time and can remember it; any user name works. It opens every collection you can open, for git only, until ${until}.`
+          : made ? `You made a git password ${relTime(made)}; it works until ${until}. It is shown only when made; if it is lost, make a new one (the old one stops working).`
             : 'git asks for a user name and a password: any name, and a git password made here. It opens every collection you can open, for git only.'),
         make);
     };
-    drawPassword(info.password?.createdAt ?? null);
+    drawPassword(info.password?.createdAt ?? null, info.password?.expiresAt ?? null);
     body.replaceChildren(
       h('p.dialog-help', null, 'This collection is a git repository: clone it, work on the files with any tool, and push', canEdit ? '. Changes made here and changes pushed are one history.' : ' (you can read it; pushing needs edit access).'),
       copyRow('Clone', `git clone ${info.url}`),

@@ -81,6 +81,8 @@ export function gitHttp(app: App, deps: {
     const role = doc && doc.type === COLLECTION ? app.docs.role(id, actor) : null;
     if (!doc || !role) throw new Fault(404, 'No such repository.');
     const need = (r: Role) => { if (!atLeast(role, r)) throw new Fault(403, 'You can read this collection, not change it.'); };
+    // A push is refused outright when its check cannot run, rather than received and undone.
+    const canReceive = () => { if (!app.git.canReceive) { console.error('[git] pushes are refused: the pre-receive hook is not executable'); throw new Fault(503, 'This server cannot take pushes at the moment.'); } };
 
     try {
       // ------------------------------------------------ git: refs, then one of the two services
@@ -88,7 +90,7 @@ export function gitHttp(app: App, deps: {
         const service = url.searchParams.get('service');
         if (service !== 'git-upload-pack' && service !== 'git-receive-pack') throw new Fault(403, 'This address is for git clients.');
         const receive = service === 'git-receive-pack';
-        if (receive) need('editor');
+        if (receive) { need('editor'); canReceive(); }
         await app.git.flush(id);
         const proto = String(req.headers['git-protocol'] ?? '');
         res.writeHead(200, { 'Content-Type': `application/x-${service}-advertisement`, 'Cache-Control': 'no-cache' });
@@ -98,6 +100,7 @@ export function gitHttp(app: App, deps: {
         return true;
       }
       if ((rest === 'git-upload-pack' || rest === 'git-receive-pack') && method === 'POST') {
+        if (rest === 'git-receive-pack') { need('editor'); canReceive(); }
         const body = req.headers['content-encoding'] === 'gzip' ? req.pipe(createGunzip()) : req;
         const proto = String(req.headers['git-protocol'] ?? '');
         res.writeHead(200, { 'Content-Type': `application/x-${rest}-result`, 'Cache-Control': 'no-cache' });
@@ -106,7 +109,6 @@ export function gitHttp(app: App, deps: {
           await pipe(app.git.serve(id, ['upload-pack', '--stateless-rpc'], proto ? { GIT_PROTOCOL: proto } : {}), body, res, true);
           return true;
         }
-        need('editor');
         // The answer ends once the push has become the collection's files: whoever pushed and then looks, sees them.
         await app.git.push(id, actor.sub, (key) => pipe(app.git.serve(id, [...app.git.receiveConfig, 'receive-pack', '--stateless-rpc'], { DOCS_GIT_HOOK: deps.hookUrl(key) }), body, res, false));
         res.end();

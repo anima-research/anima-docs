@@ -191,14 +191,15 @@ export const api = {
   deleteDoc: (id: string) => call<{ ok: true }>('DELETE', `/api/docs/${encodeURIComponent(id)}`),
   /** Files attached to a document (an HTML page's data, scripts, styles; its markdown companion). */
   files: (id: string) => call<{ files: DocFile[] }>('GET', `/api/docs/${encodeURIComponent(id)}/files`),
-  putFile: (id: string, path: string, body: Blob) => call<DocFile>('PUT', `/api/docs/${encodeURIComponent(id)}/files/${path.split('/').map(encodeURIComponent).join('/')}`, body, { headers: { 'Content-Type': body.type || 'application/octet-stream' } }),
+  /** `version` (a file's mediaId): save only if that is still the file's current version (412 otherwise). */
+  putFile: (id: string, path: string, body: Blob, version?: string) => call<DocFile>('PUT', `/api/docs/${encodeURIComponent(id)}/files/${path.split('/').map(encodeURIComponent).join('/')}`, body, { headers: { 'Content-Type': body.type || 'application/octet-stream', ...(version ? { 'If-Match': `"f${version}"` } : {}) } }),
   deleteFile: (id: string, path: string) => call<{ removed: boolean }>('DELETE', `/api/docs/${encodeURIComponent(id)}/files/${path.split('/').map(encodeURIComponent).join('/')}`),
   deleteFolder: (id: string, path: string) => call<{ removed: number }>('DELETE', `/api/docs/${encodeURIComponent(id)}/files/${path.split('/').map(encodeURIComponent).join('/')}?folder=1`),
   /** A collection's repository: where to clone it from, and whether you have a git password. */
-  gitInfo: (id: string) => call<{ available: boolean; url: string; password: { createdAt: number } | null }>('GET', `/api/docs/${encodeURIComponent(id)}/git`),
+  gitInfo: (id: string) => call<{ available: boolean; url: string; password: { createdAt: number; expiresAt: number } | null }>('GET', `/api/docs/${encodeURIComponent(id)}/git`),
   gitLog: (id: string, before?: string) => call<{ commits: GitCommit[] }>('GET', `/api/docs/${encodeURIComponent(id)}/git/log${q({ before })}`),
   gitRestore: (id: string, commit: string, path?: string) => call<{ head: string | null }>('POST', `/api/docs/${encodeURIComponent(id)}/git/restore`, { commit, path }),
-  gitPassword: () => call<{ password: string }>('POST', '/api/git/password', {}),
+  gitPassword: () => call<{ password: string; expiresAt: number }>('POST', '/api/git/password', {}),
   moveFile: (id: string, from: string, to: string) => call<{ moved: number }>('POST', `/api/docs/${encodeURIComponent(id)}/files/move`, { from, to }),
   share: (id: string, who: string, role: Role | 'none') => call<{ ok: true }>('POST', `/api/docs/${encodeURIComponent(id)}/share`, { who, role }),
   versions: (id: string) => call<{ versions: Version[] }>('GET', `/api/docs/${encodeURIComponent(id)}/versions`),

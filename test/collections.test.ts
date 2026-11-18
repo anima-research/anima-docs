@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { startServer } from './server-harness.js';
 
 let S: Awaited<ReturnType<typeof startServer>>;
-before(async () => { S = await startServer({}, { gitSettleMs: 30 }); });
+before(async () => { S = await startServer(); });
 after(async () => { await S.close(); });
 
 const H = (extra: Record<string, string> = {}) => ({ Origin: S.base, 'Content-Type': 'application/json', ...extra });
@@ -188,6 +188,11 @@ test('agents read the text of a PDF by page, and search a collection by name and
   const found = await op('search', { document: id, query: 'HERON' });
   assert.deepEqual(found.split('\n'), ['reports/Heron survey 2026.pdf  (name)', 'notes/field.md:3  The herons arrive at dusk.', 'reports/Heron survey 2026.pdf  p.1  Seventeen herons were counted at low tide']);
   assert.equal(await op('search', { document: id, query: 'albatross' }), 'No matches.');
+  assert.equal(await op('read_file', { document: id, path: 'reports/Heron survey 2026.pdf', from_page: 4 }), 'reports/Heron survey 2026.pdf: a PDF of 1 page; there is no page 4.');
+  // What a search could not look inside, it says: a file that is not a PDF under a PDF's name, a text file too large to scan.
+  await op('attach_file', { document: id, path: 'broken.pdf', content: Buffer.from('%PDF-1.4 and then nothing a reader can use').toString('base64'), encoding: 'base64' });
+  S.app.files.put(id, 'big.log', Buffer.alloc(2 * 1024 * 1024 + 1, 0x61), 'test', { maxBytes: 8 * 1024 * 1024 });
+  assert.equal(await op('search', { document: id, query: 'albatross' }), 'No matches.\n(1 text file over 2 MB not searched; 1 PDF whose text cannot be read here.)');
 });
 
 test('agents see a collection’s history and bring back what was removed', async () => {
@@ -202,7 +207,58 @@ test('agents see a collection’s history and bring back what was removed', asyn
   await op('remove_file', { document: id, path: 'old', folder: true });
   const after = await op('versions', { document: id });
   assert.ok(after.includes('Keeper: Remove old/b.md') && after.includes('− old/b.md'), after);
-  assert.equal(await op('restore_version', { document: id, version: added, path: 'old/b.md' }), `Restored old/b.md as of ${added}.`);
+  assert.equal(await op('restore_version', { document: id, version: added, path: 'old/b.md' }), `Restored old/b.md as it was after ${added}.`);
+  assert.equal(await op('read_file', { document: id, path: 'old/b.md' }), 'to be removed');
+  // The same by the change that removed it: what was there before it.
+  const removal = /^ {2}([0-9a-f]{10}) .*Remove old\/b\.md/m.exec(after)![1];
+  await op('remove_file', { document: id, path: 'old/b.md' });
+  assert.equal(await op('restore_version', { document: id, version: removal, path: 'old/b.md', at: 'before' }), `Restored old/b.md as it was before ${removal}.`);
   assert.equal(await op('read_file', { document: id, path: 'old/b.md' }), 'to be removed');
   assert.ok((await op('restore_version', { document: id, version: 'abcdef1' })).includes('No change abcdef1'));
+  assert.ok((await op('restore_version', { document: id, version: 'abc' })).includes('at least its first 7 characters'));
+});
+
+test('folders differ by case; a save names the version it was made from; a collection has no text and stays a collection', async () => {
+  const ann = await signIn('Ann');
+  const c = await collection(ann, 'Cases');
+  for (const p of ['Photos/a.jpg', 'photos/b.jpg', 'PHOTOS_2/c.jpg']) assert.equal((await c.put(p, p)).status, 201);
+  const zip = await fetch(`${S.base}/api/docs/${c.id}/zip?folder=Photos`, { headers: { Cookie: ann } });
+  assert.ok(Buffer.from(await zip.arrayBuffer()).includes('a.jpg') , 'the zip of Photos has its file');
+  const gone = await fetch(`${S.base}/api/docs/${c.id}/files/Photos?folder=1`, { method: 'DELETE', headers: { Cookie: ann, Origin: S.base } });
+  assert.deepEqual(await gone.json(), { removed: 1 }, 'Photos, not photos');
+  assert.deepEqual(await c.paths(), ['PHOTOS_2/c.jpg', 'photos/b.jpg']);
+  assert.equal((await c.put('Photos', 'a file where the other folder was')).status, 201, 'the name is free again, whatever photos/ holds');
+
+  // Two people open notes.md; the second to save is told, and may still choose to.
+  await c.put('notes.md', 'one');
+  const version = async () => ((await (await fetch(`${S.base}/api/docs/${c.id}/files`, { headers: { Cookie: ann } })).json()).files as { path: string; mediaId: string }[]).find((f) => f.path === 'notes.md')!.mediaId;
+  const opened = await version();
+  const save = (body: string, from?: string) => fetch(`${S.base}/api/docs/${c.id}/files/notes.md`, { method: 'PUT', headers: { Cookie: ann, Origin: S.base, ...(from ? { 'If-Match': `"f${from}"` } : {}) }, body });
+  assert.equal((await save('two', opened)).status, 201);
+  assert.equal((await save('three, from the old one', opened)).status, 412);
+  assert.equal(await (await fetch(`${S.base}/p/${c.id}/notes.md`, { headers: { Cookie: ann } })).text(), 'two');
+  assert.equal((await save('three', await version())).status, 201);
+
+  // No text, and no becoming something else (nor a document becoming a collection).
+  const agent = S.token('Scribe');
+  const op = async (name: string, args: unknown) => (await (await fetch(`${S.base}/api/operations/${name}`, { method: 'POST', headers: { Authorization: `Bearer ${agent}`, 'Content-Type': 'application/json' }, body: JSON.stringify(args) })).json()).content[0].text as string;
+  const id = /\((d[A-Za-z0-9]+)\)/.exec(await op('create_document', { title: 'Mine', type: 'files', content: 'text a collection has no place for' }))![1];
+  assert.ok((await op('edit_document', { document: id, edits: [{ append: 'hello' }] })).includes('A file collection has no text to edit'));
+  assert.equal(S.app.docs.text(id), '');
+  const retype = (doc: string, type: string) => fetch(`${S.base}/api/docs/${doc}`, { method: 'PATCH', headers: H({ Cookie: ann }), body: JSON.stringify({ type }) });
+  assert.equal((await retype(c.id, 'markdown')).status, 400);
+  const page = await (await fetch(`${S.base}/api/docs`, { method: 'POST', headers: H({ Cookie: ann }), body: JSON.stringify({ title: 'Page' }) })).json();
+  assert.equal((await retype(page.id, 'files')).status, 400);
+  assert.equal((await retype(page.id, 'text')).status, 200);
+
+  // Agents: an empty file is a file; an address is a URL; a long folder is read in parts.
+  assert.ok((await op('attach_file', { document: id, path: 'pkg/__init__.py', content: '' })).includes('0 bytes'));
+  const odd = await op('attach_file', { document: id, path: 'Report #1 (50%)?.txt', content: 'x' });
+  assert.ok(odd.endsWith(`/p/${id}/Report%20%231%20(50%25)%3F.txt`), odd);
+  assert.equal(await (await fetch(odd.slice(odd.indexOf('http')), { headers: { Authorization: `Bearer ${agent}` } })).text(), 'x');
+  for (let i = 0; i < 405; i++) S.app.files.put(id, `many/f${String(i).padStart(3, '0')}.txt`, Buffer.from('x'), 'test', { maxBytes: 1024 });
+  const first = await op('list_files', { document: id, folder: 'many' });
+  assert.ok(first.includes('many/f399.txt') && !first.includes('many/f400.txt') && first.endsWith('… 5 more here: list_files with offset 400.'), first.slice(-120));
+  const rest = await op('list_files', { document: id, folder: 'many', offset: 400 });
+  assert.ok(rest.startsWith('(entries 401–405 of 405)') && rest.includes('many/f404.txt'), rest.slice(0, 120));
 });

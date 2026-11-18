@@ -10,7 +10,7 @@ import { LanguageDescription, syntaxHighlighting } from '@codemirror/language';
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown';
 import { search, searchKeymap } from '@codemirror/search';
 
-import { api, type DocFile } from '../lib/api';
+import { api, ApiError, type DocFile } from '../lib/api';
 import { h } from '../lib/dom';
 import { fullTime, plural, relTime } from '../lib/format';
 import { icon } from '../lib/icons';
@@ -69,8 +69,11 @@ export function collectionView(opts: { docId: string; canEdit: boolean; guest: b
   let destroyed = false;
   /** Folders made here that hold nothing yet (a folder exists on the server only through its files). */
   const emptyFolders = new Set<string>();
-  /** The open text file's editor, and what was last saved. */
-  let editor: { view: EditorView; path: string; saved: string } | null = null;
+  /** The open text file's editor: what was last saved, and from which stored version of the file. */
+  let editor: { view: EditorView; path: string; saved: string; version: string; saving: boolean; save(): Promise<void> } | null = null;
+  /** Whether the server keeps this collection's history (what a delete or a replace can be told to be). */
+  let keepsHistory = false;
+  void api.gitInfo(docId).then((i) => { keepsHistory = i.available; }, () => undefined);
 
   const thumbUrl = (f: DocFile) => `/api/docs/${docId}/thumb/${f.path.split('/').map(encodeURIComponent).join('/')}?v=${f.mediaId.slice(0, 12)}`;
   /** A file's address for showing it here: the version in it makes a replaced file a new address (addresses are cached for a minute). */
@@ -306,18 +309,29 @@ export function collectionView(opts: { docId: string; canEdit: boolean; guest: b
     const isMd = ext === 'md' || ext === 'markdown';
     const lang = new Compartment();
     const saveBtn = h('button.btn.sm.primary', { type: 'button', disabled: true, onclick: () => void save() }, 'Save');
-    const dirty = () => view.state.doc.toString() !== editor?.saved;
+    const dirty = () => view.state.doc.toString() !== mine.saved;
+    // One save at a time, of this editor's file, from the version it was opened (or last saved) at.
     const save = async () => {
-      if (!editor || !dirty()) return;
+      if (mine.saving || !dirty()) return;
       const now = view.state.doc.toString();
+      const put = (version?: string) => api.putFile(docId, f.path, new Blob([now], { type: 'text/plain' }), version);
+      mine.saving = true;
       saveBtn.disabled = true;
       try {
-        const nf = await api.putFile(docId, f.path, new Blob([now], { type: 'text/plain' }));
+        let nf: DocFile;
+        try { nf = await put(mine.version); }
+        catch (e) {
+          // Someone else saved or replaced the file meanwhile: theirs is not overwritten without a word.
+          if (!(e instanceof ApiError && e.status === 412)) throw e;
+          if (!(await confirmDialog({ title: `${baseName(f.path)} has changed`, message: `It was changed by someone else since you opened it. Saving puts your version in its place${keepsHistory ? '; theirs stays in History.' : '.'}`, confirmLabel: 'Save mine', danger: true }))) return;
+          nf = await put();
+        }
         files = files.map((x) => (x.path === nf.path ? nf : x));
-        if (editor) editor.saved = now;
+        mine.saved = now;
+        mine.version = nf.mediaId;
         toast('Saved', { kind: 'success', timeout: 1800 });
       } catch (e) { toast(errorMessage(e), { kind: 'error' }); }
-      saveBtn.disabled = !dirty();
+      finally { mine.saving = false; saveBtn.disabled = !dirty(); }
     };
     const view = new EditorView({
       state: EditorState.create({ doc: text, extensions: [
@@ -328,7 +342,8 @@ export function collectionView(opts: { docId: string; canEdit: boolean; guest: b
         EditorView.updateListener.of((u) => { if (u.docChanged) saveBtn.disabled = !dirty(); }),
       ] }),
     });
-    editor = { view, path: f.path, saved: text };
+    const mine = { view, path: f.path, saved: text, version: f.mediaId, saving: false, save };
+    editor = mine;
     const support = isMd ? Promise.resolve(markdown({ base: markdownLanguage, codeLanguages })) : LanguageDescription.matchLanguageName(codeLanguages, ext, true)?.load();
     void support?.then((s) => { if (editor?.view === view) view.dispatch({ effects: lang.reconfigure(s) }); });
 
@@ -387,16 +402,18 @@ export function collectionView(opts: { docId: string; canEdit: boolean; guest: b
     if (to !== path) await move(path, to);
   }
   async function move(from: string, to: string) {
+    // Unsaved edits to the file being moved are asked about first, not after it has moved.
+    if (shown === from && !leaveEditor()) return;
     try {
       const r = await api.moveFile(docId, from, to.normalize('NFC'));
-      if (shown === from) { if (!leaveEditor()) return; shown = to.normalize('NFC'); cwd = parentOf(shown); writeAt(shown, false); }
+      if (shown === from) { shown = to.normalize('NFC'); cwd = parentOf(shown); writeAt(shown, false); }
       else if (cwd === from || cwd.startsWith(`${from}/`)) { cwd = to + cwd.slice(from.length); writeAt(cwd, false); }
       toast(r.moved === 1 ? 'Moved' : `Moved ${r.moved} files`, { kind: 'success', timeout: 2000 });
     } catch (e) { toast(errorMessage(e), { kind: 'error' }); }
     await load();
   }
   async function remove(path: string, folder: boolean, count: number) {
-    const ok = await confirmDialog({ title: `Delete ${baseName(path)}?`, message: folder ? `The folder and the ${plural(count, 'file')} in it will be deleted. This cannot be undone.` : 'The file will be deleted. This cannot be undone.', confirmLabel: 'Delete', danger: true });
+    const ok = await confirmDialog({ title: `Delete ${baseName(path)}?`, message: `${folder ? `The folder and the ${plural(count, 'file')} in it` : 'The file'} will be removed from the collection. ${keepsHistory ? (folder ? 'They can be brought back from History.' : 'It can be brought back from History.') : 'This cannot be undone.'}`, confirmLabel: 'Delete', danger: true });
     if (!ok) return;
     try {
       if (folder) await api.deleteFolder(docId, path); else await api.deleteFile(docId, path);
@@ -415,7 +432,7 @@ export function collectionView(opts: { docId: string; canEdit: boolean; guest: b
     if (!jobs.length) return;
     const clash = jobs.filter((j) => fileAt(j.path));
     if (clash.length) {
-      const replace = await confirmDialog({ title: `Replace ${clash.length === 1 ? baseName(clash[0].path) : `${clash.length} files`}?`, message: clash.length === 1 ? 'A file with this name is already here. Replacing it cannot be undone.' : `${clash.length} of these files are already here. Replacing them cannot be undone; Cancel uploads only the new ones.`, confirmLabel: 'Replace', danger: true });
+      const replace = await confirmDialog({ title: `Replace ${clash.length === 1 ? baseName(clash[0].path) : `${clash.length} files`}?`, message: `${clash.length === 1 ? 'A file with this name is already here.' : `${clash.length} of these files are already here.`} ${keepsHistory ? 'What is replaced stays in History.' : 'Replacing cannot be undone.'}${clash.length === 1 ? '' : ' Cancel uploads only the new ones.'}`, confirmLabel: 'Replace', danger: true });
       if (!replace) jobs = jobs.filter((j) => !fileAt(j.path));
       if (!jobs.length) return;
     }
@@ -494,6 +511,9 @@ export function collectionView(opts: { docId: string; canEdit: boolean; guest: b
   // Others (people, agents, pushes) change the collection too: look again when the tab comes back.
   const onVisible = () => { if (document.visibilityState === 'visible' && !uploading) void load(true); };
   document.addEventListener('visibilitychange', onVisible);
+  const unsaved = () => !!editor && editor.view.state.doc.toString() !== editor.saved;
+  const onUnload = (e: BeforeUnloadEvent) => { if (unsaved()) { e.preventDefault(); e.returnValue = ''; } };
+  window.addEventListener('beforeunload', onUnload);
 
   function render() {
     if (destroyed) return;
@@ -516,8 +536,11 @@ export function collectionView(opts: { docId: string; canEdit: boolean; guest: b
     el,
     setCanEdit(next) { if (next === canEdit) return; canEdit = next; if (!(editor && shown === editor.path)) render(); },
     destroy() {
+      // Going to another page with edits not saved: one question, and the save goes on after the view is gone.
+      if (unsaved() && window.confirm(`Save your changes to ${baseName(editor!.path)}?`)) void editor!.save();
       destroyed = true;
       editor?.view.destroy();
+      window.removeEventListener('beforeunload', onUnload);
       window.removeEventListener('popstate', onPop);
       document.removeEventListener('keydown', onKey);
       document.removeEventListener('visibilitychange', onVisible);

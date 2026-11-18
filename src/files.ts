@@ -69,8 +69,12 @@ export function checkCollectionPath(path: string): string {
   if (bad) throw new Fault(400, 'File paths are like "papers/2024/Annual report.pdf": names separated by "/", none of them ".", ".." or ".git", no backslashes.');
   return p;
 }
-/** Escape a path for a LIKE pattern that matches everything under it. */
-const under = (dir: string) => `${dir.replace(/[\\%_]/g, '\\$&')}/%`;
+/**
+ * Everything under a folder, as a range of paths: from "dir/" up to "dir0" ("0" is the character after "/").
+ * Not LIKE: it ignores the case of ASCII letters, and Photos/ and photos/ are two folders.
+ */
+const UNDER = 'path >= ? AND path < ?';
+const under = (dir: string): [string, string] => [`${dir}/`, `${dir}0`];
 
 export class DocFiles {
   /** Told when a collection's files change, and by whom (its repository commits them: gitrepo.ts). */
@@ -87,7 +91,7 @@ export class DocFiles {
 
   /** Every file, or those under a folder. */
   list(docId: string, dir?: string): DocFile[] {
-    if (dir) return (this.db.prepare(`SELECT * FROM doc_files WHERE doc_id = ? AND path LIKE ? ESCAPE '\\' ORDER BY path`).all(docId, under(dir)) as any[]).map(rowToFile);
+    if (dir) return (this.db.prepare(`SELECT * FROM doc_files WHERE doc_id = ? AND ${UNDER} ORDER BY path`).all(docId, ...under(dir)) as any[]).map(rowToFile);
     return (this.db.prepare('SELECT * FROM doc_files WHERE doc_id = ? ORDER BY path').all(docId) as any[]).map(rowToFile);
   }
   count(docId: string): { files: number; bytes: number } {
@@ -124,6 +128,8 @@ export class DocFiles {
     const collection = this.isCollection(docId);
     const p = this.room(docId, path, collection);
     const info = await this.media.putStream(body, by, docId, { name: p.split('/').pop()!, maxBytes: opts.maxBytes, asFile: collection });
+    // While it streamed, another upload may have made this name a folder, or a folder above it a file.
+    if (collection) this.checkFree(docId, p);
     return this.record(docId, p, info, by, collection);
   }
 
@@ -131,13 +137,14 @@ export class DocFiles {
   private room(docId: string, path: string, collection: boolean): string {
     const p = collection ? checkCollectionPath(path) : checkPath(path);
     const max = collection ? MAX_FILES_PER_COLLECTION : MAX_FILES_PER_DOC;
-    if (this.count(docId).files >= max && !this.get(docId, p)) throw new Fault(400, `At most ${max} files per ${collection ? 'collection' : 'document'}.`);
+    // (.gitattributes is the repository's own: a collection filled to the limit still gets one.)
+    if (this.count(docId).files >= max && !this.get(docId, p) && !(collection && p === '.gitattributes')) throw new Fault(400, `At most ${max} files per ${collection ? 'collection' : 'document'}.`);
     if (collection) this.checkFree(docId, p);
     return p;
   }
   /** A file cannot sit where a folder is, nor a folder where a file is. */
   checkFree(docId: string, p: string) {
-    if (this.db.prepare(`SELECT 1 FROM doc_files WHERE doc_id = ? AND path LIKE ? ESCAPE '\\' LIMIT 1`).get(docId, under(p))) throw new Fault(409, `${p} is a folder.`);
+    if (this.db.prepare(`SELECT 1 FROM doc_files WHERE doc_id = ? AND ${UNDER} LIMIT 1`).get(docId, ...under(p))) throw new Fault(409, `${p} is a folder.`);
     const parts = p.split('/');
     for (let i = 1; i < parts.length; i++) if (this.get(docId, parts.slice(0, i).join('/'))) throw new Fault(409, `${parts.slice(0, i).join('/')} is a file, not a folder.`);
   }
@@ -163,7 +170,7 @@ export class DocFiles {
 
   /** Remove a folder of a collection: every file under it. */
   removeFolder(docId: string, dir: string, by = ''): number {
-    const n = this.db.prepare(`DELETE FROM doc_files WHERE doc_id = ? AND path LIKE ? ESCAPE '\\'`).run(docId, under(checkCollectionPath(dir))).changes;
+    const n = this.db.prepare(`DELETE FROM doc_files WHERE doc_id = ? AND ${UNDER}`).run(docId, ...under(checkCollectionPath(dir))).changes;
     if (n) this.touch(docId, by);
     return n;
   }
@@ -186,7 +193,7 @@ export class DocFiles {
       for (const r of rows) {
         const t = file ? dst : dst + r.path.slice(src.length);
         if (this.get(docId, t)) throw new Fault(409, `${t} already exists.`);
-        if (collection) this.checkFree(docId, t);
+        if (collection) { checkCollectionPath(t); this.checkFree(docId, t); }
         ins.run(docId, t, r.mediaId, mimeFor(t, r.mime), r.size, now, by);
       }
     })();

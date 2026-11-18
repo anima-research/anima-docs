@@ -762,7 +762,7 @@ export function createHttp(app: App) {
           const row = s && !isGuest(a.sub) ? app.db.prepare('SELECT identity FROM sessions WHERE token_hash = ?').get(s.tokenHash) as { identity: string } | undefined : undefined;
           if (!row) throw new Fault(403, 'Sign in with Archipelago in the browser to make a git password (agents use their token).');
           if (method === 'DELETE') { app.git.dropToken(a.sub); send(200, { ok: true }); return; }
-          send(201, { password: app.git.mintToken(JSON.parse(row.identity)) });
+          send(201, { password: app.git.mintToken(JSON.parse(row.identity)), expiresAt: app.git.tokenInfo(a.sub)!.expiresAt });
           return;
         }
         if (path === '/api/docs' && method === 'GET') {
@@ -889,6 +889,9 @@ export function createHttp(app: App) {
             app.docs.require(id, a, 'editor');
             // A collection's folder goes with everything in it (?folder=1).
             if (method === 'DELETE') { send(200, url.searchParams.has('folder') ? { removed: app.files.removeFolder(id, decodeURIComponent(fm[1]), a.sub) } : { removed: app.files.remove(id, decodeURIComponent(fm[1]), a.sub) }); return; }
+            // A save made from a version that is no longer the current one (someone else changed the file since) is refused: If-Match names the version.
+            const match = String(req.headers['if-match'] ?? '');
+            if (match) { const cur = app.files.get(id, app.files.path(id, decodeURIComponent(fm[1]))); if (`"f${cur?.mediaId ?? ''}"` !== match) throw new Fault(412, 'This file has changed since you opened it.'); }
             // Streamed to disk: a large file must not sit in memory.
             const f = await app.files.putStream(id, decodeURIComponent(fm[1]), req, a.sub, { maxBytes: app.config.uploadMaxBytes });
             send(201, { ...f, url: fileUrl(f) });

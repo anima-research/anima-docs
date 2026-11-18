@@ -34,7 +34,7 @@ export interface Config {
   /** A client-address header the proxy sets and overwrites (Railway: x-real-ip); preferred over X-Forwarded-For. */
   clientIpHeader: string | null;
   importKey: string | null;
-  /** Largest non-image upload (images stay at 15 MB). DOCS_UPLOAD_MAX_MB. */
+  /** Largest upload; images shown in documents stay at 15 MB (a collection's image files do not). DOCS_UPLOAD_MAX_MB. */
   uploadMaxBytes: number;
   /** Per principal per day. DOCS_UPLOAD_QUOTA_MB. */
   uploadQuotaBytes: number;
