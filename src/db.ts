@@ -542,5 +542,22 @@ export function openDatabase(file: string): DB {
       db.pragma('user_version = 13');
     })();
   }
+  if ((db.pragma('user_version', { simple: true }) as number) < 14) {
+    // v14: a comment thread may be a signature or initials field on a page of a PDF (fields.ts): `field` is its
+    // kind, file, page and box, as JSON, on the thread's root. signatures holds each person's own signature and
+    // initials (a PNG), read and written only by that person, signed in.
+    db.transaction(() => {
+      const cols = new Set((db.pragma('table_info(comments)') as { name: string }[]).map((c) => c.name));
+      if (!cols.has('field')) db.exec('ALTER TABLE comments ADD COLUMN field TEXT');
+      db.exec(`CREATE TABLE IF NOT EXISTS signatures (
+        sub         TEXT NOT NULL,
+        kind        TEXT NOT NULL,
+        png         BLOB NOT NULL,
+        updated_at  INTEGER NOT NULL,
+        PRIMARY KEY (sub, kind)
+      )`);
+      db.pragma('user_version = 14');
+    })();
+  }
   return db;
 }

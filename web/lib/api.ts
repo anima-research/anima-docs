@@ -97,10 +97,13 @@ export interface Thread {
   resolved: boolean;
   resolvedBy: ThreadPerson | null;
   assignee: ThreadPerson | null;
+  /** The thread is a signature or initials field on a page of a PDF in a collection (box in fractions of the page). */
+  field?: FileField | null;
   comments: ThreadComment[];
   /** Set when the thread is a suggestion: replace the anchored original with text. */
   suggestion: ThreadSuggestion | null;
 }
+export interface FileField { kind: 'signature' | 'initials'; path: string; page: number; x: number; y: number; w: number; h: number }
 export interface ThreadSuggestion {
   original: string;
   text: string;

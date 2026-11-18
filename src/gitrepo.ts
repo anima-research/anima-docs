@@ -74,6 +74,8 @@ export class GitRepos {
   private chains = new Map<string, Promise<unknown>>();
   /** Collections with changes not yet committed: who made them, and the timer that will commit. */
   private waiting = new Map<string, { by: Set<string>; timer: NodeJS.Timeout }>();
+  /** Set while this writes a collection's .gitattributes itself: the repository's own file is nobody's change. */
+  private writingOwn = false;
   /** Pushes being received: the key their hook presents → the collection. */
   private pushes = new Map<string, string>();
 
@@ -171,7 +173,7 @@ export class GitRepos {
 
   /** A collection's files changed (the browser, a tool): commit once things have been quiet for a moment. */
   changed(docId: string, by: string) {
-    if (!this.available) return;
+    if (!this.available || this.writingOwn) return;
     const was = this.waiting.get(docId);
     if (was) clearTimeout(was.timer);
     const timer = setTimeout(() => void this.flush(docId).catch((e) => console.error('[git] commit failed', docId, (e as Error).message)), this.opts.settleMs ?? 5000);
@@ -263,7 +265,10 @@ export class GitRepos {
 
       // The attributes file, when this commit wrote or changed it, is a file of the collection like any other.
       let attrsMedia = attrsRow?.mediaId ?? null;
-      if (attrs !== null && (!attrsRow || attrs !== (this.files.text(docId, ATTRIBUTES) ?? ''))) attrsMedia = this.files.put(docId, ATTRIBUTES, Buffer.from(attrs), by, { maxBytes: this.opts.maxBytes }).mediaId;
+      if (attrs !== null && (!attrsRow || attrs !== (this.files.text(docId, ATTRIBUTES) ?? ''))) {
+        this.writingOwn = true;
+        try { attrsMedia = this.files.put(docId, ATTRIBUTES, Buffer.from(attrs), by, { maxBytes: this.opts.maxBytes }).mediaId; } finally { this.writingOwn = false; }
+      }
 
       const treeOid = (await this.run(dir, ['write-tree'], { env })).toString().trim();
       let commit = head;

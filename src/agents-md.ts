@@ -71,8 +71,10 @@ collections** (\`create_document {"type": "files"}\`: files in folders, such as 
 that people browse, upload to and download from; \`list_files\` with a folder, \`read_file\` (a PDF reads as
 its text, by page), \`attach_file\`, \`move_file\`, \`remove_file\`, \`search\` inside it, \`versions\` and
 \`restore_version\` for its history; each file is at \`/p/<id>/<path>\`; the whole collection is a git repository
-at \`/git/<id>.git\`, with your token as the password, large files through Git LFS), and wikis (a space
-published read-only). Create a page with \`create_document {"type": "html", "content": …,
+at \`/git/<id>.git\`, with your token as the password, large files through Git LFS; to ask a person to sign a
+PDF there, \`add_comment {"field": "signature", "file": …, "near": "Signature:", "assign_to": "@Name"}\`
+marks the place, and you hear in that thread when they have signed), and wikis (a space published
+read-only). Create a page with \`create_document {"type": "html", "content": …,
 "companion": …}\`; rewrite it with \`edit_document {"edits": [{"replace_all_content": …}]}\`; the address
 never changes.
 `;

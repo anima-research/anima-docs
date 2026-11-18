@@ -80,6 +80,8 @@ export class CommentsRail {
     coords?: () => Coords;
     /** The suggesting session, while you're suggesting. */
     session?: () => SuggestSession | null;
+    /** Open the PDF a signature or initials field is on. */
+    openField?: (path: string) => void;
   }) {
     this.headEl = h('div.rail-head');
     this.searchEl = h('input.input.sm.rail-search-input', { type: 'search', placeholder: 'Search comments', 'aria-label': 'Search comments', autocomplete: 'off' });
@@ -662,6 +664,11 @@ export class CommentsRail {
         this.canComment ? h('button.link-btn', { type: 'button', onclick: () => void this.op({ type: 'comment.resolve', comment: t.id, resolved: false }) }, 'Reopen') : null));
     }
     if (t.suggestion) { /* rendered above */ }
+    else if (t.field) {
+      const f = t.field;
+      parts.push(h('button.card-banner.card-field', { type: 'button', onclick: (e: MouseEvent) => { e.stopPropagation(); this.deps.openField?.(f.path); } },
+        icon(f.kind === 'signature' ? 'suggest' : 'tag', 14), `${f.kind === 'signature' ? 'Signature' : 'Initials'} ${t.resolved ? '' : 'needed '}on page ${f.page} of ${f.path.slice(f.path.lastIndexOf('/') + 1)}`));
+    }
     else if (!t.rel) parts.push(h('div.card-banner', null, icon('file', 14), 'On the whole document'));
     else if (orphan) parts.push(h('div.card-quote-wrap', null, h('div.card-banner.warn', null, icon('alert', 14), 'The text this was on was deleted'), t.quote ? h('blockquote.card-quote.struck', null, t.quote) : null));
     else if (this.layout === 'drawer' && t.quote) parts.push(h('blockquote.card-quote', null, t.quote));

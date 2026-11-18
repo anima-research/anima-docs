@@ -112,6 +112,7 @@ const STATIC: Record<string, [string, string]> = {
   '/icon-maskable-512.png': ['icon-maskable-512.png', 'image/png'],
   '/apple-touch-icon.png': ['apple-touch-icon.png', 'image/png'],
   '/page-annotate.js': ['page-annotate.js', 'text/javascript; charset=utf-8'],
+  '/pdfsign.js': ['pdfsign.js', 'text/javascript; charset=utf-8'],
 };
 
 const staticCache = new Map<string, { mtime: number; raw: Buffer; gz: Buffer | null; br: Buffer | null; brPending?: boolean }>();
@@ -756,6 +757,27 @@ export function createHttp(app: App) {
             publicLink: app.docs.hasPublicLink(id),
             role: app.docs.role(id, a), rev: d.rev, updatedAt: d.updatedAt, createdAt: d.createdAt, openComments: app.comments.openCount(id), present: realtime.presence(id) };
         };
+        // A person's own signature and initials (a PNG each), for signing PDFs in the browser: theirs alone. Only a
+        // browser session reaches it: no token does, so no agent ever holds anyone's signature.
+        const sg = /^\/api\/me\/(signature|initials)$/.exec(path);
+        if (sg) {
+          if (req.headers.authorization || !webSession(req) || isGuest(a.sub)) throw new Fault(403, 'A signature is kept and used only by its owner, signed in, in the browser.');
+          const row = app.db.prepare('SELECT png, updated_at FROM signatures WHERE sub = ? AND kind = ?').get(a.sub, sg[1]) as { png: Buffer; updated_at: number } | undefined;
+          if (method === 'GET') {
+            if (!row) throw new Fault(404, 'None yet.');
+            res.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': row.png.length, 'Cache-Control': 'private, no-store' });
+            res.end(row.png);
+            return;
+          }
+          if (method === 'DELETE') { app.db.prepare('DELETE FROM signatures WHERE sub = ? AND kind = ?').run(a.sub, sg[1]); send(200, { ok: true }); return; }
+          if (method === 'PUT') {
+            const png = await readBody(req, 512 * 1024);
+            if (png.length < 24 || png.readUInt32BE(0) !== 0x89504e47) throw new Fault(415, 'A signature is saved as a PNG image.');
+            app.db.prepare('INSERT INTO signatures (sub, kind, png, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(sub, kind) DO UPDATE SET png = excluded.png, updated_at = excluded.updated_at').run(a.sub, sg[1], png, Date.now());
+            send(200, { ok: true });
+            return;
+          }
+        }
         // A person's password for git: one each, shown once when made; a new one ends the old.
         if (path === '/api/git/password' && (method === 'POST' || method === 'DELETE')) {
           const s = webSession(req);
@@ -1061,7 +1083,11 @@ export function createHttp(app: App) {
       if (method !== 'GET' && method !== 'HEAD') throw new Fault(405, 'Method not allowed.');
       // KaTeX's stylesheet and fonts (copied into public/katex by the web build); on wiki hosts too.
       const km = /^\/katex\/(katex\.min\.css|fonts\/KaTeX_[A-Za-z0-9-]+\.(?:woff2|woff|ttf))$/.exec(path);
-      const st = km ? [`katex/${km[1]}`, km[1].endsWith('.css') ? 'text/css; charset=utf-8' : km[1].endsWith('.woff2') ? 'font/woff2' : km[1].endsWith('.woff') ? 'font/woff' : 'font/ttf'] as [string, string] : STATIC[path];
+      // pdf.js's worker, character maps and standard fonts (copied into public/pdfjs by the web build).
+      const pj = /^\/pdfjs\/(pdf\.worker\.min\.mjs|(?:cmaps|standard_fonts)\/[A-Za-z0-9._-]+)$/.exec(path);
+      const st = km ? [`katex/${km[1]}`, km[1].endsWith('.css') ? 'text/css; charset=utf-8' : km[1].endsWith('.woff2') ? 'font/woff2' : km[1].endsWith('.woff') ? 'font/woff' : 'font/ttf'] as [string, string]
+        : pj ? [`pdfjs/${pj[1]}`, pj[1].endsWith('.mjs') ? 'text/javascript; charset=utf-8' : pj[1].endsWith('.ttf') ? 'font/ttf' : 'application/octet-stream'] as [string, string]
+          : STATIC[path];
       if (st) {
         const file = join(PUBLIC_DIR, st[0]);
         if (!existsSync(file)) throw new Fault(404, 'Not built. Run npm run build:web.');

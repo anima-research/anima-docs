@@ -15,6 +15,7 @@ import { createHmac, randomBytes } from 'node:crypto';
 import type { App } from './app.js';
 import { Fault } from './auth.js';
 import { MAX_SUGGESTION, pointContext } from './comments.js';
+import { cleanField, fieldFile } from './fields.js';
 import { isGuest, type Actor } from './principals.js';
 import { atLeast, type Role, type DocChange } from './documents.js';
 import type { CommentEvent } from './comments.js';
@@ -263,7 +264,9 @@ export class Realtime {
       switch (m.type) {
         case 'comment.create': {
           const anchor = m.anchor ? this.anchorFromClient(room, m.anchor) : null;
-          const r = C.create(room.docId, actor, { body: m.body, anchor, assignee: m.assignee ?? null });
+          // A signature or initials field on a PDF of a collection: its box comes from where the person drew it.
+          const field = m.field ? cleanField({ ...m.field, path: fieldFile(this.app, room.docId, String(m.field.path ?? '')).path }) : null;
+          const r = C.create(room.docId, actor, { body: m.body ?? '', anchor, assignee: m.assignee ?? null, field });
           reply(true, { id: r.comment.id, warnings: warn(r.warnings) }); return;
         }
         case 'comment.reply': { const r = C.reply(m.comment, actor, m.body, { resolve: !!m.resolve }); reply(true, { id: r.comment.id, warnings: warn(r.warnings) }); return; }
@@ -443,6 +446,7 @@ export class Realtime {
       resolved: !!t.root.resolvedAt,
       resolvedBy: person(t.root.resolvedBy),
       assignee: person(t.root.assignee),
+      field: t.root.field,
       comments: [t.root, ...t.replies].map((c) => ({ id: c.id, author: person(c.author), body: c.body, createdAt: c.createdAt, editedAt: c.editedAt, mentions: c.mentions })),
       suggestion: t.suggestion
         ? {
