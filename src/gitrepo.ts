@@ -46,11 +46,10 @@ const LFS_EXTS = ['pdf', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'heic', 'h
 const anyCase = (ext: string) => [...ext].map((c) => (/[a-z]/.test(c) ? `[${c}${c.toUpperCase()}]` : c)).join('');
 export const DEFAULT_ATTRIBUTES = `# Files of these kinds are kept with Git LFS (https://git-lfs.com): install it before cloning.\n# Anima Docs adds a line here for any other file over ${BLOB_MAX / 1024 / 1024} MB.\n${LFS_EXTS.map((e) => `*.${anyCase(e)} ${LFS_ATTR}`).join('\n')}\n`;
 /**
- * A line that makes exactly this path an LFS object. Two layers, on purpose: the path is first made a literal
- * pattern (glob characters escaped), and the pattern is then written as a quoted string (backslashes and quotes
- * escaped), which is how .gitattributes takes a pattern with spaces in it. git undoes them in the reverse order.
+ * A line that makes exactly this path an LFS object, written the way `git lfs track` writes one: glob characters
+ * escaped, and each space as [[:space:]] (a space would end the pattern).
  */
-const exactAttribute = (path: string) => `"/${path.replace(/[\\*?[]/g, '\\$&').replace(/[\\"]/g, '\\$&')}" ${LFS_ATTR}`;
+const exactAttribute = (path: string) => `/${path.replace(/[*?[]/g, '\\$&').replace(/\s/g, '[[:space:]]')} ${LFS_ATTR}`;
 
 export const lfsPointer = (oid: string, size: number) => `version https://git-lfs.github.com/spec/v1\noid sha256:${oid}\nsize ${size}\n`;
 export function parsePointer(b: Buffer): { oid: string; size: number } | null {

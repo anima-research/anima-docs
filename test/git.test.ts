@@ -98,7 +98,7 @@ test('changes made in the browser are commits; a clone has the files, the large 
   assert.equal(readFileSync(join(repo, 'empty.txt')).length, 0);
   // Which files are LFS objects is what .gitattributes says: kinds by pattern, and the one large file by its own line.
   const attrs = readFileSync(join(repo, '.gitattributes'), 'utf8');
-  assert.ok(attrs.includes('*.[pP][nN][gG] filter=lfs') && attrs.includes('"/data/Été — all \\\\[raw] runs.csv" filter=lfs'), attrs.split('\n').slice(-3).join('\n'));
+  assert.ok(attrs.includes('*.[pP][nN][gG] filter=lfs') && attrs.includes('/data/Été[[:space:]]—[[:space:]]all[[:space:]]\\[raw][[:space:]]runs.csv filter=lfs'), attrs.split('\n').slice(-3).join('\n'));
   const tracked = (await git(repo, ['lfs', 'ls-files', '--name-only'])).trim().split('\n').sort();
   assert.deepEqual(tracked, ['data/Été — all [raw] runs.csv', 'photos/Island at dusk.png']);
   assert.equal(await git(repo, ['status', '--porcelain']), '', 'a fresh clone is clean: nothing "should have been a pointer"');
