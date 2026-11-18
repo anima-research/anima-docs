@@ -289,7 +289,7 @@ export class NavPanel {
         oncontextmenu: (e: MouseEvent) => { e.preventDefault(); this.contextMenu(e, id, parent, index); },
       },
         tri, h('span.nav-name', { class: n?.section ? 'nameless' : '' }, n ? (n.section ? 'section' : n.title || 'Untitled') : id),
-        n?.type === 'html' ? h('span.type-chip', { 'data-tip': 'An HTML page' }, 'HTML') : null,
+        n?.type === 'html' ? h('span.type-chip', { 'data-tip': 'An HTML page' }, 'HTML') : n?.type === 'files' ? h('span.type-chip', { 'data-tip': 'A file collection' }, 'Files') : null,
         canArrange ? h('button.nav-act.nav-add', { type: 'button', 'aria-label': 'New subpage', 'data-tip': 'New subpage', onclick: (e: MouseEvent) => { e.stopPropagation(); void this.newSubpage(id); } }, '+') : null,
         h('button.nav-act.nav-more', { type: 'button', 'aria-label': 'Page actions', 'aria-haspopup': 'menu', onclick: (e: MouseEvent) => { e.stopPropagation(); this.contextMenu(e, id, parent, index); } }, '⋯'));
       if (canArrange) this.wireDrag(el, id, parent, index);

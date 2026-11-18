@@ -8,7 +8,7 @@ import { splitHunks } from './hunks.js';
 import { quoteText, suggestionSummary, type Thread } from './comments.js';
 import { atLeast, type Role } from './documents.js';
 import { Media, fetchImage } from './media.js';
-import { COMPANION, isTextMime, jsonPointer } from './files.js';
+import { COLLECTION, COMPANION, isTextMime, jsonPointer } from './files.js';
 import { textChanges } from './diff.js';
 import { findSections, lineOf, lineStarts, outline, withLineNumbers, images } from './markdown.js';
 import { BASE_SETTINGS, WATCH_PRESET, type WatchSettings } from './attention.js';
@@ -50,9 +50,39 @@ function describeKind(app: App, d: { id: string; title: string; type: string }):
     const others = files.filter((f) => f.path !== COMPANION).length;
     return ` It is an HTML page, rendered at ${app.config.origin}/p/${d.id}; read_document returns ${companion ? 'its markdown companion (index.md)' : 'its source (it has no index.md companion yet)'}${others ? `; ${others} attached file${others === 1 ? '' : 's'} (list_files, read_file)` : ''}.`;
   }
+  if (d.type === COLLECTION) {
+    const n = app.files.count(d.id);
+    return ` It is a file collection: its content is its files (${n.files} of them, ${size(n.bytes)}), in folders. list_files shows a folder, read_file reads a file, attach_file adds or replaces one, move_file renames or moves, remove_file deletes. People browse it at ${app.config.origin}/d/${d.id}.`;
+  }
   if (d.type === 'latex') return ' It is a LaTeX node (each paragraph renders as a display formula).';
   if (d.type === 'text') return ' It is a plain-text node (rendered verbatim).';
   return '';
+}
+
+function size(n: number): string {
+  return n < 1024 ? `${n} bytes` : n < 1024 * 1024 ? `${(n / 1024).toFixed(1)} KB` : n < 1024 ** 3 ? `${(n / 1024 / 1024).toFixed(1)} MB` : `${(n / 1024 ** 3).toFixed(2)} GB`;
+}
+
+/** One folder of a document's files: its subfolders (with what they hold) and its own files. */
+function folderListing(app: App, id: string, folder: string): string {
+  const all = app.files.list(id, folder || undefined);
+  const base = folder ? `${folder}/` : '';
+  const dirs = new Map<string, { files: number; bytes: number }>();
+  const here: typeof all = [];
+  for (const f of all) {
+    const rest = f.path.slice(base.length);
+    const cut = rest.indexOf('/');
+    if (cut < 0) { here.push(f); continue; }
+    const d = dirs.get(rest.slice(0, cut)) ?? { files: 0, bytes: 0 };
+    d.files++; d.bytes += f.size;
+    dirs.set(rest.slice(0, cut), d);
+  }
+  const lines = [
+    ...[...dirs].map(([name, d]) => `${base}${name}/  folder, ${d.files} file${d.files === 1 ? '' : 's'}, ${size(d.bytes)}`),
+    ...here.map((f) => `${f.path}  ${f.mime.split(';')[0]}  ${f.size} bytes  ${new Date(f.updatedAt).toISOString()}`),
+  ];
+  const cap = 400;
+  return lines.length > cap ? `${lines.slice(0, cap).join('\n')}\n… ${lines.length - cap} more here; list a subfolder to narrow.` : lines.join('\n');
 }
 
 function need(args: Record<string, any>, key: string): string {
@@ -277,7 +307,7 @@ export const TOOLS: ToolDef[] = [
       return text(list.map((d) => {
         const sug = app.comments.openSuggestionCount(d.id);
         const open = app.comments.openCount(d.id) - sug;
-        return `${d.id}  “${d.title}”${d.type !== 'markdown' ? ` [${d.type === 'html' ? 'HTML page' : d.type}]` : ''} — you: ${d.role}; owner ${app.principals.label(d.ownerSub)}; updated ${ago(d.updatedAt)}; rev ${d.rev}${open ? `; ${open} open comment${open === 1 ? '' : 's'}` : ''}${sug ? `; ${sug} open suggestion${sug === 1 ? '' : 's'}` : ''}`;
+        return `${d.id}  “${d.title}”${d.type !== 'markdown' ? ` [${d.type === 'html' ? 'HTML page' : d.type === COLLECTION ? 'file collection' : d.type}]` : ''} — you: ${d.role}; owner ${app.principals.label(d.ownerSub)}; updated ${ago(d.updatedAt)}; rev ${d.rev}${open ? `; ${open} open comment${open === 1 ? '' : 's'}` : ''}${sug ? `; ${sug} open suggestion${sug === 1 ? '' : 's'}` : ''}`;
       }).join('\n'));
     },
   },
@@ -297,6 +327,12 @@ export const TOOLS: ToolDef[] = [
     run(app, actor, a) {
       const id = need(a, 'document');
       const { doc, role } = app.docs.require(id, actor, 'viewer');
+      if (doc.type === COLLECTION) {
+        // A collection reads as what it holds: the top folder, and how to go further.
+        app.attention.markRead(actor.sub, id, {});
+        const n = app.files.count(id);
+        return text(`“${doc.title}” (${id}) is a file collection: ${n.files} file${n.files === 1 ? '' : 's'}, ${size(n.bytes)}; you are ${role}; owner ${app.principals.label(doc.ownerSub)}; updated ${ago(doc.updatedAt)}.\nlist_files with folder shows a folder; read_file reads a file; files are also at ${app.config.origin}/p/${id}/<path>.\n\n${n.files ? folderListing(app, id, '') : 'It is empty. attach_file adds a file.'}`);
+      }
       if (doc.type === 'html' && !a.raw) {
         // An HTML page reads as its companion (what it is, where its data lives) plus its files; the source is a raw: true away.
         const files = app.files.list(id);
@@ -512,10 +548,10 @@ export const TOOLS: ToolDef[] = [
   // ------------------------------------------------------------------ docs.write
   {
     name: 'create_document', featureSet: 'docs.write', toolClass: 'notes',
-    description: 'Create a document: markdown (default), or an HTML page (type "html": a whole page with its own styles and scripts, served as itself at /p/<id> in a sandbox — the way to publish an app, a visualisation or a report; keep it self-contained, inline CSS/JS, images as data: URIs or uploads; edit it later with edit_document, e.g. replace_all_content). You become its owner and start watching it (edits quiet, comments wake). Optionally share it at once; create_link gives an address anyone can open.',
+    description: 'Create a document: markdown (default), or an HTML page (type "html": a whole page with its own styles and scripts, served as itself at /p/<id> in a sandbox — the way to publish an app, a visualisation or a report; keep it self-contained, inline CSS/JS, images as data: URIs or uploads; edit it later with edit_document, e.g. replace_all_content), or a file collection (type "files": a place for files in folders, such as PDFs, photos or datasets, that people browse, upload to and download from; fill it with attach_file). You become its owner and start watching it (edits quiet, comments wake). Optionally share it at once; create_link gives an address anyone can open.',
     inputSchema: { type: 'object', required: ['title'], properties: {
       title: S('Document title.'), content: S('Initial content: markdown, or the full HTML for an html page.'),
-      type: S('markdown (default), html, latex or text.', { enum: ['markdown', 'html', 'latex', 'text'] }),
+      type: S('markdown (default), html, latex, text or files.', { enum: ['markdown', 'html', 'latex', 'text', 'files'] }),
       companion: S('For an html page: a markdown description of the page (what it shows, where its data lives) stored as its index.md; read_document returns it instead of the HTML, and /p/<id>?format=md serves it.'),
       share_with: { type: 'array', items: { type: 'object', required: ['who', 'role'], properties: { who: S('@Name or principal id'), role: S('viewer, commenter or editor', { enum: ['viewer', 'commenter', 'editor'] }) } } },
     } },
@@ -626,11 +662,15 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: 'list_files', featureSet: 'docs.read', toolClass: 'notes',
-    description: 'The files attached to a document, with sizes and types.',
-    inputSchema: { type: 'object', required: ['document'], properties: { ...docArg } },
+    description: 'The files attached to a document, with sizes and types. For a file collection: one folder at a time (its subfolders and its files).',
+    inputSchema: { type: 'object', required: ['document'], properties: { ...docArg, folder: S('For a file collection: the folder to list, e.g. "papers/2024" (default: the top).') } },
     run(app, actor, a) {
       const id = need(a, 'document');
-      app.docs.require(id, actor, 'viewer');
+      const { doc } = app.docs.require(id, actor, 'viewer');
+      if (doc.type === COLLECTION) {
+        const folder = typeof a.folder === 'string' && a.folder.replace(/^\/+|\/+$/g, '') ? app.files.path(id, a.folder) : '';
+        return text(folderListing(app, id, folder) || (folder ? `Nothing in ${folder}.` : 'No files yet.'));
+      }
       const files = app.files.list(id);
       return text(files.length ? files.map((f) => `${f.path}  ${f.mime.split(';')[0]}  ${f.size} bytes  ${new Date(f.updatedAt).toISOString()}  → ${app.config.origin}/p/${id}/${f.path}`).join('\n') : 'No files attached.');
     },
@@ -638,11 +678,23 @@ export const TOOLS: ToolDef[] = [
   {
     name: 'remove_file', featureSet: 'docs.write', toolClass: 'notes',
     description: 'Remove an attached file.',
-    inputSchema: { type: 'object', required: ['document', 'path'], properties: { ...docArg, path: S('The file\'s path.') } },
+    inputSchema: { type: 'object', required: ['document', 'path'], properties: { ...docArg, path: S('The file\'s path.'), folder: { type: 'boolean', description: 'In a file collection: path is a folder; remove it with everything in it.' } } },
     run(app, actor, a) {
       const id = need(a, 'document');
       app.docs.require(id, actor, 'editor');
+      if (a.folder) { const n = app.files.removeFolder(id, need(a, 'path')); return text(n ? `Removed ${a.path} (${n} file${n === 1 ? '' : 's'}).` : `No folder ${a.path}.`); }
       return text(app.files.remove(id, need(a, 'path')) ? `Removed ${a.path}.` : `No file ${a.path}.`);
+    },
+  },
+  {
+    name: 'move_file', featureSet: 'docs.write', toolClass: 'notes',
+    description: 'Rename or move an attached file; in a file collection also a folder, with everything in it. Nothing is overwritten: if the destination exists, the move is refused.',
+    inputSchema: { type: 'object', required: ['document', 'from', 'to'], properties: { ...docArg, from: S('The current path of the file or folder.'), to: S('Its new path.') } },
+    run(app, actor, a) {
+      const id = need(a, 'document');
+      app.docs.require(id, actor, 'editor');
+      const n = app.files.move(id, need(a, 'from'), need(a, 'to'), actor.sub);
+      return text(n === 1 ? `Moved ${a.from} to ${a.to}.` : `Moved ${a.from} to ${a.to} (${n} files).`);
     },
   },
   {

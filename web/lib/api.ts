@@ -14,7 +14,8 @@ export interface Presence { name: string; kind: Kind; color: string }
 /** Guests: people who opened an "anyone with the link" share link without signing in. */
 export const isGuestMe = (me: Pick<Me, 'kind'> | null | undefined) => me?.kind === 'guest';
 
-export type NodeType = 'markdown' | 'html' | 'latex' | 'text';
+/** 'files' is a file collection: the page is its files. */
+export type NodeType = 'markdown' | 'html' | 'latex' | 'text' | 'files';
 
 export interface DocSummary {
   id: string;
@@ -191,6 +192,8 @@ export const api = {
   files: (id: string) => call<{ files: DocFile[] }>('GET', `/api/docs/${encodeURIComponent(id)}/files`),
   putFile: (id: string, path: string, body: Blob) => call<DocFile>('PUT', `/api/docs/${encodeURIComponent(id)}/files/${path.split('/').map(encodeURIComponent).join('/')}`, body, { headers: { 'Content-Type': body.type || 'application/octet-stream' } }),
   deleteFile: (id: string, path: string) => call<{ removed: boolean }>('DELETE', `/api/docs/${encodeURIComponent(id)}/files/${path.split('/').map(encodeURIComponent).join('/')}`),
+  deleteFolder: (id: string, path: string) => call<{ removed: number }>('DELETE', `/api/docs/${encodeURIComponent(id)}/files/${path.split('/').map(encodeURIComponent).join('/')}?folder=1`),
+  moveFile: (id: string, from: string, to: string) => call<{ moved: number }>('POST', `/api/docs/${encodeURIComponent(id)}/files/move`, { from, to }),
   share: (id: string, who: string, role: Role | 'none') => call<{ ok: true }>('POST', `/api/docs/${encodeURIComponent(id)}/share`, { who, role }),
   versions: (id: string) => call<{ versions: Version[] }>('GET', `/api/docs/${encodeURIComponent(id)}/versions`),
   saveVersion: (id: string, name: string) => call<{ id: string; rev: number }>('POST', `/api/docs/${encodeURIComponent(id)}/versions`, { name }),

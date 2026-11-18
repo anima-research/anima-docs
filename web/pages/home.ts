@@ -99,9 +99,10 @@ export function mountHome(root: HTMLElement, me: Me): () => void {
     const present = d.present.filter((p) => p.name !== me.name || p.color !== me.color);
     return h('a.doc-row', { href: `/d/${d.id}`, 'data-link': '', role: 'listitem' },
       h('span.c-title', null,
-        h('span.doc-icon', { 'aria-hidden': 'true' }, icon(d.type === 'html' ? 'code' : 'file', 20)),
+        h('span.doc-icon', { 'aria-hidden': 'true' }, icon(d.type === 'html' ? 'code' : d.type === 'files' ? 'folder' : 'file', 20)),
         h('span.doc-title-text', null, d.title),
         d.type === 'html' ? h('span.role-chip.type-chip', { 'data-tip': 'An HTML page' }, 'HTML') : null,
+        d.type === 'files' ? h('span.role-chip.type-chip', { 'data-tip': 'A file collection' }, 'Files') : null,
         !guest && d.publicLink ? h('span.access-chip.public', { 'data-tip': 'Anyone with a link can open this', 'aria-label': 'Anyone with a link can open this' }, icon('globe', 13)) : null,
         !guest && d.generalAccess !== 'restricted' ? h('span.access-chip.members', { 'data-tip': `Archipelago members can ${ROLE_VERB[d.generalAccess]}`, 'aria-label': `Archipelago members can ${ROLE_VERB[d.generalAccess]}` }, icon('users', 13)) : null,
         d.role !== 'owner' && d.role !== 'editor' ? h('span.role-chip', null, d.role === 'commenter' ? 'Can comment' : 'View only') : null),
@@ -145,17 +146,18 @@ export function mountHome(root: HTMLElement, me: Me): () => void {
     }, h('span.template-thumb', { 'aria-hidden': 'true', class: `tpl-${tp.id}` }, h('span'), h('span'), h('span'), h('span')), h('span.template-name', null, tp.name), h('span.template-desc', null, tp.desc))));
     drawGrid();
     // A markdown document, or an HTML page (served as itself, scripts and all, in a sandbox).
-    let kind: 'markdown' | 'html' = 'markdown';
+    let kind: 'markdown' | 'html' | 'files' = 'markdown';
     const kindRow = h('div.radio-row', { role: 'radiogroup', 'aria-label': 'Kind' },
       h('label.radio', null, h('input', { type: 'radio', name: 'kind', value: 'markdown', checked: true, onchange: () => { kind = 'markdown'; grid.hidden = false; } }), h('span', null, h('strong', null, 'Document'), ' ', h('span.meta', null, 'markdown, sections, comments'))),
-      h('label.radio', null, h('input', { type: 'radio', name: 'kind', value: 'html', onchange: () => { kind = 'html'; grid.hidden = true; } }), h('span', null, h('strong', null, 'HTML page'), ' ', h('span.meta', null, 'a whole page with its own styles and scripts'))));
+      h('label.radio', null, h('input', { type: 'radio', name: 'kind', value: 'html', onchange: () => { kind = 'html'; grid.hidden = true; } }), h('span', null, h('strong', null, 'HTML page'), ' ', h('span.meta', null, 'a whole page with its own styles and scripts'))),
+      h('label.radio', null, h('input', { type: 'radio', name: 'kind', value: 'files', onchange: () => { kind = 'files'; grid.hidden = true; } }), h('span', null, h('strong', null, 'File collection'), ' ', h('span.meta', null, 'files in folders: PDFs, photos, data'))));
     const HTML_START = '<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n<meta name="viewport" content="width=device-width, initial-scale=1">\n<title>Untitled page</title>\n<style>\n  body { font: 16px/1.5 system-ui, sans-serif; margin: 40px auto; max-width: 720px; padding: 0 16px; }\n</style>\n</head>\n<body>\n<h1>Untitled page</h1>\n<p>Edit the HTML on the left; the page shows on the right.</p>\n</body>\n</html>\n';
     const create = h('button.btn.primary', { type: 'button' }, 'Create');
     const submit = async () => {
       create.disabled = true;
       try {
-        const title = titleIn.value.trim() || (kind === 'html' ? 'Untitled page' : 'Untitled document');
-        const d = kind === 'html' ? await api.createDoc(title, HTML_START.replace(/Untitled page/g, title.replace(/[<&]/g, '')), 'html') : await api.createDoc(title, template.content || undefined);
+        const title = titleIn.value.trim() || (kind === 'html' ? 'Untitled page' : kind === 'files' ? 'Untitled collection' : 'Untitled document');
+        const d = kind === 'html' ? await api.createDoc(title, HTML_START.replace(/Untitled page/g, title.replace(/[<&]/g, '')), 'html') : kind === 'files' ? await api.createDoc(title, undefined, 'files') : await api.createDoc(title, template.content || undefined);
         dlg.close();
         navigate(`/d/${d.id}`);
       } catch (e) { toast(errorMessage(e), { kind: 'error' }); create.disabled = false; }

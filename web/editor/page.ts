@@ -6,9 +6,8 @@ import { EditorView, drawSelection, dropCursor, highlightSpecialChars, keymap, p
 import { defaultKeymap, history, historyKeymap, indentWithTab, redo as cmRedo, undo as cmUndo } from '@codemirror/commands';
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown';
 import { html as htmlLanguage } from '@codemirror/lang-html';
-import { HighlightStyle, syntaxHighlighting, syntaxTree } from '@codemirror/language';
+import { syntaxHighlighting, syntaxTree } from '@codemirror/language';
 import { openSearchPanel, search, searchKeymap } from '@codemirror/search';
-import { tags as t } from '@lezer/highlight';
 
 import { api, ApiError, atLeast, isGuestMe, signalUnauthorized, ROLE_LABEL, ROLE_VERB, type DocDetail, type GeneralAccess, type LinkPeek, type Me, type NodeType, type Role, type Thread, type TreeRoot } from '../lib/api';
 import { debounce, h, modKey, altKey, rafThrottle, isMac } from '../lib/dom';
@@ -18,6 +17,8 @@ import { renderDocument } from '../lib/markdown';
 import { embedOf, wrapByType } from '../../src/mdext';
 import { findQuote, indexSource, indexedText } from '../../src/quote';
 import { openFilesDialog } from './files';
+import { docHighlight } from './codestyle';
+import { collectionView, type CollectionView } from './collection';
 import { followLinks } from './followlinks';
 import { annotationLayer, type AnnotationLayer } from './annotate';
 import { searchPeople } from '../lib/people';
@@ -47,30 +48,6 @@ const MAX_IMAGE = 15 * 1024 * 1024;
 /** Other files (audio, video, documents); the server's DOCS_UPLOAD_MAX_MB is the real limit. */
 const MAX_FILE = 300 * 1024 * 1024;
 const isImageFile = (f: File) => /^image\/(png|jpeg|gif|webp)$/.test(f.type);
-
-const docHighlight = HighlightStyle.define([
-  { tag: t.heading, class: 'tok-heading' },
-  { tag: t.strong, class: 'tok-strong' },
-  { tag: t.emphasis, class: 'tok-em' },
-  { tag: t.strikethrough, class: 'tok-strike' },
-  { tag: t.link, class: 'tok-link' },
-  { tag: t.url, class: 'tok-url' },
-  { tag: t.monospace, class: 'tok-mono' },
-  { tag: t.processingInstruction, class: 'tok-mark' },
-  { tag: t.quote, class: 'tok-quote' },
-  { tag: t.contentSeparator, class: 'tok-mark' },
-  { tag: t.labelName, class: 'tok-label' },
-  { tag: [t.keyword, t.operatorKeyword, t.modifier, t.controlKeyword], class: 'tok-kw' },
-  { tag: [t.string, t.special(t.string), t.regexp, t.character], class: 'tok-str' },
-  { tag: [t.number, t.bool, t.null, t.atom], class: 'tok-num' },
-  { tag: [t.comment, t.lineComment, t.blockComment], class: 'tok-comment' },
-  { tag: [t.function(t.variableName), t.function(t.propertyName)], class: 'tok-fn' },
-  { tag: [t.typeName, t.className, t.namespace], class: 'tok-type' },
-  { tag: [t.propertyName, t.attributeName], class: 'tok-prop' },
-  { tag: t.tagName, class: 'tok-tag' },
-  { tag: [t.meta, t.escape], class: 'tok-meta' },
-  { tag: t.invalid, class: 'tok-invalid' },
-]);
 
 const suggestPrefKey = (docId: string) => `docs.suggest.${docId}`;
 function loadSuggestPref(docId: string): boolean { try { return localStorage.getItem(suggestPrefKey(docId)) === '1'; } catch { return false; } }
@@ -380,7 +357,10 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   const previewPane = h('div.doc-scroll.preview-pane', { 'aria-label': 'Preview' }, previewCanvas, pageFrame);
   const overlay = h('div.doc-overlay', { hidden: true });
   const syncVeil = h('div.sync-veil', null, spinner(24), h('span', null, 'Loading document…'));
-  const body = h('div.doc-body', null, editPane, previewPane, overlay);
+  // A file collection shows its files instead of an editor (see collection.ts).
+  const filesPane = h('div.files-pane', { hidden: true });
+  let collection: CollectionView | null = null;
+  const body = h('div.doc-body', null, editPane, previewPane, filesPane, overlay);
   const app = h('div.doc-app', null, h('div.doc-chrome', null, header, h('div.doc-toolbar-wrap', null, toolbar)), body);
   pageEl.append(syncVeil);
   root.replaceChildren(app);
@@ -696,6 +676,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     if (!atLeast(role, 'commenter') && session) void setSuggesting(false);
     else if (role === 'commenter' && !session && provider.synced) void setSuggesting(true);
     refreshWriteUi();
+    collection?.setCanEdit(canEdit());
     titleInput.readOnly = !canEdit();
     titleInput.title = canEdit() ? 'Rename' : '';
     rolePill.textContent = canEdit() ? (role === 'owner' ? 'Owner' : 'Editing') : role === 'commenter' ? 'Commenting' : 'Viewing';
@@ -1197,10 +1178,16 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   const schedulePreview = () => (isHtml() ? schedulePreviewHtml() : schedulePreviewMd());
   // The live node info once the socket said hello; the fetched detail before that.
   const isHtml = () => (nodes.info.get(docId)?.type ?? detail.type ?? 'markdown') === 'html';
+  const isFiles = () => (nodes.info.get(docId)?.type ?? detail.type ?? 'markdown') === 'files';
   /** Apply the document's type: language, inline previews, toolbar and preview surface. */
   function applyDocType() {
     typeApplied = true;
     const html = isHtml();
+    const files = isFiles();
+    app.classList.toggle('files-doc', files);
+    filesPane.hidden = !files;
+    if (files && !collection) { collection = collectionView({ docId, canEdit: canEdit() }); filesPane.replaceChildren(collection.el); }
+    else if (!files && collection) { collection.destroy(); collection = null; filesPane.replaceChildren(); }
     app.classList.toggle('html-doc', html);
     view.dispatch({ effects: [langC.reconfigure(html ? htmlLanguage() : markdown({ base: markdownLanguage, codeLanguages, addKeymap: true })), liveC.reconfigure(html ? [] : livePreview)] });
     pageFrame.hidden = !html;
@@ -1294,7 +1281,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
 
   function computeLayout() {
     const wide = body.clientWidth >= 1180 - (panel.kind ? 0 : 0);
-    const margin = mode === 'edit' && wide && !listOpen && !panel.kind;
+    const margin = mode === 'edit' && wide && !listOpen && !panel.kind && !isFiles();
     rail.setLayout(margin ? 'margin' : 'drawer');
     if (margin) { if (rail.el.parentElement !== canvas) canvas.append(rail.el); }
     else if (rail.el.parentElement !== body) body.append(rail.el);
@@ -1322,7 +1309,8 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   binding.attach(view);
   // For tests and debugging: the live editor objects of the open page.
   applyDocType();
-  cleanups.push(nodes.onMeta((id) => { if (id === docId && app.classList.contains('html-doc') !== isHtml()) applyDocType(); }));
+  cleanups.push(nodes.onMeta((id) => { if (id === docId && (app.classList.contains('html-doc') !== isHtml() || app.classList.contains('files-doc') !== isFiles())) applyDocType(); }));
+  cleanups.push(() => collection?.destroy());
   (window as unknown as { __anima?: unknown }).__anima = { view, binding, nodes, nav: () => nav, docId, rail };
   cleanups.push(() => { delete (window as unknown as { __anima?: unknown }).__anima; });
 
@@ -1348,13 +1336,13 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     if (atLeast(role, 'commenter')) items.push({ label: 'Comment on whole document', icon: 'comment', onSelect: () => void rail.commentOnDocument() });
     if (atLeast(role, 'commenter') && !guest) items.push({ label: 'Ping an agent…', icon: 'bell', onSelect: () => pingAgent() });
     items.push('separator',
-      { label: 'Download as Markdown (.md)', icon: 'download', onSelect: () => { const a = h('a', { href: api.exportUrl(docId), download: '' }); document.body.append(a); a.click(); a.remove(); } },
+      ...(isFiles() ? [] : [{ label: 'Download as Markdown (.md)', icon: 'download', onSelect: () => { const a = h('a', { href: api.exportUrl(docId), download: '' }); document.body.append(a); a.click(); a.remove(); } }]),
       // A guest's /d/ address opens only for them: they copy the link they came through, or nothing.
       ...(guest && !shareUrl ? [] : [{ label: shareForAnyone ? 'Copy link (works for anyone)' : 'Copy link', icon: 'link', onSelect: () => { const url = shareUrl ?? `${location.origin}/d/${docId}`; void navigator.clipboard.writeText(url).then(() => toast('Link copied', { kind: 'success', timeout: 2000 }), () => toast(url)); } }]));
-    if (!guest) items.push({ label: 'Attached files…', icon: 'file', onSelect: () => openFilesDialog(docId, canEdit(), isHtml()) });
+    if (!guest && !isFiles()) items.push({ label: 'Attached files…', icon: 'file', onSelect: () => openFilesDialog(docId, canEdit(), isHtml()) });
     if (isHtml() && !guest) items.push({ label: shareForAnyone ? 'Copy page link (works for anyone)' : 'Copy page link', icon: 'link', onSelect: () => { const url = shareUrl ?? `${location.origin}/p/${docId}`; void navigator.clipboard.writeText(url).then(() => toast('Page link copied', { kind: 'success', timeout: 2000 }), () => toast(url)); } });
     if (canEdit() && !guest && !detail.section) items.push({ label: 'Add to a space…', icon: 'columns', onSelect: () => void addToSpace() });
-    if (canEdit()) items.push({ label: `Document type: ${labelOf(docId)?.type ?? 'markdown'}…`, icon: 'file', onSelect: () => typeMenu(docId, moreBtn) });
+    if (canEdit() && !isFiles()) items.push({ label: `Document type: ${labelOf(docId)?.type ?? 'markdown'}…`, icon: 'file', onSelect: () => typeMenu(docId, moreBtn) });
     if (nav.tree === docId && atLeast(role, 'owner')) items.push({ label: 'Stop being a space', icon: 'x', onSelect: () => void nav.dropTree() });
     if (atLeast(role, 'owner')) items.push('separator', { label: 'Delete document', icon: 'trash', danger: true, onSelect: () => void deleteDoc() });
     return items;

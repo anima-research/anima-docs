@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import { lookup } from 'node:dns';
 import { isIP } from 'node:net';
 import { Agent, fetch as undiciFetch } from 'undici';
+import sharp from 'sharp';
 import type { DB } from './db.js';
 import { Fault } from './auth.js';
 
@@ -81,27 +82,57 @@ export function dimensions(b: Buffer, mime: string): { width: number; height: nu
   return null;
 }
 
+/** The longest side of a thumbnail, in pixels (a grid tile at twice its size). */
+const THUMB_PX = 360;
+
 export class Media {
   private dir: string;
+  private thumbs: string;
+  private makingThumb = new Map<string, Promise<string | null>>();
   constructor(private db: DB, dataDir: string) {
     this.dir = join(dataDir, 'media');
+    this.thumbs = join(dataDir, 'thumbs');
     mkdirSync(this.dir, { recursive: true });
+  }
+
+  /**
+   * A small picture of a stored image, made the first time it is asked for and kept beside the
+   * media (it can always be made again). Null when the file is not an image that can be read.
+   */
+  thumb(id: string): Promise<string | null> {
+    const at = this.locate(id);
+    if (!at) return Promise.resolve(null);
+    const out = join(this.thumbs, `${id.slice(0, 32)}-${THUMB_PX}.webp`);
+    if (existsSync(out)) return Promise.resolve(out);
+    let making = this.makingThumb.get(id);
+    if (!making) {
+      mkdirSync(this.thumbs, { recursive: true });
+      const tmp = `${out}.${randomBytes(4).toString('hex')}.tmp`;
+      making = sharp(at.file, { failOn: 'none' }).rotate().resize(THUMB_PX, THUMB_PX, { fit: 'inside', withoutEnlargement: true }).webp({ quality: 78 }).toFile(tmp)
+        .then(() => { renameSync(tmp, out); return out as string | null; })
+        .catch(() => { rmSync(tmp, { force: true }); return null; })
+        .finally(() => this.makingThumb.delete(id));
+      this.makingThumb.set(id, making);
+    }
+    return making;
   }
 
   /**
    * Store an upload. `imagesOnly` is the image paths (toolbar, agents' insert_image): anything
    * else is refused there. Otherwise any file is kept: a sniffed type when known, or a plain
-   * download named after the original file.
+   * download named after the original file. `asFile` is a collection's file: an image there is a
+   * file like any other (the general size limit, not the one for images shown in documents), and
+   * a file may be empty.
    */
-  put(bytes: Buffer, uploader: string, docId: string | null, opts: { name?: string | null; imagesOnly?: boolean; maxBytes?: number } = {}): MediaInfo {
-    if (bytes.length === 0) throw new Fault(400, 'Empty file.');
+  put(bytes: Buffer, uploader: string, docId: string | null, opts: { name?: string | null; imagesOnly?: boolean; maxBytes?: number; asFile?: boolean } = {}): MediaInfo {
+    if (bytes.length === 0 && !opts.asFile) throw new Fault(400, 'Empty file.');
     const type = sniff(bytes);
     const name = cleanName(opts.name);
     if (opts.imagesOnly !== false) {
       if (!type || !IMAGE_MIMES.has(type.mime)) throw new Fault(415, 'Only PNG, JPEG, GIF and WebP images are accepted.');
       if (bytes.length > MAX_IMAGE_BYTES) throw new Fault(413, `Image too large (max ${MAX_IMAGE_BYTES / 1024 / 1024} MB).`);
     } else {
-      const max = type && IMAGE_MIMES.has(type.mime) ? MAX_IMAGE_BYTES : (opts.maxBytes ?? MAX_IMAGE_BYTES);
+      const max = type && IMAGE_MIMES.has(type.mime) && !opts.asFile ? MAX_IMAGE_BYTES : (opts.maxBytes ?? MAX_IMAGE_BYTES);
       if (bytes.length > max) throw new Fault(413, `File too large (max ${Math.round(max / 1024 / 1024)} MB).`);
     }
     const ext = type ? type.ext : (/\.([a-z0-9]{1,8})$/i.exec(name ?? '')?.[1]?.toLowerCase() ?? 'bin');
@@ -120,7 +151,7 @@ export class Media {
    * file while being hashed; the type is sniffed from the head. Over `maxBytes` the
    * upload is dropped and refused.
    */
-  async putStream(body: AsyncIterable<Uint8Array>, uploader: string, docId: string | null, opts: { name?: string | null; maxBytes: number }): Promise<MediaInfo> {
+  async putStream(body: AsyncIterable<Uint8Array>, uploader: string, docId: string | null, opts: { name?: string | null; maxBytes: number; asFile?: boolean }): Promise<MediaInfo> {
     const tmp = join(this.dir, `tmp-${randomBytes(8).toString('hex')}`);
     const out = createWriteStream(tmp, { flags: 'wx' });
     const hash = createHash('sha256');
@@ -142,11 +173,11 @@ export class Media {
       rmSync(tmp, { force: true });
       throw e;
     }
-    if (size === 0) { rmSync(tmp, { force: true }); throw new Fault(400, 'Empty file.'); }
+    if (size === 0 && !opts.asFile) { rmSync(tmp, { force: true }); throw new Fault(400, 'Empty file.'); }
     const head = Buffer.concat(headParts);
     const type = sniff(head);
     const name = cleanName(opts.name);
-    if (type && IMAGE_MIMES.has(type.mime) && size > MAX_IMAGE_BYTES) { rmSync(tmp, { force: true }); throw new Fault(413, `Image too large (max ${MAX_IMAGE_BYTES / 1024 / 1024} MB).`); }
+    if (type && IMAGE_MIMES.has(type.mime) && size > MAX_IMAGE_BYTES && !opts.asFile) { rmSync(tmp, { force: true }); throw new Fault(413, `Image too large (max ${MAX_IMAGE_BYTES / 1024 / 1024} MB).`); }
     const ext = type ? type.ext : (/\.([a-z0-9]{1,8})$/i.exec(name ?? '')?.[1]?.toLowerCase() ?? 'bin');
     const mime = type ? type.mime : 'application/octet-stream';
     const id = `${hash.digest('hex').slice(0, 32)}.${ext}`;
