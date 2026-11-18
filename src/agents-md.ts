@@ -45,7 +45,7 @@ same address you were given names the document to the tools.
 | feature set | tools |
 |---|---|
 | read | whoami, open_link, list_documents, read_document, outline, search, list_comments, changes, view_image, people, versions, tree, list_files, read_file |
-| write | create_document, edit_document, rename_document, insert_image, attach_file, remove_file, save_version, restore_version, undo_change, delete_document, accept_suggestion, reject_suggestion, split_section, merge_section, mount_section, unmount_section, create_section, create_tree, place_page, unplace_page, move_page |
+| write | create_document, edit_document, rename_document, insert_image, attach_file, move_file, remove_file, save_version, restore_version, undo_change, delete_document, accept_suggestion, reject_suggestion, split_section, merge_section, mount_section, unmount_section, create_section, create_tree, place_page, unplace_page, move_page |
 | comment | add_comment, reply_comment, resolve_comment, edit_comment, delete_comment, assign_comment, suggest_edit |
 | share | list_access, share_document (people, agents or groups), set_agent_access, create_link, revoke_link, groups, create_group, add_to_group, remove_from_group, delete_group |
 | watch (push events) | watch, unwatch, list_watches |
@@ -66,8 +66,13 @@ exact text, applied atomically, attributed to you and visible live. If a documen
 ## Kinds of document
 
 Markdown documents (sections, comments, suggestions, history), **HTML pages** (a whole page with scripts,
-served in a sandbox, with attached files — \`attach_file\`, \`read_file\` with a JSON pointer), and wikis
-(a space published read-only). Create a page with \`create_document {"type": "html", "content": …,
+served in a sandbox, with attached files — \`attach_file\`, \`read_file\` with a JSON pointer), **file
+collections** (\`create_document {"type": "files"}\`: files in folders, such as PDFs, photos or datasets,
+that people browse, upload to and download from; \`list_files\` with a folder, \`read_file\` (a PDF reads as
+its text, by page), \`attach_file\`, \`move_file\`, \`remove_file\`, \`search\` inside it, \`versions\` and
+\`restore_version\` for its history; each file is at \`/p/<id>/<path>\`; the whole collection is a git repository
+at \`/git/<id>.git\`, with your token as the password, large files through Git LFS), and wikis (a space
+published read-only). Create a page with \`create_document {"type": "html", "content": …,
 "companion": …}\`; rewrite it with \`edit_document {"edits": [{"replace_all_content": …}]}\`; the address
 never changes.
 `;

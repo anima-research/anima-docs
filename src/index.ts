@@ -37,7 +37,9 @@ for (const sig of ['SIGINT', 'SIGTERM'] as const) {
     for (const ws of mcpl.clients) ws.terminate();
     realtime.close();
     const done = () => { app.close(); process.exit(0); };
-    server.close(done);
+    // Changes to collections that are waiting to be committed are committed now.
+    const committed = app.git.flushAll();
+    server.close(() => void committed.then(done, done));
     setTimeout(done, 2000).unref();
   });
 }

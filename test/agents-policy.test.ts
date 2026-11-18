@@ -83,7 +83,7 @@ test('v12: "everyone signed in" is retired; the people who used such a document 
   console.log = (...a: unknown[]) => { logs.push(a.join(' ')); };
   let db: InstanceType<typeof Database>;
   try { db = openDatabase(file); } finally { console.log = orig; }
-  assert.equal(db.pragma('user_version', { simple: true }), 12);
+  assert.equal(db.pragma('user_version', { simple: true }), 13);
   assert.deepEqual(db.prepare(`SELECT id, general_access, agents_by FROM documents ORDER BY id`).all(),
     [{ id: 'dopen', general_access: 'restricted', agents_by: 'editors' }, { id: 'dshut', general_access: 'restricted', agents_by: 'editors' }]);
   assert.deepEqual(db.prepare(`SELECT sub, role FROM doc_acl WHERE doc_id = 'dopen' ORDER BY sub`).all(),
@@ -91,7 +91,7 @@ test('v12: "everyone signed in" is retired; the people who used such a document 
   assert.ok(logs.some((l) => /dopen had general access commenter → restricted; 2 who used it keep it/.test(l)), logs.join('\n'));
   // re-opening changes nothing
   db.close();
-  assert.equal(openDatabase(file).pragma('user_version', { simple: true }), 12);
+  assert.equal(openDatabase(file).pragma('user_version', { simple: true }), 13);
 });
 
 // ---------------------------------------------------------------- end to end

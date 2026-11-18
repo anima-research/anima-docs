@@ -20,7 +20,10 @@ import { Realtime, maskFor, publicActor, type WebSession } from './realtime.js';
 import { TOOLS, runTool } from './tools.js';
 import { atLeast } from './documents.js';
 import { Media, inlineMime } from './media.js';
-import { COMPANION, isTextMime } from './files.js';
+import { COLLECTION, COMPANION, isTextMime } from './files.js';
+import { gitHttp } from './githttp.js';
+import { zipStream } from './zip.js';
+import { once } from 'node:events';
 import { excerpt } from './wiki.js';
 import { agentNote, agentsMarkdown, mcplUrl } from './agents-md.js';
 import { createReadStream } from 'node:fs';
@@ -77,7 +80,7 @@ function guestAllowed(method: string, path: string): boolean {
   const m = /^\/api\/docs\/[A-Za-z0-9]+(\/.*)?$/.exec(path);
   if (!m) return false;
   const rest = m[1] ?? '';
-  if (method === 'GET') return rest === '' || rest === '/files' || rest.startsWith('/files/') || rest === '/versions' || /^\/versions\/[a-z0-9]+$/.test(rest) || rest === '/activity' || rest === '/history' || rest === '/history/compare' || rest === '/export.md';
+  if (method === 'GET') return rest === '' || rest === '/files' || rest.startsWith('/files/') || rest.startsWith('/thumb/') || rest === '/zip' || rest === '/git' || rest === '/git/log' || rest === '/versions' || /^\/versions\/[a-z0-9]+$/.test(rest) || rest === '/activity' || rest === '/history' || rest === '/history/compare' || rest === '/export.md';
   // Editors through a link may rename, name versions and restore them, as any editor can.
   return (method === 'PATCH' && rest === '') || (method === 'POST' && (rest === '/versions' || /^\/versions\/[a-z0-9]+\/restore$/.test(rest) || /^\/history\/\d+\/(restore|undo)$/.test(rest)));
 }
@@ -364,11 +367,42 @@ export function createHttp(app: App) {
   function sendPage(req: IncomingMessage, res: ServerResponse, body: string, rev: number) {
     return sendSandboxed(req, res, body, `"p${rev}-${createHash('sha1').update(body).digest('hex').slice(0, 16)}"`, 'text/html; charset=utf-8');
   }
-  /** An attached file of a page, served next to it. */
-  function sendDocFile(req: IncomingMessage, res: ServerResponse, docId: string, filePath: string) {
-    const f = app.files.read(docId, filePath);
-    if (!f) throw new Fault(404, 'No such file.');
-    return sendSandboxed(req, res, f.bytes, `"f${f.file.mediaId}"`, f.file.mime, 'private, max-age=60');
+  /** A stored file from disk, with Range requests: players seek (Safari will not play without them) and large downloads resume. */
+  function streamFile(req: IncomingMessage, res: ServerResponse, file: string, size: number, headers: Record<string, string | number>) {
+    const range = /^bytes=(\d*)-(\d*)$/.exec(String(req.headers.range ?? ''));
+    let start = 0, end = size - 1, status = 200;
+    if (range && (range[1] || range[2])) {
+      if (range[1]) { start = Number(range[1]); end = range[2] ? Math.min(Number(range[2]), size - 1) : size - 1; }
+      else { start = Math.max(0, size - Number(range[2])); }
+      if (start > end || start >= size) { res.writeHead(416, { 'Content-Range': `bytes */${size}` }); res.end(); return; }
+      status = 206;
+      headers['Content-Range'] = `bytes ${start}-${end}/${size}`;
+    }
+    headers['Accept-Ranges'] = 'bytes';
+    headers['Content-Length'] = size ? end - start + 1 : 0;
+    res.writeHead(status, headers);
+    if (req.method === 'HEAD' || size === 0) { res.end(); return; }
+    const stream = createReadStream(file, { start, end });
+    stream.on('error', (e) => { console.error('[files] read failed', file, e); res.destroy(); });
+    res.on('close', () => stream.destroy());
+    stream.pipe(res);
+  }
+  const attachment = (name: string) => `attachment; filename="${name.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_')}"; filename*=UTF-8''${encodeURIComponent(name)}`;
+  /** An attached file of a page, served next to it; a collection's file. `rawPath` is as it stood in the URL. */
+  async function sendDocFile(req: IncomingMessage, res: ServerResponse, docId: string, rawPath: string, download = false) {
+    let filePath: string;
+    try { filePath = decodeURIComponent(rawPath).normalize('NFC'); } catch { throw new Fault(400, 'That is not a file path.'); }
+    const file = app.files.get(docId, filePath);
+    const at = file ? app.media.locate(file.mediaId) : null;
+    if (!file || !at) throw new Fault(404, 'No such file.');
+    const etag = `"f${file.mediaId}"`;
+    // Text goes out whole, compressed; everything else (and anything large) is streamed.
+    if (!download && compressible(file.mime) && at.size <= 8 * 1024 * 1024) { await sendSandboxed(req, res, readFileSync(at.file), etag, file.mime, 'private, max-age=60'); return; }
+    res.removeHeader('X-Frame-Options');
+    res.setHeader('Content-Security-Policy', SANDBOX);
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    if (req.headers['if-none-match'] === etag && !req.headers.range) { res.writeHead(304, { ETag: etag, Vary: 'Cookie' }); res.end(); return; }
+    streamFile(req, res, at.file, at.size, { 'Content-Type': file.mime, 'Cache-Control': 'private, max-age=60', ETag: etag, Vary: 'Cookie', ...(download ? { 'Content-Disposition': attachment(filePath.split('/').pop()!) } : {}) });
   }
   /** Media readable without a session: its document is shareable beyond its explicit list (an active link, members access, a public wiki). Ids are content hashes: unguessable. */
   function mediaOpen(mediaId: string): boolean {
@@ -381,6 +415,9 @@ export function createHttp(app: App) {
     if (links > 0) return true;
     return app.wiki.mediaPublic(mediaId);
   }
+
+  // A collection's repository: git clients and Git LFS (their own sign-in; see githttp.ts).
+  const git = gitHttp(app, { streamFile, hookUrl: (key) => `http://127.0.0.1:${(server.address() as { port: number }).port}/git-hook/${key}` });
 
   const server = createServer(async (req, res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -473,6 +510,8 @@ export function createHttp(app: App) {
         send(200, { headers: Object.fromEntries(pick.map((h) => [h, req.headers[h] ?? null])), remote: req.socket.remoteAddress, network: clientNetwork(req, app.config.trustedProxyHops, app.config.clientIpHeader) });
         return;
       }
+
+      if ((path.startsWith('/git/') || path.startsWith('/git-hook/')) && await git(req, res, url)) return;
 
       // Same-origin rule for every cookie-authenticated mutation.
       if (!['GET', 'HEAD', 'OPTIONS'].includes(method) && !req.headers.authorization && req.headers.origin !== app.config.origin) {
@@ -643,7 +682,7 @@ export function createHttp(app: App) {
             if (url.searchParams.get('annotate') === '1') { const tag = '<script src="/page-annotate.js" data-anima-ui></script>'; body = /<\/body\s*>/i.test(body) ? body.replace(/<\/body\s*>/i, `${tag}\n</body>`) : `${body}\n${tag}`; }
             await sendPage(req, res, body, d.rev);
           }
-          else await sendDocFile(req, res, d.id, sub);
+          else await sendDocFile(req, res, d.id, sub, url.searchParams.has('download'));
           return;
         }
         // A person navigating to the short link gets the app around the page (title, share, comments, edit);
@@ -658,7 +697,7 @@ export function createHttp(app: App) {
           if ((rest === undefined || rest === '') && !url.searchParams.has('raw') && !url.searchParams.has('format')) { sendShell(res, docMeta(d, `${app.config.origin}/p/${d.id}`)); return; }
           throw new Fault(401, 'Sign in to view this page.');
         }
-        if (rest !== undefined && rest !== '') { await sendDocFile(req, res, d.id, rest); return; } // /p/<id>/<path> with a session or a bearer token: the file
+        if (rest !== undefined && rest !== '') { await sendDocFile(req, res, d.id, rest, url.searchParams.has('download')); return; } // /p/<id>/<path> with a session or a bearer token: the file
         if (d.type !== 'html') { res.writeHead(302, { Location: `/d/${d.id}` }); res.end(); return; }
         // Agents asking for text get the markdown companion when the page has one.
         const accept = String(req.headers.accept ?? '');
@@ -681,31 +720,14 @@ export function createHttp(app: App) {
         // Images, audio, video and PDF are served as what they are; anything else is a download
         // under its original name (never rendered by the browser: no HTML/SVG/script on this origin).
         const inline = inlineMime(f.info.mime);
-        const name = (f.info.name ?? f.info.id).replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_');
-        const headers: Record<string, string | number> = {
+        // A PDF may be shown inside the app (a collection's viewer frames it); nothing else here is framed.
+        if (f.info.mime === 'application/pdf') { res.setHeader('X-Frame-Options', 'SAMEORIGIN'); res.setHeader('Content-Security-Policy', String(res.getHeader('Content-Security-Policy')).replace("frame-ancestors 'none'", "frame-ancestors 'self'")); }
+        streamFile(req, res, f.file, f.size, {
           'Content-Type': inline ? f.info.mime : 'application/octet-stream',
           'Cache-Control': 'private, max-age=31536000, immutable',
-          'Accept-Ranges': 'bytes',
           'X-Content-Type-Options': 'nosniff',
-          ...(inline ? {} : { 'Content-Disposition': `attachment; filename="${name}"; filename*=UTF-8''${encodeURIComponent(f.info.name ?? f.info.id)}` }),
-        };
-        // Range requests: audio and video players seek, and Safari will not play without them.
-        const range = /^bytes=(\d*)-(\d*)$/.exec(String(req.headers.range ?? ''));
-        let start = 0, end = f.size - 1, status = 200;
-        if (range && (range[1] || range[2])) {
-          if (range[1]) { start = Number(range[1]); end = range[2] ? Math.min(Number(range[2]), f.size - 1) : f.size - 1; }
-          else { start = Math.max(0, f.size - Number(range[2])); }
-          if (start > end || start >= f.size) { res.writeHead(416, { 'Content-Range': `bytes */${f.size}` }); res.end(); return; }
-          status = 206;
-          headers['Content-Range'] = `bytes ${start}-${end}/${f.size}`;
-        }
-        headers['Content-Length'] = end - start + 1;
-        res.writeHead(status, headers);
-        if (method === 'HEAD') { res.end(); return; }
-        const stream = createReadStream(f.file, { start, end });
-        stream.on('error', (e) => { console.error('[media] read failed', f.info.id, e); res.destroy(); });
-        res.on('close', () => stream.destroy());
-        stream.pipe(res);
+          ...(inline ? {} : { 'Content-Disposition': attachment(f.info.name ?? f.info.id) }),
+        });
         return;
       }
       if (path === '/api/media' && method === 'POST') {
@@ -734,6 +756,15 @@ export function createHttp(app: App) {
             publicLink: app.docs.hasPublicLink(id),
             role: app.docs.role(id, a), rev: d.rev, updatedAt: d.updatedAt, createdAt: d.createdAt, openComments: app.comments.openCount(id), present: realtime.presence(id) };
         };
+        // A person's password for git: one each, shown once when made; a new one ends the old.
+        if (path === '/api/git/password' && (method === 'POST' || method === 'DELETE')) {
+          const s = webSession(req);
+          const row = s && !isGuest(a.sub) ? app.db.prepare('SELECT identity FROM sessions WHERE token_hash = ?').get(s.tokenHash) as { identity: string } | undefined : undefined;
+          if (!row) throw new Fault(403, 'Sign in with Archipelago in the browser to make a git password (agents use their token).');
+          if (method === 'DELETE') { app.git.dropToken(a.sub); send(200, { ok: true }); return; }
+          send(201, { password: app.git.mintToken(JSON.parse(row.identity)), expiresAt: app.git.tokenInfo(a.sub)!.expiresAt });
+          return;
+        }
         if (path === '/api/docs' && method === 'GET') {
           send(200, { docs: app.docs.list(a, { query: url.searchParams.get('q') ?? undefined, filter: (url.searchParams.get('filter') as any) ?? 'all' }).map((d) => docView(d.id)) });
           return;
@@ -800,14 +831,70 @@ export function createHttp(app: App) {
             send(200, { ...t, nodes: t.nodes.map((n) => ({ ...n, role: app.docs.role(n.id, a) })), paths: app.trees.pathsOf(id, a) });
             return;
           }
-          if (rest === '/files' && method === 'GET') { app.docs.require(id, a, 'viewer'); send(200, { files: app.files.list(id).map((f) => ({ ...f, url: `/p/${id}/${f.path}` })) }); return; }
+          const fileUrl = (f: { path: string }) => `/p/${id}/${f.path.split('/').map(encodeURIComponent).join('/')}`;
+          if (rest === '/files' && method === 'GET') { app.docs.require(id, a, 'viewer'); send(200, { files: app.files.list(id).map((f) => ({ ...f, url: fileUrl(f) })) }); return; }
+          // A small picture of an image file, for a collection's grid.
+          const th = method === 'GET' ? /^\/thumb\/(.+)$/.exec(rest) : null;
+          if (th) {
+            app.docs.require(id, a, 'viewer');
+            const f = app.files.get(id, decodeURIComponent(th[1]).normalize('NFC'));
+            const file = f && f.mime.startsWith('image/') ? await app.media.thumb(f.mediaId) : null;
+            if (!file) throw new Fault(404, 'No picture of that file.');
+            streamFile(req, res, file, statSync(file).size, { 'Content-Type': 'image/webp', 'Cache-Control': 'private, max-age=31536000, immutable' });
+            return;
+          }
+          // ---------------------------------------------------------- a collection's repository: where to clone it, its history
+          if (rest === '/git' && method === 'GET') {
+            const { doc } = app.docs.require(id, a, 'viewer');
+            if (doc.type !== COLLECTION) throw new Fault(404, 'Not a file collection.');
+            send(200, { available: app.git.available, url: `${app.config.origin}/git/${id}.git`, password: isGuest(a.sub) ? null : app.git.tokenInfo(a.sub) });
+            return;
+          }
+          if (rest === '/git/log' && method === 'GET') {
+            const { doc } = app.docs.require(id, a, 'viewer');
+            if (doc.type !== COLLECTION) throw new Fault(404, 'Not a file collection.');
+            const before = url.searchParams.get('before') ?? undefined;
+            send(200, { commits: await app.git.log(id, { before, limit: Number(url.searchParams.get('limit')) || 50 }) });
+            return;
+          }
+          if (rest === '/git/restore' && method === 'POST') {
+            const { doc } = app.docs.require(id, a, 'editor');
+            if (doc.type !== COLLECTION) throw new Fault(404, 'Not a file collection.');
+            const b = await json(req);
+            send(200, { head: await app.git.restore(id, String(b.commit ?? ''), typeof b.path === 'string' && b.path ? b.path : null, a.sub) });
+            return;
+          }
+          // A collection, or one folder of it, as a zip.
+          if (rest === '/zip' && method === 'GET') {
+            const { doc } = app.docs.require(id, a, 'viewer');
+            if (doc.type !== COLLECTION) throw new Fault(404, 'Not a file collection.');
+            const folder = (url.searchParams.get('folder') ?? '').replace(/^\/+|\/+$/g, '');
+            const base = folder ? `${app.files.path(id, folder)}/` : '';
+            const entries = app.files.list(id, folder ? app.files.path(id, folder) : undefined).flatMap((f) => { const at = app.media.locate(f.mediaId); return at ? [{ name: f.path.slice(base.length), file: at.file, size: at.size, mtime: f.updatedAt }] : []; });
+            if (!entries.length) throw new Fault(404, 'Nothing to download there.');
+            res.writeHead(200, { 'Content-Type': 'application/zip', 'Content-Disposition': attachment(`${(folder ? folder.split('/').pop()! : doc.title || 'files').replace(/[\\/:*?"<>|]/g, ' ').trim() || 'files'}.zip`), 'Cache-Control': 'private, no-store' });
+            try { for await (const chunk of zipStream(entries)) { if (res.destroyed) break; if (!res.write(chunk)) await once(res, 'drain'); } }
+            catch (e) { console.error('[zip]', id, (e as Error).message); res.destroy(); return; }
+            res.end();
+            return;
+          }
+          if (rest === '/files/move' && method === 'POST') {
+            app.docs.require(id, a, 'editor');
+            const b = await json(req);
+            send(200, { moved: app.files.move(id, String(b.from ?? ''), String(b.to ?? ''), a.sub) });
+            return;
+          }
           const fm = /^\/files\/(.+)$/.exec(rest);
           if (fm && (method === 'PUT' || method === 'DELETE')) {
             app.docs.require(id, a, 'editor');
-            if (method === 'DELETE') { send(200, { removed: app.files.remove(id, decodeURIComponent(fm[1])) }); return; }
-            const bytes = await readBody(req, app.config.uploadMaxBytes + 1024);
-            const f = app.files.put(id, decodeURIComponent(fm[1]), bytes, a.sub, { maxBytes: app.config.uploadMaxBytes });
-            send(201, { ...f, url: `/p/${id}/${f.path}` });
+            // A collection's folder goes with everything in it (?folder=1).
+            if (method === 'DELETE') { send(200, url.searchParams.has('folder') ? { removed: app.files.removeFolder(id, decodeURIComponent(fm[1]), a.sub) } : { removed: app.files.remove(id, decodeURIComponent(fm[1]), a.sub) }); return; }
+            // A save made from a version that is no longer the current one (someone else changed the file since) is refused: If-Match names the version.
+            const match = String(req.headers['if-match'] ?? '');
+            if (match) { const cur = app.files.get(id, app.files.path(id, decodeURIComponent(fm[1]))); if (`"f${cur?.mediaId ?? ''}"` !== match) throw new Fault(412, 'This file has changed since you opened it.'); }
+            // Streamed to disk: a large file must not sit in memory.
+            const f = await app.files.putStream(id, decodeURIComponent(fm[1]), req, a.sub, { maxBytes: app.config.uploadMaxBytes });
+            send(201, { ...f, url: fileUrl(f) });
             return;
           }
           if (rest === '/paths' && method === 'GET') { app.docs.require(id, a, 'viewer'); send(200, { paths: app.trees.pathsOf(id, a), root: app.trees.isRoot(id) }); return; }

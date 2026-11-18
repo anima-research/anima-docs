@@ -12,6 +12,8 @@ RUN npm run build && npm prune --omit=dev
 
 FROM node:22-bookworm-slim
 WORKDIR /app
+# git: every file collection is a repository (history, clone, push). poppler-utils: the text of PDFs, for agents.
+RUN apt-get update && apt-get install -y --no-install-recommends git poppler-utils ca-certificates && rm -rf /var/lib/apt/lists/*
 ENV NODE_ENV=production PORT=8080 DOCS_HOST=0.0.0.0 DOCS_DATA_DIR=/data
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist

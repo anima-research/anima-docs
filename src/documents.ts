@@ -71,7 +71,8 @@ export interface DocChange {
 
 type DocRow = { id: string; title: string; type: string; owner_sub: string; general_access: GeneralAccess; agents_by: AgentsBy; created_at: number; updated_at: number; rev: number; deleted_at: number | null };
 const meta = (r: DocRow): DocMeta => ({ id: r.id, title: r.title, type: r.type ?? 'markdown', ownerSub: r.owner_sub, generalAccess: r.general_access, agentsBy: r.agents_by ?? 'editors', createdAt: r.created_at, updatedAt: r.updated_at, rev: r.rev });
-export const NODE_TYPES = ['markdown', 'html', 'latex', 'text'];
+/** 'files' is a file collection: the node's content is its files (see files.ts). */
+export const NODE_TYPES = ['markdown', 'html', 'latex', 'text', 'files'];
 /** How deep access may be derived through parents. */
 const DERIVE_DEPTH = 12;
 
@@ -240,7 +241,7 @@ export class Documents extends EventEmitter {
     const access: GeneralAccess = 'restricted'; // "everyone signed in" is retired (v12)
     this.db.prepare(`INSERT INTO documents (id, title, type, owner_sub, general_access, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
       .run(id, clean, type, p.owner ?? actor.sub, access, now, now);
-    if (p.content) this.edit(id, actor, (text) => text.insert(0, p.content!));
+    if (p.content && type !== 'files') this.edit(id, actor, (text) => text.insert(0, p.content!));
     this.emit('meta', { docId: id, kind: 'created', by: actor.sub });
     return this.get(id)!;
   }
@@ -259,6 +260,9 @@ export class Documents extends EventEmitter {
   setType(docId: string, actor: Actor, type: string): DocMeta {
     this.require(docId, actor, 'editor');
     if (!NODE_TYPES.includes(type)) throw new Fault(400, `type must be one of ${NODE_TYPES.join(', ')}.`);
+    // A collection is made as one: its files follow other rules and have a repository; a page's text has no place in it.
+    const was = this.get(docId)!.type;
+    if (was !== type && (was === 'files' || type === 'files')) throw new Fault(400, was === 'files' ? 'A file collection stays a file collection.' : 'A file collection is made as one (New document ▸ File collection); a document cannot become one.');
     this.db.prepare('UPDATE documents SET type = ?, updated_at = ? WHERE id = ?').run(type, Date.now(), docId);
     this.emit('meta', { docId, kind: 'retyped', by: actor.sub });
     return this.get(docId)!;
@@ -813,6 +817,7 @@ export class Documents extends EventEmitter {
    * Returns the transaction's delete set and the client id used.
    */
   edit(docId: string, actor: Pick<Actor, 'sub'> & { via?: ChangeOrigin['via']; label?: string }, fn: (text: Y.Text) => void): { client: number; deleteSet: DeleteSet } {
+    if (this.get(docId)?.type === 'files') throw new Fault(400, 'A file collection has no text to edit: change its files (attach_file, move_file, remove_file).');
     const doc = this.ydoc(docId);
     const client = this.serverClientFor(docId, actor.sub);
     const saved = doc.clientID;

@@ -8,7 +8,7 @@ import { splitHunks } from './hunks.js';
 import { quoteText, suggestionSummary, type Thread } from './comments.js';
 import { atLeast, type Role } from './documents.js';
 import { Media, fetchImage } from './media.js';
-import { COMPANION, isTextMime, jsonPointer } from './files.js';
+import { COLLECTION, COMPANION, isTextMime, jsonPointer } from './files.js';
 import { textChanges } from './diff.js';
 import { findSections, lineOf, lineStarts, outline, withLineNumbers, images } from './markdown.js';
 import { BASE_SETTINGS, WATCH_PRESET, type WatchSettings } from './attention.js';
@@ -50,9 +50,89 @@ function describeKind(app: App, d: { id: string; title: string; type: string }):
     const others = files.filter((f) => f.path !== COMPANION).length;
     return ` It is an HTML page, rendered at ${app.config.origin}/p/${d.id}; read_document returns ${companion ? 'its markdown companion (index.md)' : 'its source (it has no index.md companion yet)'}${others ? `; ${others} attached file${others === 1 ? '' : 's'} (list_files, read_file)` : ''}.`;
   }
+  if (d.type === COLLECTION) {
+    const n = app.files.count(d.id);
+    return ` It is a file collection: its content is its files (${n.files} of them, ${size(n.bytes)}), in folders. list_files shows a folder, read_file reads a file, attach_file adds or replaces one, move_file renames or moves, remove_file deletes. People browse it at ${app.config.origin}/d/${d.id}.`;
+  }
   if (d.type === 'latex') return ' It is a LaTeX node (each paragraph renders as a display formula).';
   if (d.type === 'text') return ' It is a plain-text node (rendered verbatim).';
   return '';
+}
+
+/** The address of a file of a document: its path as a URL (names hold spaces, "#", "?"). */
+function fileUrl(app: App, id: string, path: string): string {
+  return `${app.config.origin}/p/${id}/${path.split('/').map(encodeURIComponent).join('/')}`;
+}
+
+function size(n: number): string {
+  return n < 1024 ? `${n} bytes` : n < 1024 * 1024 ? `${(n / 1024).toFixed(1)} KB` : n < 1024 ** 3 ? `${(n / 1024 / 1024).toFixed(1)} MB` : `${(n / 1024 ** 3).toFixed(2)} GB`;
+}
+
+/** One folder of a document's files: its subfolders (with what they hold) and its own files. */
+function folderListing(app: App, id: string, folder: string, offset = 0): string {
+  const all = app.files.list(id, folder || undefined);
+  const base = folder ? `${folder}/` : '';
+  const dirs = new Map<string, { files: number; bytes: number }>();
+  const here: typeof all = [];
+  for (const f of all) {
+    const rest = f.path.slice(base.length);
+    const cut = rest.indexOf('/');
+    if (cut < 0) { here.push(f); continue; }
+    const d = dirs.get(rest.slice(0, cut)) ?? { files: 0, bytes: 0 };
+    d.files++; d.bytes += f.size;
+    dirs.set(rest.slice(0, cut), d);
+  }
+  const lines = [
+    ...[...dirs].map(([name, d]) => `${base}${name}/  folder, ${d.files} file${d.files === 1 ? '' : 's'}, ${size(d.bytes)}`),
+    ...here.map((f) => `${f.path}  ${f.mime.split(';')[0]}  ${f.size} bytes  ${new Date(f.updatedAt).toISOString()}`),
+  ];
+  const cap = 400, shown = lines.slice(offset, offset + cap);
+  if (offset >= lines.length && lines.length) return `Nothing from ${offset} on: there are ${lines.length} entries here.`;
+  return `${offset ? `(entries ${offset + 1}–${offset + shown.length} of ${lines.length})\n` : ''}${shown.join('\n')}${offset + cap < lines.length ? `\n… ${lines.length - offset - cap} more here: list_files with offset ${offset + cap}.` : ''}`;
+}
+
+/**
+ * Search a collection: names first, then inside text files and PDFs. PDFs are read as they are met, for a few
+ * seconds per call; what is left is said, and the next search goes on from there.
+ */
+async function searchCollection(app: App, id: string, query: string, limit: number): Promise<string> {
+  const needle = query.toLowerCase();
+  const files = app.files.list(id);
+  const hits: string[] = [];
+  for (const f of files) if (f.path.toLowerCase().includes(needle)) hits.push(`${f.path}  (name)`);
+  const until = Date.now() + 8000;
+  const wait = (ms: number) => new Promise<null>((r) => { setTimeout(() => r(null), Math.max(0, ms)).unref(); });
+  // What the search did not look inside, by why: said at the end, so "no matches" is never more than it knows.
+  let unread = 0, late = 0, large = 0, unreadable = 0;
+  for (const f of files) {
+    if (hits.length >= limit) break;
+    const pdf = f.mime === 'application/pdf';
+    if (!pdf && !isTextMime(f.mime)) continue;
+    if (!pdf && f.size > 2 * 1024 * 1024) { large++; continue; }
+    const at = app.media.locate(f.mediaId);
+    if (!at) continue;
+    if (pdf) {
+      if (!app.pdf.available) { unreadable++; continue; }
+      if (!app.pdf.ready(f.mediaId) && Date.now() >= until) { unread++; continue; }
+      // A slow PDF goes on being read after the search has answered; the next search has it.
+      const pages = await Promise.race([app.pdf.pages(f.mediaId, at.file), wait(app.pdf.ready(f.mediaId) ? 60_000 : until - Date.now()).then(() => 'slow' as const)]);
+      if (pages === 'slow') { unread++; continue; }
+      if (!pages) { unreadable++; continue; }
+      pages.forEach((p, n) => { for (const line of p.split('\n')) if (hits.length < limit && line.toLowerCase().includes(needle)) hits.push(`${f.path}  p.${n + 1}  ${clip(line.trim(), 240)}`); });
+      continue;
+    }
+    if (Date.now() >= until) { late++; continue; }
+    const lines = (app.files.text(id, f.path) ?? '').split('\n');
+    lines.forEach((line, n) => { if (hits.length < limit && line.toLowerCase().includes(needle)) hits.push(`${f.path}:${n + 1}  ${clip(line.trim(), 240)}`); });
+  }
+  const notes = [
+    unread ? `${unread} PDF${unread === 1 ? '' : 's'} not read yet: search again to include ${unread === 1 ? 'it' : 'them'}` : '',
+    late ? `${late} text file${late === 1 ? '' : 's'} not reached in the time a search has: search a folder's worth with a narrower question, or clone the collection and search it there` : '',
+    large ? `${large} text file${large === 1 ? '' : 's'} over 2 MB not searched` : '',
+    unreadable ? `${unreadable} PDF${unreadable === 1 ? '' : 's'} whose text cannot be read here` : '',
+  ].filter(Boolean);
+  const more = notes.length ? `\n(${notes.join('; ')}.)` : '';
+  return hits.length ? `${hits.slice(0, limit).join('\n')}${more}` : `No matches.${more}`;
 }
 
 function need(args: Record<string, any>, key: string): string {
@@ -277,7 +357,7 @@ export const TOOLS: ToolDef[] = [
       return text(list.map((d) => {
         const sug = app.comments.openSuggestionCount(d.id);
         const open = app.comments.openCount(d.id) - sug;
-        return `${d.id}  “${d.title}”${d.type !== 'markdown' ? ` [${d.type === 'html' ? 'HTML page' : d.type}]` : ''} — you: ${d.role}; owner ${app.principals.label(d.ownerSub)}; updated ${ago(d.updatedAt)}; rev ${d.rev}${open ? `; ${open} open comment${open === 1 ? '' : 's'}` : ''}${sug ? `; ${sug} open suggestion${sug === 1 ? '' : 's'}` : ''}`;
+        return `${d.id}  “${d.title}”${d.type !== 'markdown' ? ` [${d.type === 'html' ? 'HTML page' : d.type === COLLECTION ? 'file collection' : d.type}]` : ''} — you: ${d.role}; owner ${app.principals.label(d.ownerSub)}; updated ${ago(d.updatedAt)}; rev ${d.rev}${open ? `; ${open} open comment${open === 1 ? '' : 's'}` : ''}${sug ? `; ${sug} open suggestion${sug === 1 ? '' : 's'}` : ''}`;
       }).join('\n'));
     },
   },
@@ -297,10 +377,16 @@ export const TOOLS: ToolDef[] = [
     run(app, actor, a) {
       const id = need(a, 'document');
       const { doc, role } = app.docs.require(id, actor, 'viewer');
+      if (doc.type === COLLECTION) {
+        // A collection reads as what it holds: the top folder, and how to go further.
+        app.attention.markRead(actor.sub, id, {});
+        const n = app.files.count(id);
+        return text(`“${doc.title}” (${id}) is a file collection: ${n.files} file${n.files === 1 ? '' : 's'}, ${size(n.bytes)}; you are ${role}; owner ${app.principals.label(doc.ownerSub)}; updated ${ago(doc.updatedAt)}.\nlist_files with folder shows a folder; read_file reads a file; files are also at ${app.config.origin}/p/${id}/<path>.\n\n${n.files ? folderListing(app, id, '') : 'It is empty. attach_file adds a file.'}`);
+      }
       if (doc.type === 'html' && !a.raw) {
         // An HTML page reads as its companion (what it is, where its data lives) plus its files; the source is a raw: true away.
         const files = app.files.list(id);
-        const list = files.length ? `\n\nFiles (${files.length}; read_file reads one, by JSON pointer or lines):\n${files.map((f) => `- ${f.path} (${f.mime.split(';')[0]}, ${f.size} bytes) → ${app.config.origin}/p/${id}/${f.path}`).join('\n')}` : '';
+        const list = files.length ? `\n\nFiles (${files.length}; read_file reads one, by JSON pointer or lines):\n${files.map((f) => `- ${f.path} (${f.mime.split(';')[0]}, ${f.size} bytes) → ${fileUrl(app, id, f.path)}`).join('\n')}` : '';
         const comp = app.files.text(id, COMPANION);
         if (comp !== null) { app.attention.markRead(actor.sub, id, {}); return text(`“${doc.title}” is an HTML page (${app.config.origin}/p/${id}); this is its companion ${COMPANION}. Pass raw: true for the HTML source.\n\n${comp}${list}`); }
         const src = app.docs.text(id);
@@ -374,12 +460,13 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: 'search', featureSet: 'docs.read', toolClass: 'notes',
-    description: 'Search document text (case-insensitive substring) across everything you can access, or within one document.',
+    description: 'Search document text (case-insensitive substring) across everything you can access, or within one document. In a file collection: file names, and the text of its text files and PDFs.',
     inputSchema: { type: 'object', required: ['query'], properties: { query: S('Text to find.'), ...docArg, limit: { type: 'integer', minimum: 1, maximum: 100 } } },
-    run(app, actor, a) {
+    async run(app, actor, a) {
       const q = need(a, 'query');
       if (a.document) {
-        app.docs.require(a.document, actor, 'viewer');
+        const { doc } = app.docs.require(a.document, actor, 'viewer');
+        if (doc.type === COLLECTION) return text(await searchCollection(app, doc.id, q, a.limit ?? 30));
         const lines = app.docs.text(a.document).split('\n');
         const hits = lines.map((l, i) => [i + 1, l] as const).filter(([, l]) => l.toLowerCase().includes(q.toLowerCase())).slice(0, a.limit ?? 30);
         return text(hits.length ? hits.map(([n, l]) => `${a.document}:${n}  ${clip(l, 240)}`).join('\n') : 'No matches.');
@@ -485,9 +572,18 @@ export const TOOLS: ToolDef[] = [
     name: 'versions', featureSet: 'docs.read', toolClass: 'notes',
     description: 'A document\'s history: recorded changes (each stretch of editing, with who and how much; ids like "h123"), named versions, and editing by person. Diff with changes {from, to}; go back with restore_version or undo_change.',
     inputSchema: { type: 'object', required: ['document'], properties: { ...docArg, limit: { type: 'integer', minimum: 1, maximum: 100, description: 'Recorded changes to list (default 20).' } } },
-    run(app, actor, a) {
+    async run(app, actor, a) {
       const id = need(a, 'document');
-      app.docs.require(id, actor, 'viewer');
+      const { doc } = app.docs.require(id, actor, 'viewer');
+      if (doc.type === COLLECTION) {
+        // A collection's history is its repository's: one entry per change, with the files it touched.
+        const commits = await app.git.log(id, { limit: Math.min(100, a.limit ?? 20) });
+        if (!commits.length) return text(app.git.available ? 'No changes recorded yet.' : 'This server keeps no history of collections.');
+        return text(`Changes to this collection (newest first; UTC). restore_version with one of these ids brings back the whole collection as it was after that change, or with path one file or folder; at: "before" gives what was there before the change (how a removed file comes back).\nIt is also a git repository: ${app.config.origin}/git/${id}.git (any user name; your token as the password).\n\n${commits.map((c) => {
+          const shown = c.changes.slice(0, 12).map((x) => `      ${x.status === 'A' ? '+' : x.status === 'D' ? '−' : '~'} ${x.path}`).join('\n');
+          return `  ${c.oid.slice(0, 10)}  ${new Date(c.at).toISOString().slice(0, 16).replace('T', ' ')}  ${c.author}: ${c.message}\n${shown}${c.changes.length > 12 ? `\n      … ${c.changes.length - 12} more` : ''}`;
+        }).join('\n')}`);
+      }
       const cps = app.history.list(id, { limit: Math.min(100, a.limit ?? 20) });
       const fmt = (ms: number) => new Date(ms).toISOString().slice(5, 16).replace('T', ' ');
       const changes = cps.length ? `Recorded changes (newest first; UTC):\n${cps.map((c) => c.baseline
@@ -512,10 +608,10 @@ export const TOOLS: ToolDef[] = [
   // ------------------------------------------------------------------ docs.write
   {
     name: 'create_document', featureSet: 'docs.write', toolClass: 'notes',
-    description: 'Create a document: markdown (default), or an HTML page (type "html": a whole page with its own styles and scripts, served as itself at /p/<id> in a sandbox — the way to publish an app, a visualisation or a report; keep it self-contained, inline CSS/JS, images as data: URIs or uploads; edit it later with edit_document, e.g. replace_all_content). You become its owner and start watching it (edits quiet, comments wake). Optionally share it at once; create_link gives an address anyone can open.',
+    description: 'Create a document: markdown (default), or an HTML page (type "html": a whole page with its own styles and scripts, served as itself at /p/<id> in a sandbox — the way to publish an app, a visualisation or a report; keep it self-contained, inline CSS/JS, images as data: URIs or uploads; edit it later with edit_document, e.g. replace_all_content), or a file collection (type "files": a place for files in folders, such as PDFs, photos or datasets, that people browse, upload to and download from; fill it with attach_file). You become its owner and start watching it (edits quiet, comments wake). Optionally share it at once; create_link gives an address anyone can open.',
     inputSchema: { type: 'object', required: ['title'], properties: {
       title: S('Document title.'), content: S('Initial content: markdown, or the full HTML for an html page.'),
-      type: S('markdown (default), html, latex or text.', { enum: ['markdown', 'html', 'latex', 'text'] }),
+      type: S('markdown (default), html, latex, text or files.', { enum: ['markdown', 'html', 'latex', 'text', 'files'] }),
       companion: S('For an html page: a markdown description of the page (what it shows, where its data lives) stored as its index.md; read_document returns it instead of the HTML, and /p/<id>?format=md serves it.'),
       share_with: { type: 'array', items: { type: 'object', required: ['who', 'role'], properties: { who: S('@Name or principal id'), role: S('viewer, commenter or editor', { enum: ['viewer', 'commenter', 'editor'] }) } } },
     } },
@@ -619,48 +715,83 @@ export const TOOLS: ToolDef[] = [
     run(app, actor, a) {
       const id = need(a, 'document');
       app.docs.require(id, actor, 'editor');
-      const bytes = Buffer.from(need(a, 'content'), a.encoding === 'base64' ? 'base64' : 'utf8');
+      if (typeof a.content !== 'string') throw new Fault(400, 'content is required.');
+      const bytes = Buffer.from(a.content, a.encoding === 'base64' ? 'base64' : 'utf8');
       const f = app.files.put(id, need(a, 'path'), bytes, actor.sub, { maxBytes: app.config.uploadMaxBytes });
-      return text(`Attached ${f.path} (${f.mime.split(';')[0]}, ${f.size} bytes) to ${id}.\nIn the page: ${f.path} (relative). For agents: ${app.config.origin}/p/${id}/${f.path}`);
+      return text(`Attached ${f.path} (${f.mime.split(';')[0]}, ${f.size} bytes) to ${id}.\nIn the page: ${f.path} (relative). For agents: ${fileUrl(app, id, f.path)}`);
     },
   },
   {
     name: 'list_files', featureSet: 'docs.read', toolClass: 'notes',
-    description: 'The files attached to a document, with sizes and types.',
-    inputSchema: { type: 'object', required: ['document'], properties: { ...docArg } },
+    description: 'The files attached to a document, with sizes and types. For a file collection: one folder at a time (its subfolders and its files).',
+    inputSchema: { type: 'object', required: ['document'], properties: { ...docArg, folder: S('For a file collection: the folder to list, e.g. "papers/2024" (default: the top).'), offset: { type: 'integer', minimum: 0, description: 'For a file collection: skip this many entries (a long folder is listed 400 at a time).' } } },
     run(app, actor, a) {
       const id = need(a, 'document');
-      app.docs.require(id, actor, 'viewer');
+      const { doc } = app.docs.require(id, actor, 'viewer');
+      if (doc.type === COLLECTION) {
+        const folder = typeof a.folder === 'string' && a.folder.replace(/^\/+|\/+$/g, '') ? app.files.path(id, a.folder) : '';
+        return text(folderListing(app, id, folder, Number(a.offset) || 0) || (folder ? `Nothing in ${folder}.` : 'No files yet.'));
+      }
       const files = app.files.list(id);
-      return text(files.length ? files.map((f) => `${f.path}  ${f.mime.split(';')[0]}  ${f.size} bytes  ${new Date(f.updatedAt).toISOString()}  → ${app.config.origin}/p/${id}/${f.path}`).join('\n') : 'No files attached.');
+      return text(files.length ? files.map((f) => `${f.path}  ${f.mime.split(';')[0]}  ${f.size} bytes  ${new Date(f.updatedAt).toISOString()}  → ${fileUrl(app, id, f.path)}`).join('\n') : 'No files attached.');
     },
   },
   {
     name: 'remove_file', featureSet: 'docs.write', toolClass: 'notes',
     description: 'Remove an attached file.',
-    inputSchema: { type: 'object', required: ['document', 'path'], properties: { ...docArg, path: S('The file\'s path.') } },
+    inputSchema: { type: 'object', required: ['document', 'path'], properties: { ...docArg, path: S('The file\'s path.'), folder: { type: 'boolean', description: 'In a file collection: path is a folder; remove it with everything in it.' } } },
     run(app, actor, a) {
       const id = need(a, 'document');
       app.docs.require(id, actor, 'editor');
-      return text(app.files.remove(id, need(a, 'path')) ? `Removed ${a.path}.` : `No file ${a.path}.`);
+      if (a.folder) { const n = app.files.removeFolder(id, need(a, 'path'), actor.sub); return text(n ? `Removed ${a.path} (${n} file${n === 1 ? '' : 's'}).` : `No folder ${a.path}.`); }
+      return text(app.files.remove(id, need(a, 'path'), actor.sub) ? `Removed ${a.path}.` : `No file ${a.path}.`);
+    },
+  },
+  {
+    name: 'move_file', featureSet: 'docs.write', toolClass: 'notes',
+    description: 'Rename or move an attached file; in a file collection also a folder, with everything in it. Nothing is overwritten: if the destination exists, the move is refused.',
+    inputSchema: { type: 'object', required: ['document', 'from', 'to'], properties: { ...docArg, from: S('The current path of the file or folder.'), to: S('Its new path.') } },
+    run(app, actor, a) {
+      const id = need(a, 'document');
+      app.docs.require(id, actor, 'editor');
+      const n = app.files.move(id, need(a, 'from'), need(a, 'to'), actor.sub);
+      return text(n === 1 ? `Moved ${a.from} to ${a.to}.` : `Moved ${a.from} to ${a.to} (${n} files).`);
     },
   },
   {
     name: 'read_file', featureSet: 'docs.read', toolClass: 'notes',
-    description: 'Read an attached file, or a slice of it: json_pointer ("/arms/0/retention") for JSON, from_line/to_line for text. Binary files report size and type only.',
+    description: 'Read an attached file, or a slice of it: json_pointer ("/arms/0/retention") for JSON, from_line/to_line for text, from_page/to_page for a PDF (its text, page by page). Other binary files report size and type only.',
     inputSchema: { type: 'object', required: ['document', 'path'], properties: {
       ...docArg, path: S('The file\'s path.'),
       json_pointer: S('RFC 6901 pointer into a JSON file, e.g. "/arms/connectome/retention"; "" is the whole value.'),
       from_line: { type: 'integer', minimum: 1 }, to_line: { type: 'integer', minimum: 1 },
+      from_page: { type: 'integer', minimum: 1, description: 'For a PDF: the first page to read (default 1).' }, to_page: { type: 'integer', minimum: 1, description: 'For a PDF: the last page to read.' },
       max_chars: { type: 'integer', minimum: 100, description: 'Cap on the text returned (default 60000).' },
     } },
-    run(app, actor, a) {
+    async run(app, actor, a) {
       const id = need(a, 'document');
       app.docs.require(id, actor, 'viewer');
-      const r = app.files.read(id, need(a, 'path'));
-      if (!r) throw new Fault(404, `No file ${a.path} on ${id}. list_files shows what is attached.`);
+      const f = app.files.get(id, app.files.path(id, need(a, 'path')));
+      if (!f) throw new Fault(404, `No file ${a.path} on ${id}. list_files shows what is attached.`);
       const cap = Number(a.max_chars) || 60_000;
-      if (!isTextMime(r.file.mime)) return text(`${r.file.path}: ${r.file.mime.split(';')[0]}, ${r.file.size} bytes (binary). ${app.config.origin}/p/${id}/${r.file.path}`);
+      const address = fileUrl(app, id, f.path);
+      if (f.mime === 'application/pdf') {
+        const at = app.media.locate(f.mediaId);
+        const pages = at ? await app.pdf.pages(f.mediaId, at.file) : null;
+        if (!pages) return text(`${f.path}: a PDF, ${f.size} bytes; its text could not be read here. ${address}`);
+        const from = Math.max(1, Number(a.from_page) || 1), to = Math.min(pages.length, Number(a.to_page) || pages.length);
+        if (from > to) return text(`${f.path}: a PDF of ${pages.length} page${pages.length === 1 ? '' : 's'}; there is no page ${from}${Number(a.to_page) && Number(a.to_page) < from ? ` to ${a.to_page}` : ''}.`);
+        let out = '', last = from - 1;
+        for (let n = from; n <= to; n++) {
+          const page = `— page ${n} —\n${pages[n - 1]}\n\n`;
+          if (out && out.length + page.length > cap) break;
+          out += page; last = n;
+        }
+        if (!out.trim().replace(/— page \d+ —/g, '').trim()) return text(`${f.path}: a PDF of ${pages.length} page${pages.length === 1 ? '' : 's'} with no text in ${from === to ? `page ${from}` : `pages ${from}–${to}`} (scanned pages are pictures). ${address}`);
+        return text(`${f.path}: PDF, ${pages.length} page${pages.length === 1 ? '' : 's'}; pages ${from}–${last}${last < to ? ` (from_page ${last + 1} continues)` : ''}:\n\n${out.length > cap ? `${out.slice(0, cap)}\n…` : out.trimEnd()}`);
+      }
+      if (!isTextMime(f.mime)) return text(`${f.path}: ${f.mime.split(';')[0]}, ${f.size} bytes (binary). ${address}`);
+      const r = app.files.read(id, f.path)!;
       let body = r.bytes.toString('utf8');
       if (typeof a.json_pointer === 'string') {
         let parsed: unknown;
@@ -698,9 +829,17 @@ export const TOOLS: ToolDef[] = [
     inputSchema: { type: 'object', required: ['document', 'version'], properties: {
       ...docArg, version: S('A saved version id, or a recorded change id like "h123" (see versions).'),
       at: S('For a recorded change: "after" (default) or "before" it.', { enum: ['after', 'before'] }),
+      path: S('For a file collection: bring back only this file or folder, as it was at that version.'),
     } },
-    run(app, actor, a) {
+    async run(app, actor, a) {
       const id = need(a, 'document');
+      const { doc } = app.docs.require(id, actor, 'editor');
+      if (doc.type === COLLECTION) {
+        const before = a.at === 'before';
+        await app.git.restore(id, need(a, 'version'), typeof a.path === 'string' && a.path ? a.path : null, actor.sub, before ? 'before' : 'after');
+        const when = `as it was ${before ? 'before' : 'after'} ${String(a.version).trim().slice(0, 10)}`;
+        return text(a.path ? `Restored ${a.path} ${when}.` : `Restored the collection ${when}: ${app.files.count(id).files} files.`);
+      }
       const seq = parseCheckpointId(a.version);
       if (seq !== null) app.history.restore(id, { ...actor, via: 'mcpl' }, seq, a.at === 'before' ? 'before' : 'after');
       else app.docs.restoreVersion(id, actor, need(a, 'version'));
