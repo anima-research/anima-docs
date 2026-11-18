@@ -49,7 +49,7 @@ export const DEFAULT_ATTRIBUTES = `# Files of these kinds are kept with Git LFS 
  * A line that makes exactly this path an LFS object, written the way `git lfs track` writes one: glob characters
  * escaped, and each space as [[:space:]] (a space would end the pattern).
  */
-const exactAttribute = (path: string) => `/${path.replace(/[*?[]/g, '\\$&').replace(/\s/g, '[[:space:]]')} ${LFS_ATTR}`;
+const exactAttribute = (path: string) => `/${path.replace(/[\\*?[]/g, '\\$&').replace(/\s/g, '[[:space:]]')} ${LFS_ATTR}`;
 
 export const lfsPointer = (oid: string, size: number) => `version https://git-lfs.github.com/spec/v1\noid sha256:${oid}\nsize ${size}\n`;
 export function parsePointer(b: Buffer): { oid: string; size: number } | null {
