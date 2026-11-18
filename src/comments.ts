@@ -19,6 +19,7 @@ import { Fault } from './auth.js';
 import { isGuest, type Actor, type Principal, type Principals } from './principals.js';
 import { atLeast, Documents, MAX_DOC_CHARS, type ChangeOrigin, type DeleteSet } from './documents.js';
 import { lineStarts, lineOf, occurrences } from './markdown.js';
+import { FIELD_WORD, type FileField } from './fields.js';
 
 export interface Comment {
   id: string;
@@ -38,6 +39,8 @@ export interface Comment {
   suggestion: Suggestion | null;
   /** A comment that ends in another node than it starts in (node model). */
   endDocId: string | null;
+  /** Roots only: the thread is a signature or initials field on a page of a PDF (fields.ts). */
+  field: FileField | null;
 }
 
 export type SuggestionStatus = 'open' | 'accepted' | 'rejected';
@@ -104,6 +107,7 @@ type Row = {
   created_at: number; edited_at: number | null; deleted_at: number | null;
   sugg_text: string | null; sugg_orig: string | null; sugg_status: SuggestionStatus | null;
   end_doc_id: string | null;
+  field: string | null;
 };
 const fromRow = (r: Row): Comment => ({
   id: r.id, docId: r.doc_id, threadId: r.thread_id, author: r.author_sub, body: r.body, mentions: JSON.parse(r.mentions),
@@ -111,6 +115,7 @@ const fromRow = (r: Row): Comment => ({
   createdAt: r.created_at, editedAt: r.edited_at, deletedAt: r.deleted_at,
   suggestion: r.sugg_status ? { original: r.sugg_orig ?? '', text: r.sugg_text ?? '', status: r.sugg_status } : null,
   endDocId: r.end_doc_id ?? null,
+  field: r.field ? JSON.parse(r.field) as FileField : null,
 });
 
 const MAX_BODY = 20_000;
@@ -264,10 +269,12 @@ export class Comments extends EventEmitter {
     assignee?: string | null;
     /** Make this a suggestion: replace the anchored text (its quote, in full) with `text`. */
     suggestion?: { text: string } | null;
+    /** Make this a signature or initials field (already checked: fields.ts). Its text is optional. */
+    field?: FileField | null;
   }, internal: { throttled?: boolean } = {}): { comment: Comment; warnings: string[] } {
     const { doc } = this.docs.require(docId, actor, 'commenter');
     const sugg = p.suggestion ? this.checkSuggestion(docId, actor, p.anchor ?? null, p.suggestion.text) : null;
-    const body = sugg ? this.cleanNote(p.body) : this.cleanBody(p.body);
+    const body = sugg ? this.cleanNote(p.body) : p.field ? this.cleanNote(p.body) || `${FIELD_WORD[p.field.kind]} needed.` : this.cleanBody(p.body);
     if (!internal.throttled) this.throttle(actor);
     const id = newId();
     const { mentions, warnings } = this.mentionsIn(docId, body, actor);
@@ -276,11 +283,11 @@ export class Comments extends EventEmitter {
     const now = Date.now();
     if (p.anchor?.endDoc && sugg) throw new Fault(400, 'A suggestion cannot span two sections.');
     if (p.anchor?.endDoc) this.docs.require(p.anchor.endDoc, actor, 'commenter');
-    this.db.prepare(`INSERT INTO comments (id, doc_id, thread_id, author_sub, body, mentions, assignee_sub, anchor_start, anchor_end, quote, created_at, sugg_text, sugg_orig, sugg_status, end_doc_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    this.db.prepare(`INSERT INTO comments (id, doc_id, thread_id, author_sub, body, mentions, assignee_sub, anchor_start, anchor_end, quote, created_at, sugg_text, sugg_orig, sugg_status, end_doc_id, field)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(id, docId, id, actor.sub, body, JSON.stringify(mentions.map((m) => m.sub)), assignee?.sub ?? null,
         p.anchor ? Buffer.from(p.anchor.start) : null, p.anchor ? Buffer.from(p.anchor.end) : null, p.anchor ? (p.anchor.context ?? p.anchor.quote).slice(0, 2000) : null, now,
-        sugg?.text ?? null, sugg?.original ?? null, sugg ? 'open' : null, p.anchor?.endDoc ?? null);
+        sugg?.text ?? null, sugg?.original ?? null, sugg ? 'open' : null, p.anchor?.endDoc ?? null, p.field ? JSON.stringify(p.field) : null);
     const addressed = [
       // A suggestion asks the owner for a decision (first: an @mention of the owner in the note doesn't replace it).
       ...(sugg && doc.ownerSub !== actor.sub ? [{ sub: doc.ownerSub, reason: 'suggestion' as const }] : []),
@@ -576,6 +583,14 @@ export class Comments extends EventEmitter {
       }
     })();
     return n;
+  }
+
+  /** Files of a collection got new paths: the signature fields on them follow, and open pages hear of it. */
+  filesMoved(docId: string, moves: [from: string, to: string][]) {
+    const upd = this.db.prepare(`UPDATE comments SET field = json_set(field, '$.path', ?) WHERE doc_id = ? AND field IS NOT NULL AND json_extract(field, '$.path') = ?`);
+    let n = 0;
+    for (const [from, to] of moves) n += upd.run(to, docId, from).changes;
+    if (n) this.emit('refresh', docId);
   }
 
   // ------------------------------------------------------------------ reads

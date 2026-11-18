@@ -64,6 +64,7 @@ export function createApp(config: Config, issuers: Map<string, KeyObject>, opts:
   const files = new DocFiles(db, media);
   const git = new GitRepos(db, media, files, (sub) => principals.label(sub), { dataDir: config.dataDir === ':memory:' ? join(process.cwd(), 'data') : config.dataDir, host: new URL(config.origin).hostname, maxBytes: config.uploadMaxBytes, settleMs: opts.gitSettleMs, requiredScopes: config.requiredScopes, passwordDays: config.sessionMaxDays });
   files.onChange = (docId, by) => git.changed(docId, by);
+  files.onMoved = (docId, moves) => comments.filesMoved(docId, moves);
   const pdf = new PdfText(config.dataDir === ':memory:' ? join(process.cwd(), 'data') : config.dataDir);
   const pageKeys = new PageKeys(config.dataDir === ':memory:' ? null : config.dataDir);
   const attention = new Attention(db, docs, comments, principals, { log: opts.attentionLog, commentSettleMs: opts.commentSettleMs, suggestSettleMs: opts.suggestSettleMs });

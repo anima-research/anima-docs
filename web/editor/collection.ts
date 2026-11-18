@@ -10,17 +10,26 @@ import { LanguageDescription, syntaxHighlighting } from '@codemirror/language';
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown';
 import { search, searchKeymap } from '@codemirror/search';
 
-import { api, ApiError, type DocFile } from '../lib/api';
+import { api, ApiError, type DocFile, type Thread } from '../lib/api';
+import type { SignField, SignView } from '../pdfsign';
 import { h } from '../lib/dom';
 import { fullTime, plural, relTime } from '../lib/format';
 import { icon } from '../lib/icons';
 import { renderDocument } from '../lib/markdown';
-import { confirmDialog, emptyState, errorMessage, iconButton, openMenu, promptDialog, spinner, toast, type MenuItem } from '../lib/ui';
+import { confirmDialog, emptyState, errorMessage, iconButton, openDialog, openMenu, promptDialog, spinner, toast, type MenuItem } from '../lib/ui';
 import { codeLanguages } from './languages';
 import { docHighlight } from './codestyle';
 import { openCloneDialog, openHistoryDialog } from './collection-git';
 
-export interface CollectionView { el: HTMLElement; setCanEdit(canEdit: boolean): void; destroy(): void }
+export interface CollectionView {
+  el: HTMLElement;
+  setCanEdit(canEdit: boolean): void;
+  /** The document's comment threads changed (some are signature fields on its PDFs). */
+  setThreads(): void;
+  /** Show a file. */
+  open(path: string): void;
+  destroy(): void;
+}
 
 type Kind = 'image' | 'video' | 'audio' | 'pdf' | 'text' | 'other';
 interface Folder { name: string; path: string; files: number; bytes: number; updatedAt: number }
@@ -55,7 +64,19 @@ function loadHidden(): boolean { try { return localStorage.getItem('docs.files.h
 function saveHidden(on: boolean) { try { localStorage.setItem('docs.files.hidden', on ? '1' : '0'); } catch { /* storage may be blocked */ } }
 const isHidden = (path: string) => path.startsWith('.') || path.includes('/.');
 
-export function collectionView(opts: { docId: string; canEdit: boolean; guest: boolean }): CollectionView {
+/** Filling and signing PDFs is a bundle of its own (pdf.js, pdf-lib), fetched the first time it is needed. */
+let signModule: Promise<typeof import('../pdfsign')> | null = null;
+const loadSign = () => {
+  const url = '/pdfsign.js';
+  // A fetch that failed (the connection dropped) is tried again the next time, not remembered.
+  return (signModule ??= (import(url) as Promise<typeof import('../pdfsign')>).catch((e) => { signModule = null; throw e; }));
+};
+
+export function collectionView(opts: {
+  docId: string; canEdit: boolean; guest: boolean;
+  /** Who is looking, and the document's comment threads and how to answer them: a thread may be a place to sign. */
+  me: string; threads: () => Thread[]; request: (msg: Record<string, unknown>) => Promise<unknown>;
+}): CollectionView {
   const { docId } = opts;
   let canEdit = opts.canEdit;
   let files: DocFile[] = [];
@@ -71,6 +92,10 @@ export function collectionView(opts: { docId: string; canEdit: boolean; guest: b
   const emptyFolders = new Set<string>();
   /** The open text file's editor: what was last saved, and from which stored version of the file. */
   let editor: { view: EditorView; path: string; saved: string; version: string; saving: boolean; save(): Promise<void> } | null = null;
+  /** The PDF being filled in or signed (its path), the view doing it, and the one the person closed (not opened again by itself). */
+  let signing: string | null = null;
+  let signer: SignView | null = null;
+  let signClosed: string | null = null;
   /** Whether the server keeps this collection's history (what a delete or a replace can be told to be). */
   let keepsHistory = false;
   void api.gitInfo(docId).then((i) => { keepsHistory = i.available; }, () => undefined);
@@ -80,6 +105,18 @@ export function collectionView(opts: { docId: string; canEdit: boolean; guest: b
   const srcOf = (f: DocFile) => `${f.url}?v=${f.mediaId.slice(0, 12)}`;
   const linkTo = (path: string) => `${location.origin}/d/${docId}${path ? `?at=${encodeURIComponent(path)}` : ''}`;
   const fileAt = (path: string) => files.find((f) => f.path === path) ?? null;
+  /** The open places to sign on a PDF: threads that are fields on it. */
+  const fieldsOf = (path: string): SignField[] => opts.threads().flatMap((t) => (t.field && !t.resolved && t.field.path === path ? [{
+    id: t.id, kind: t.field.kind, page: t.field.page, x: t.field.x, y: t.field.y, w: t.field.w, h: t.field.h,
+    by: t.comments[0]?.author.name ?? '', note: t.comments[0]?.body ?? '', forMe: t.assignee?.sub === opts.me, assignee: t.assignee?.name ?? null,
+  }] : []));
+  /** A chip on a file with places to sign: stronger when they are for you. */
+  const signChip = (path: string) => {
+    const asked = fieldsOf(path);
+    if (!asked.length) return null;
+    const mine = asked.some((a) => a.forMe);
+    return h('span.type-chip.sign-chip', { class: mine ? 'mine' : '', 'data-tip': mine ? 'Waiting for your signature' : `Waiting for ${asked.find((a) => a.assignee)?.assignee ?? 'a'} signature` }, mine ? 'Sign' : 'To sign');
+  };
 
   // ------------------------------------------------------------------ the address: ?at=<folder or file>
 
@@ -132,8 +169,8 @@ export function collectionView(opts: { docId: string; canEdit: boolean; guest: b
       const first = !loaded;
       loaded = true; failed = null;
       if (first) applyAt();
-      // While a text file is open with changes, the list refreshes behind it and the editor stays.
-      if (!(editor && shown === editor.path)) render();
+      // While a text file is being edited, or a PDF filled in, the list refreshes behind it and the work stays.
+      if (!(editor && shown === editor.path) && !signer) render();
     } catch (e) {
       if (destroyed || (quiet && loaded)) return;
       failed = errorMessage(e);
@@ -237,7 +274,7 @@ export function collectionView(opts: { docId: string; canEdit: boolean; guest: b
           h('button.coll-tile-open', { type: 'button', onclick: () => go(d.path) }, h('span.coll-tile-art', null, icon('folder', 44, 'coll-icon')), h('span.coll-tile-name', { title: d.name }, d.name), h('span.coll-tile-meta.meta', null, d.files ? plural(d.files, 'file') : 'Empty')),
           menuButton(`Actions for ${d.name}`, () => folderMenu(d)))),
         ...here.map((f) => h('div.coll-tile', { role: 'listitem' },
-          h('button.coll-tile-open', { type: 'button', onclick: () => show(f.path) }, h('span.coll-tile-art', null, thumb(f, 44)), h('span.coll-tile-name', { title: baseName(f.path) }, baseName(f.path)), h('span.coll-tile-meta.meta', null, fmtSize(f.size))),
+          h('button.coll-tile-open', { type: 'button', onclick: () => show(f.path) }, h('span.coll-tile-art', null, thumb(f, 44)), h('span.coll-tile-name', { title: baseName(f.path) }, baseName(f.path)), h('span.coll-tile-meta.meta', null, fmtSize(f.size), signChip(f.path))),
           menuButton(`Actions for ${baseName(f.path)}`, () => fileMenu(f))))));
       return;
     }
@@ -249,7 +286,7 @@ export function collectionView(opts: { docId: string; canEdit: boolean; guest: b
         h('span.c-when.meta', { title: d.updatedAt ? fullTime(d.updatedAt) : '' }, d.updatedAt ? relTime(d.updatedAt) : ''),
         h('span.c-more', null, menuButton(`Actions for ${d.name}`, () => folderMenu(d))))),
       ...here.map((f) => h('div.coll-row', { role: 'listitem' },
-        h('button.c-name.coll-open', { type: 'button', onclick: () => show(f.path) }, icon(iconOf(kindOf(f)), 18, 'coll-icon'), h('span.coll-name', null, baseName(f.path))),
+        h('button.c-name.coll-open', { type: 'button', onclick: () => show(f.path) }, icon(iconOf(kindOf(f)), 18, 'coll-icon'), h('span.coll-name', null, baseName(f.path)), signChip(f.path)),
         h('span.c-size.meta', null, fmtSize(f.size)),
         h('span.c-when.meta', { title: fullTime(f.updatedAt) }, relTime(f.updatedAt)),
         h('span.c-more', null, menuButton(`Actions for ${baseName(f.path)}`, () => fileMenu(f)))))));
@@ -259,6 +296,11 @@ export function collectionView(opts: { docId: string; canEdit: boolean; guest: b
 
   /** Leaving an edited text file: ask first. True when it is fine to go. */
   function leaveEditor(): boolean {
+    if (signer) {
+      if (signer.dirty() && !window.confirm(`Leave without saving what you filled in on ${baseName(signing ?? '')}?`)) return false;
+      signer.destroy(); signer = null; signing = null;
+    }
+    signClosed = null;
     if (!editor) return true;
     if (editor.view.state.doc.toString() !== editor.saved && !window.confirm(`Discard your changes to ${baseName(editor.path)}?`)) return false;
     editor.view.destroy();
@@ -290,10 +332,58 @@ export function collectionView(opts: { docId: string; canEdit: boolean; guest: b
     } else if (kind === 'video') stage.append(h('video.coll-video', { src: srcOf(f), controls: '', playsinline: '', preload: 'metadata' }));
     else if (kind === 'audio') stage.append(icon('music', 48, 'coll-icon'), h('audio.coll-audio', { src: srcOf(f), controls: '', preload: 'metadata' }));
     // A PDF is shown by the browser's own viewer, from the media address (which may be framed here; a file's own address is sandboxed, and PDF viewers refuse a sandbox).
-    else if (kind === 'pdf') stage.append(h('iframe.coll-pdf', { src: `/media/${f.mediaId}`, title: baseName(f.path) }));
+    else if (kind === 'pdf') {
+      const asked = fieldsOf(f.path);
+      // Opened to be signed when it is waiting for this person (or for anyone); otherwise a click away.
+      if (canEdit && signClosed !== f.path && asked.some((a) => a.forMe || !a.assignee)) signing = f.path;
+      if (canEdit && signing === f.path) void openSigner(f, stage);
+      else {
+        if (canEdit) tools.append(h('button.btn.sm', { type: 'button', onclick: () => { signing = f.path; signClosed = null; render(); } }, icon('suggest', 15), asked.length ? 'Sign' : 'Fill & sign'));
+        else if (asked.some((a) => a.forMe)) tools.append(h('span.meta', null, 'Signing needs edit access to this collection.'));
+        stage.append(h('iframe.coll-pdf', { src: `/media/${f.mediaId}`, title: baseName(f.path) }));
+      }
+    }
     else if (kind === 'text' && f.size <= MAX_EDIT) void openText(f, stage, tools);
     else noPreview(kind === 'text' ? `Too large to open here (${fmtSize(f.size)}).` : 'No preview for this kind of file.');
     main.replaceChildren(h('div.coll-view', null, head, stage));
+  }
+
+  let signTurn = 0;
+  async function openSigner(f: DocFile, stage: HTMLElement) {
+    // Of several openings under way (the page drew again while one was loading), only the last one stays.
+    const turn = ++signTurn;
+    stage.className = 'coll-stage kind-sign';
+    stage.replaceChildren(spinner(22));
+    const done = () => { signer?.destroy(); signer = null; signing = null; signClosed = f.path; render(); };
+    try {
+      const view = await (await loadSign()).mountSign({
+        url: srcOf(f), name: baseName(f.path), fields: fieldsOf(f.path),
+        host: {
+          toast: (message, kind = 'info') => toast(message, { kind, timeout: kind === 'error' ? 8000 : 4000 }),
+          confirm: (title, message, confirmLabel) => confirmDialog({ title, message, confirmLabel, danger: true }),
+          dialog: (title, body, footer) => openDialog({ title, body, footer, size: 'md', className: 'sign-dialog' }),
+        },
+        save: async (bytes, signed) => {
+          let nf: DocFile;
+          try { nf = await api.putFile(docId, f.path, new Blob([bytes as BlobPart], { type: 'application/pdf' }), f.mediaId); }
+          catch (e) { throw e instanceof ApiError && e.status === 412 ? new Error('Someone else changed this file while you were filling it in. Close, open it again, and fill in the new one.') : e; }
+          files = files.map((x) => (x.path === nf.path ? nf : x));
+          // Each place signed is answered and closed: whoever asked hears it in their thread.
+          let unanswered = 0;
+          for (const s of signed) await opts.request({ type: 'comment.reply', comment: s.id, body: s.kind === 'signature' ? 'Signed.' : 'Initialled.', resolve: true }).catch(() => { unanswered++; });
+          toast(signed.length ? 'Signed and saved' : 'Saved', { kind: 'success', timeout: 2500 });
+          if (unanswered) toast(`The PDF is signed and saved, but ${unanswered === 1 ? 'the request' : `${unanswered} requests`} could not be marked as done: resolve ${unanswered === 1 ? 'it' : 'them'} in Comments so whoever asked knows.`, { kind: 'error', timeout: 0 });
+        },
+        close: done,
+      });
+      if (destroyed || turn !== signTurn || shown !== f.path || signing !== f.path) { view.destroy(); return; }
+      signer?.destroy();
+      signer = view;
+      stage.replaceChildren(view.el);
+    } catch (e) {
+      signing = null; signClosed = f.path;
+      if (shown === f.path) stage.replaceChildren(emptyState({ art: icon('alert', 36, 'empty-art-icon'), title: 'Couldn’t open this PDF for filling in', text: errorMessage(e), action: h('button.btn', { type: 'button', onclick: () => render() }, 'Show it instead') }));
+    }
   }
 
   async function openText(f: DocFile, stage: HTMLElement, tools: HTMLElement) {
@@ -511,13 +601,17 @@ export function collectionView(opts: { docId: string; canEdit: boolean; guest: b
   // Others (people, agents, pushes) change the collection too: look again when the tab comes back.
   const onVisible = () => { if (document.visibilityState === 'visible' && !uploading) void load(true); };
   document.addEventListener('visibilitychange', onVisible);
-  const unsaved = () => !!editor && editor.view.state.doc.toString() !== editor.saved;
+  const unsaved = () => (!!editor && editor.view.state.doc.toString() !== editor.saved) || !!signer?.dirty();
   const onUnload = (e: BeforeUnloadEvent) => { if (unsaved()) { e.preventDefault(); e.returnValue = ''; } };
   window.addEventListener('beforeunload', onUnload);
 
+  /** The places to sign on the file shown, as last drawn. */
+  let shownFields = '';
   function render() {
     if (destroyed) return;
+    shownFields = shown ? JSON.stringify(fieldsOf(shown)) : '';
     if (editor && shown !== editor.path) { editor.view.destroy(); editor = null; }
+    if (signer && shown !== signing) { signer.destroy(); signer = null; signing = null; }
     el.classList.toggle('viewing', !!shown);
     newFolderBtn.hidden = uploadBtn.hidden = !canEdit || !!shown;
     layoutSwitch.hidden = summary.hidden = moreBtn.hidden = !!shown;
@@ -534,12 +628,23 @@ export function collectionView(opts: { docId: string; canEdit: boolean; guest: b
 
   return {
     el,
-    setCanEdit(next) { if (next === canEdit) return; canEdit = next; if (!(editor && shown === editor.path)) render(); },
+    setCanEdit(next) { if (next === canEdit) return; canEdit = next; if (!(editor && shown === editor.path) && !signer) render(); },
+    setThreads() {
+      if (signer && signing) { signer.setFields(fieldsOf(signing)); return; }
+      if (!loaded) return;
+      // An open file is left as it is (a video playing, a PDF being read) unless its own places to sign changed.
+      const key = shown ? JSON.stringify(fieldsOf(shown)) : '';
+      if (shown && key === shownFields) return;
+      if (!(editor && shown === editor.path)) render();
+    },
+    open(path) { if (fileAt(path)) show(path); },
     destroy() {
       // Going to another page with edits not saved: one question, and the save goes on after the view is gone.
-      if (unsaved() && window.confirm(`Save your changes to ${baseName(editor!.path)}?`)) void editor!.save();
+      if (editor && editor.view.state.doc.toString() !== editor.saved && window.confirm(`Save your changes to ${baseName(editor.path)}?`)) void editor.save();
+      if (signer?.dirty() && window.confirm(`Save what you filled in on ${baseName(signing ?? '')}?`)) void signer.save();
       destroyed = true;
       editor?.view.destroy();
+      signer?.destroy();
       window.removeEventListener('beforeunload', onUnload);
       window.removeEventListener('popstate', onPop);
       document.removeEventListener('keydown', onKey);

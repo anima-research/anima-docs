@@ -8,3 +8,5 @@ public/app.css
 .env
 public/*.map
 public/katex/
+public/pdfsign.js
+public/pdfjs/

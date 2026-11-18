@@ -1533,3 +1533,54 @@ button.coll-crumb:hover { background: var(--hover); color: var(--text); }
 .coll-clone .field { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
 .coll-clone .field .coll-copy { align-self: stretch; }
 .coll-clone code { font-family: var(--font-mono); font-size: 0.92em; }
+
+/* Filling in and signing a PDF (pdfsign.ts): pages drawn by pdf.js, with a layer of fields and placed things over each. */
+.coll-stage.kind-sign { align-items: stretch; justify-content: flex-start; gap: 0; overflow: hidden; }
+.sign { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; }
+.sign-bar { display: flex; align-items: center; gap: 6px; padding: 6px 12px; border-bottom: 1px solid var(--border); background: var(--surface); flex-wrap: wrap; }
+.sign-bar .sign-tool[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
+.sign-hint { margin-left: 6px; }
+.sign-pages { flex: 1 1 0; min-height: 0; overflow: auto; padding: 20px 16px 60px; display: flex; flex-direction: column; align-items: center; gap: 16px; background: var(--canvas); }
+/* A PDF page is paper: white with dark ink, in the light and in the dark theme alike. */
+.sign-page { position: relative; flex: none; width: min(100%, 920px); background: #fff; color: #111827; box-shadow: var(--page-shadow); --pt: 1px; }
+.sign-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.sign-layer { position: absolute; inset: 0; }
+.sign[data-tool="text"] .sign-layer, .sign[data-tool="date"] .sign-layer { cursor: text; }
+.sign[data-tool="signature"] .sign-layer, .sign[data-tool="initials"] .sign-layer { cursor: copy; }
+.sign-input { position: absolute; box-sizing: border-box; margin: 0; padding: 0 calc(var(--pt) * 2); border: 0; border-radius: 0; background: rgba(36, 89, 224, 0.09); color: #111827; font-family: Helvetica, Arial, sans-serif; line-height: 1.15; resize: none; }
+.sign-input:hover { background: rgba(36, 89, 224, 0.14); }
+.sign-input:focus { outline: 2px solid #2459e0; outline-offset: 0; background: rgba(255, 255, 255, 0.9); }
+textarea.sign-input { padding-top: calc(var(--pt) * 2); }
+.sign-check { position: absolute; margin: 0; accent-color: #2459e0; }
+.sign-field { position: absolute; box-sizing: border-box; display: flex; align-items: center; justify-content: center; gap: calc(var(--pt) * 4); padding: 0; border: calc(var(--pt) * 1) dashed #b7791f; border-radius: calc(var(--pt) * 3); background: rgba(255, 199, 0, 0.3); color: #7a4d00; font: 600 calc(var(--pt) * 9)/1 Helvetica, Arial, sans-serif; cursor: pointer; overflow: hidden; white-space: nowrap; }
+.sign-field.mine { background: rgba(255, 184, 0, 0.5); border-style: solid; }
+.sign-field:hover { background: rgba(255, 184, 0, 0.62); }
+.sign-field .icon { width: calc(var(--pt) * 10); height: calc(var(--pt) * 10); flex: none; }
+.sign-item { position: absolute; box-sizing: border-box; }
+.sign-item.text { display: flex; align-items: flex-start; font-family: Helvetica, Arial, sans-serif; line-height: 1.2; color: #111827; white-space: pre; outline: 1px dashed transparent; }
+.sign-item.text:hover, .sign-item.text:focus-within, .sign-item.image:hover { outline-color: #2459e0; }
+.sign-text-body { min-width: calc(var(--pt) * 12); min-height: 1.2em; outline: none; white-space: pre; cursor: text; }
+.sign-grip { position: absolute; right: 100%; top: 0; padding: 0 3px; font: 13px/1.3 var(--font-ui); color: #2459e0; cursor: grab; opacity: 0; user-select: none; touch-action: none; }
+.sign-item:hover .sign-grip, .sign-item:focus-within .sign-grip { opacity: 1; }
+.sign-item-tools { position: absolute; left: 0; bottom: 100%; display: none; gap: 2px; padding-bottom: 3px; white-space: nowrap; }
+.sign-item:hover .sign-item-tools, .sign-item:focus-within .sign-item-tools { display: flex; }
+.sign-item-btn { height: 22px; min-width: 22px; padding: 0 5px; border: 1px solid #d0d5dd; border-radius: 5px; background: #fff; color: #1b2230; font: 600 11px/1 var(--font-ui); cursor: pointer; }
+.sign-item-btn:hover { background: #f2f4f7; }
+.sign-item.image { cursor: grab; }
+.sign-stamp { width: 100%; height: 100%; display: block; user-select: none; touch-action: none; -webkit-user-drag: none; }
+.sign-corner { position: absolute; right: -5px; bottom: -5px; width: 11px; height: 11px; border-radius: 50%; background: #2459e0; border: 2px solid #fff; cursor: nwse-resize; opacity: 0; touch-action: none; }
+.sign-item.image:hover .sign-corner { opacity: 1; }
+.sign-pad-wrap { display: flex; flex-direction: column; gap: 8px; }
+.sign-pad { width: 100%; aspect-ratio: 1120 / 360; border: 1px solid var(--border-strong); border-radius: 10px; background: #fff; touch-action: none; cursor: crosshair; }
+.sign-dialog .dialog-foot { flex-wrap: wrap; }
+.sign-chip { margin-left: 8px; border-color: #b7791f; color: #7a4d00; background: rgba(255, 199, 0, 0.25); font-family: var(--font-ui); font-weight: 600; }
+.sign-chip.mine { background: #f5b301; border-color: #f5b301; color: #1b1300; }
+.coll-tile-meta .sign-chip { margin-left: 6px; }
+button.card-field { width: 100%; text-align: left; cursor: pointer; font: inherit; border: 0; }
+button.card-field:hover { text-decoration: underline; }
+@media (prefers-color-scheme: dark) { .sign-chip:not(.mine) { color: #f5c451; } }
+@media (max-width: 760px) { .sign-bar .btn-label { display: none; } .sign-pages { padding: 12px 6px 60px; } }
+
+.sign.saving .sign-pages, .sign.saving .sign-tool { pointer-events: none; }
+.sign.saving .sign-pages { opacity: 0.75; }
+.sign-field.others, .sign-field.others:hover { background: rgba(120, 130, 150, 0.16); border-color: #8a93a3; color: #586173; cursor: default; }

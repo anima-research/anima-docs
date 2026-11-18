@@ -385,7 +385,8 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
       if (mode === 'preview') { if (isHtml()) toFrame({ type: 'reveal', id }); else previewAnnotations?.reveal(id); return true; }
       if (mode === 'split' && !isHtml()) previewAnnotations?.reveal(id);
       return false; // the editor scrolls too
-    } });
+    },
+    openField: (path) => collection?.open(path) });
   rail.onSuggestionsChange = (n) => {
     reviewBtn.hidden = n === 0;
     reviewLabel.textContent = `${n} suggestion${n === 1 ? '' : 's'}`;
@@ -900,7 +901,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     if (ctx.restoreScroll) requestAnimationFrame(() => { editPane.scrollTop = ctx.restoreScroll!; });
     if (canEdit() && provider.ytext.length === 0) view.focus();
   });
-  cleanups.push(nodes.onThreads((threads, ev) => { session?.onThreads(threads); rail.setThreads(threads, ev); latestThreads = threads; sendHighlights(); if (mode !== 'edit' && !isHtml()) schedulePreview(); }));
+  cleanups.push(nodes.onThreads((threads, ev) => { session?.onThreads(threads); rail.setThreads(threads, ev); latestThreads = threads; collection?.setThreads(); sendHighlights(); if (mode !== 'edit' && !isHtml()) schedulePreview(); }));
 
   // ------------------------------------------------------------------ the page's annotation layer
   // The framed page (opaque origin) runs /page-annotate.js and talks over postMessage. It only ever
@@ -1186,7 +1187,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     const files = isFiles();
     app.classList.toggle('files-doc', files);
     filesPane.hidden = !files;
-    if (files && !collection) { collection = collectionView({ docId, canEdit: canEdit(), guest }); filesPane.replaceChildren(collection.el); }
+    if (files && !collection) { collection = collectionView({ docId, canEdit: canEdit(), guest, me: me.sub, threads: () => latestThreads, request: (msg) => provider.request(msg) }); filesPane.replaceChildren(collection.el); }
     else if (!files && collection) { collection.destroy(); collection = null; filesPane.replaceChildren(); }
     app.classList.toggle('html-doc', html);
     view.dispatch({ effects: [langC.reconfigure(html ? htmlLanguage() : markdown({ base: markdownLanguage, codeLanguages, addKeymap: true })), liveC.reconfigure(html ? [] : livePreview)] });

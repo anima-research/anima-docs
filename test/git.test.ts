@@ -249,6 +249,10 @@ test('history: what changed and who; a deleted file, a folder and the whole coll
     const [both] = await shared.log();
     assert.equal(both.author, 'Ann, Cara');
     assert.equal(both.message, 'Add 2 files');
+    // The next change is its author's alone: the .gitattributes the first commit wrote was nobody's change
+    // (counted as one, it would have been Cara's, the last author of that commit, and this one "Cara, Ann").
+    await shared.put('later.md', 'l');
+    assert.equal((await shared.log())[0].author, 'Ann');
   }
   const restore = async (commit: string, path?: string) => { const r = await fetch(`${S.base}/api/docs/${c.id}/git/restore`, { method: 'POST', headers: H({ Cookie: ann.cookie }), body: JSON.stringify({ commit, path }) }); assert.equal(r.status, 200, await r.clone().text()); };
   await c.put('a.md', 'first\n');

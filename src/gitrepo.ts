@@ -74,6 +74,8 @@ export class GitRepos {
   private chains = new Map<string, Promise<unknown>>();
   /** Collections with changes not yet committed: who made them, and the timer that will commit. */
   private waiting = new Map<string, { by: Set<string>; timer: NodeJS.Timeout }>();
+  /** Set while this writes a collection's .gitattributes itself: the repository's own file is nobody's change. */
+  private writingOwn = false;
   /** Pushes being received: the key their hook presents → the collection. */
   private pushes = new Map<string, string>();
 
@@ -171,7 +173,7 @@ export class GitRepos {
 
   /** A collection's files changed (the browser, a tool): commit once things have been quiet for a moment. */
   changed(docId: string, by: string) {
-    if (!this.available) return;
+    if (!this.available || this.writingOwn) return;
     const was = this.waiting.get(docId);
     if (was) clearTimeout(was.timer);
     const timer = setTimeout(() => void this.flush(docId).catch((e) => console.error('[git] commit failed', docId, (e as Error).message)), this.opts.settleMs ?? 5000);
@@ -187,11 +189,11 @@ export class GitRepos {
     return this.lock(docId, () => this.sync(docId, o));
   }
 
-  private async sync(docId: string, o: { by?: string; message?: string } = {}): Promise<string | null> {
+  private async sync(docId: string, o: { by?: string; message?: string; /** The commit is `by`'s own doing (a restore), not only others' waiting changes. */ own?: boolean } = {}): Promise<string | null> {
     const waiting = this.waiting.get(docId);
     if (waiting) { clearTimeout(waiting.timer); this.waiting.delete(docId); }
     // The commit names everyone whose changes it holds (several people within one quiet spell share one).
-    const authors = waiting?.by.size ? [...waiting.by] : o.by ? [o.by] : [];
+    const authors = [...new Set([...(o.own && o.by ? [o.by] : []), ...(waiting?.by.size ? waiting.by : o.by ? [o.by] : [])])];
     const by = o.by ?? authors[authors.length - 1] ?? '';
     const dir = await this.ensure(docId);
     const head = await this.head(dir);
@@ -263,7 +265,10 @@ export class GitRepos {
 
       // The attributes file, when this commit wrote or changed it, is a file of the collection like any other.
       let attrsMedia = attrsRow?.mediaId ?? null;
-      if (attrs !== null && (!attrsRow || attrs !== (this.files.text(docId, ATTRIBUTES) ?? ''))) attrsMedia = this.files.put(docId, ATTRIBUTES, Buffer.from(attrs), by, { maxBytes: this.opts.maxBytes }).mediaId;
+      if (attrs !== null && (!attrsRow || attrs !== (this.files.text(docId, ATTRIBUTES) ?? ''))) {
+        this.writingOwn = true;
+        try { attrsMedia = this.files.put(docId, ATTRIBUTES, Buffer.from(attrs), by, { maxBytes: this.opts.maxBytes }).mediaId; } finally { this.writingOwn = false; }
+      }
 
       const treeOid = (await this.run(dir, ['write-tree'], { env })).toString().trim();
       let commit = head;
@@ -466,7 +471,7 @@ export class GitRepos {
         this.record(docId, entries, made, by, false);
       })();
       const short = commit.slice(0, 7);
-      return this.sync(docId, { by, message: at === null ? `Restore the collection as of ${short}` : `Restore ${at} as of ${short}` });
+      return this.sync(docId, { by, own: true, message: at === null ? `Restore the collection as of ${short}` : `Restore ${at} as of ${short}` });
     });
   }
 

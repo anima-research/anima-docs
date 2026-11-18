@@ -9,6 +9,7 @@ import { quoteText, suggestionSummary, type Thread } from './comments.js';
 import { atLeast, type Role } from './documents.js';
 import { Media, fetchImage } from './media.js';
 import { COLLECTION, COMPANION, isTextMime, jsonPointer } from './files.js';
+import { boxField, describeField, placeField, type FieldKind } from './fields.js';
 import { textChanges } from './diff.js';
 import { findSections, lineOf, lineStarts, outline, withLineNumbers, images } from './markdown.js';
 import { BASE_SETTINGS, WATCH_PRESET, type WatchSettings } from './attention.js';
@@ -144,9 +145,11 @@ function need(args: Record<string, any>, key: string): string {
 function threadText(app: App, t: Thread, opts: { brief?: boolean; full?: boolean } = {}): string {
   if (t.suggestion) return suggestionText(app, t, opts);
   const p = (s: string) => app.principals.label(s);
-  const where = t.anchor
-    ? (t.anchor.orphaned ? `on “${t.root.quote ?? ''}” (text deleted)` : `on “${clip(t.anchor.text, 120)}” (line ${t.anchor.line})`)
-    : 'on the whole document';
+  const where = t.root.field
+    ? `— ${describeField(t.root.field)}${t.root.resolvedAt ? '' : ' (open: not signed yet)'}`
+    : t.anchor
+      ? (t.anchor.orphaned ? `on “${t.root.quote ?? ''}” (text deleted)` : `on “${clip(t.anchor.text, 120)}” (line ${t.anchor.line})`)
+      : 'on the whole document';
   const head = `Thread ${t.root.id} ${where}${t.root.resolvedAt ? ` — RESOLVED by ${p(t.root.resolvedBy!)}` : ''}${t.root.assignee ? ` — assigned to ${p(t.root.assignee)}` : ''}`;
   const msgs = [t.root, ...t.replies].map((c) => `  ${p(c.author)} (${ago(c.createdAt)}${c.editedAt ? ', edited' : ''}) [${c.id}]: ${c.body.replace(/\n/g, '\n    ')}`);
   return [head, ...msgs].join('\n');
@@ -875,18 +878,37 @@ export const TOOLS: ToolDef[] = [
   // ------------------------------------------------------------------ docs.comment
   {
     name: 'add_comment', featureSet: 'docs.comment', toolClass: 'comms',
-    description: 'Start a comment thread, anchored to quoted text (like selecting text in Google Docs) or on the whole document. @Name in the text notifies that person or agent; assign_to makes it their action item.',
-    inputSchema: { type: 'object', required: ['document', 'text'], properties: {
+    description: 'Start a comment thread, anchored to quoted text (like selecting text in Google Docs) or on the whole document. @Name in the text notifies that person or agent; assign_to makes it their action item. To ask someone to sign a PDF in a file collection: field "signature" (or "initials") with file, and where it goes (near: words on the page it belongs beside, or page and box); assign_to the person. They sign in the browser; the thread is answered and resolved when they have, and the signed PDF is the file\'s next version.',
+    inputSchema: { type: 'object', required: ['document'], properties: {
       ...docArg,
       quote: S('Exact text to comment on. Omit to comment on the whole document.'),
-      occurrence: { type: 'integer', minimum: 1, description: 'Which occurrence of quote, if it appears more than once.' },
+      occurrence: { type: 'integer', minimum: 1, description: 'Which occurrence of quote (or of near), if it appears more than once.' },
       near_line: { type: 'integer', minimum: 1, description: 'Or: pick the occurrence closest to this line.' },
-      text: S('Comment (markdown). Mention with @Name.'),
+      text: S('Comment (markdown). Mention with @Name. Optional for a field: what is being signed and why.'),
       assign_to: S('@Name or principal id to assign this thread to.'),
+      field: S('Make the thread a field on a PDF for someone to sign: "signature" or "initials".', { enum: ['signature', 'initials'] }),
+      file: S('For a field: the PDF\'s path in the collection.'),
+      near: S('For a field: words on the page it belongs beside, e.g. "Signature:" (read_file shows a PDF\'s text by page). It is put to their right, or below when there is no room.'),
+      page: { type: 'integer', minimum: 1, description: 'For a field: the page (with near: look only there; with box: required).' },
+      box: { type: 'array', items: { type: 'number' }, minItems: 4, maxItems: 4, description: 'For a field, instead of near: [x, y, width, height] as fractions of the page, from its top left (e.g. [0.55, 0.82, 0.3, 0.05]).' },
     } },
-    run(app, actor, a) {
+    async run(app, actor, a) {
       const id = need(a, 'document');
       app.docs.require(id, actor, 'commenter');
+      if (a.field) {
+        if (a.field !== 'signature' && a.field !== 'initials') throw new Fault(400, 'field is "signature" or "initials".');
+        const kind = a.field as FieldKind;
+        const path = need(a, 'file');
+        if (!a.near && !a.box) throw new Fault(400, 'Say where the field goes: near (words on the page it belongs beside), or page and box.');
+        if (a.box && !a.page) throw new Fault(400, 'With box, give the page too.');
+        const field = a.box ? await boxField(app, id, { kind, path, page: Number(a.page), box: a.box }) : await placeField(app, id, { kind, path, near: String(a.near), page: a.page ? Number(a.page) : undefined, occurrence: a.occurrence });
+        const { comment, warnings } = app.comments.create(id, actor, { body: typeof a.text === 'string' ? a.text : '', assignee: a.assign_to ?? null, field });
+        const asked = comment.assignee ? app.principals.get(comment.assignee) : null;
+        const who = !asked ? ' It is assigned to nobody: assign_to the person who should sign, or tell them.'
+          : asked.kind !== 'human' ? ` Assigned to ${app.principals.label(asked.sub)}, who is not a person: a signature is drawn and placed by a person in the browser.`
+            : `${` Assigned to ${app.principals.label(asked.sub)}.`}${atLeast(app.docs.role(id, { sub: asked.sub, admin: false }), 'editor') ? '' : ' They cannot edit this collection, and signing saves a new version of the file: share it with them as an editor (share_document) first.'}`;
+        return text(`${describeField(field)} placed${a.near ? ` beside “${a.near}”` : ''} (thread ${comment.id}).${who}\nThey sign at ${app.config.origin}/d/${id}?at=${encodeURIComponent(field.path)} — nothing reaches them outside Anima Docs, so send them that address. You hear in this thread when it is signed.${warnings.length ? `\nNote: ${warnings.join(' ')}` : ''}`);
+      }
       const anchor = a.quote ? app.comments.anchorFromQuote(id, String(a.quote), { occurrence: a.occurrence, nearLine: a.near_line }) : null;
       const { comment, warnings } = app.comments.create(id, actor, { body: need(a, 'text'), anchor, assignee: a.assign_to ?? null });
       const t = app.comments.thread(comment.id)!;

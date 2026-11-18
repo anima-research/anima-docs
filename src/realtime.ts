@@ -15,6 +15,7 @@ import { createHmac, randomBytes } from 'node:crypto';
 import type { App } from './app.js';
 import { Fault } from './auth.js';
 import { MAX_SUGGESTION, pointContext } from './comments.js';
+import { cleanField, fieldFile } from './fields.js';
 import { isGuest, type Actor } from './principals.js';
 import { atLeast, type Role, type DocChange } from './documents.js';
 import type { CommentEvent } from './comments.js';
@@ -67,6 +68,8 @@ export class Realtime {
     app.trees.on('changed', (e: { tree: string }) => this.broadcastTree(e.tree));
     app.docs.on('meta', (e: { docId: string; kind: string }) => this.broadcastMeta(e.docId, e.kind));
     app.comments.on('event', (e: CommentEvent) => this.broadcastThreads(e.docId, e));
+    // Threads changed without an event of their own (a file a signature field is on was moved).
+    app.comments.on('refresh', (docId: string) => { const room = this.rooms.get(docId); if (room) for (const c of room.conns.values()) this.sendTo(c, { type: 'threads', threads: this.threadsFor(c) }); });
     app.docs.on('failed', (e: { docId: string }) => this.closeRoom(e.docId, 4500, 'Save failed; reconnecting'));
     app.principals.on('role', (e: { sub: string }) => { this.reauthorize(e.sub); for (const id of this.rooms.keys()) this.recheckRoom(id); });
     app.principals.on('renamed', (e: { sub: string }) => this.renamed(e.sub));
@@ -263,7 +266,9 @@ export class Realtime {
       switch (m.type) {
         case 'comment.create': {
           const anchor = m.anchor ? this.anchorFromClient(room, m.anchor) : null;
-          const r = C.create(room.docId, actor, { body: m.body, anchor, assignee: m.assignee ?? null });
+          // A signature or initials field on a PDF of a collection: its box comes from where the person drew it.
+          const field = m.field ? cleanField({ ...m.field, path: fieldFile(this.app, room.docId, String(m.field.path ?? '')).path }) : null;
+          const r = C.create(room.docId, actor, { body: m.body ?? '', anchor, assignee: m.assignee ?? null, field });
           reply(true, { id: r.comment.id, warnings: warn(r.warnings) }); return;
         }
         case 'comment.reply': { const r = C.reply(m.comment, actor, m.body, { resolve: !!m.resolve }); reply(true, { id: r.comment.id, warnings: warn(r.warnings) }); return; }
@@ -443,6 +448,7 @@ export class Realtime {
       resolved: !!t.root.resolvedAt,
       resolvedBy: person(t.root.resolvedBy),
       assignee: person(t.root.assignee),
+      field: t.root.field,
       comments: [t.root, ...t.replies].map((c) => ({ id: c.id, author: person(c.author), body: c.body, createdAt: c.createdAt, editedAt: c.editedAt, mentions: c.mentions })),
       suggestion: t.suggestion
         ? {

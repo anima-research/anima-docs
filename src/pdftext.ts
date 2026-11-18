@@ -18,6 +18,20 @@ export class PdfText {
     if (!this.available) console.warn('[pdf] pdftotext (poppler-utils) is not installed: agents cannot read the text of PDFs.');
   }
 
+  /** Where each word sits on its page (one page, or all): for placing something beside given words. Null when unreadable. */
+  words(file: string, page?: number): Promise<PageWords[] | null> {
+    if (!this.available) return Promise.resolve(null);
+    const range = page ? ['-f', String(page), '-l', String(page)] : [];
+    const run = (cmd: string, args: string[]) => new Promise<string | null>((resolve) => { execFile(cmd, args, { maxBuffer: 512 * 1024 * 1024, timeout: 60_000 }, (err, stdout) => resolve(err ? null : stdout)); });
+    // The words come placed as the page is shown (turned, if the page is); the page's size comes as it is
+    // before turning, so each page's rotation is asked for too, and a page on its side has its sides swapped.
+    return Promise.all([run('pdftotext', ['-q', '-enc', 'UTF-8', '-cropbox', '-bbox', ...range, file, '-']), run('pdfinfo', [...(page ? range : ['-f', '1', '-l', '100000']), file])]).then(([xml, info]) => {
+      if (xml === null) return null;
+      const turned = new Set([...(info ?? '').matchAll(/^Page\s+(\d+) rot:\s+(\d+)/gm)].filter((m) => Number(m[2]) % 180 === 90).map((m) => Number(m[1])));
+      return parseWords(xml, page ?? 1).map((p) => (turned.has(p.page) ? { ...p, width: p.height, height: p.width } : p));
+    });
+  }
+
   /** Whether the text is already made (reading it costs nothing). */
   ready(mediaId: string): boolean { return existsSync(join(this.dir, `${mediaId}.txt`)) || existsSync(join(this.dir, `${mediaId}.txt.failed`)); }
 
@@ -44,6 +58,23 @@ export class PdfText {
     }
     return reading;
   }
+}
+
+export interface PageWords { page: number; width: number; height: number; words: { text: string; x0: number; y0: number; x1: number; y1: number }[] }
+
+const entity = (s: string) => s.replace(/&(amp|lt|gt|quot|#39|apos);/g, (_, e) => ({ amp: '&', lt: '<', gt: '>', quot: '"', '#39': "'", apos: "'" } as Record<string, string>)[e]);
+
+/** pdftotext -bbox -cropbox: each page's size and each word's box, in points from the top left of the page as it is shown. */
+function parseWords(xml: string, first: number): PageWords[] {
+  const out: PageWords[] = [];
+  const pageRe = /<page width="([\d.]+)" height="([\d.]+)">([\s\S]*?)<\/page>/g;
+  for (let m = pageRe.exec(xml), n = first; m; m = pageRe.exec(xml), n++) {
+    const words: PageWords['words'] = [];
+    const wordRe = /<word xMin="([\d.-]+)" yMin="([\d.-]+)" xMax="([\d.-]+)" yMax="([\d.-]+)">([\s\S]*?)<\/word>/g;
+    for (let w = wordRe.exec(m[3]); w; w = wordRe.exec(m[3])) words.push({ x0: Number(w[1]), y0: Number(w[2]), x1: Number(w[3]), y1: Number(w[4]), text: entity(w[5]) });
+    out.push({ page: n, width: Number(m[1]), height: Number(m[2]), words });
+  }
+  return out;
 }
 
 /** pdftotext ends every page with a form feed. */
