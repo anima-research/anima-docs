@@ -8,7 +8,8 @@
 
 import * as Y from 'yjs';
 import { diffWordsWithSpace, structuredPatch } from 'diff';
-import type { Documents } from './documents.js';
+import { atSnapshots, sheetStoreAt, type Documents } from './documents.js';
+import { bookChanges } from './sheet.js';
 import type { Principals } from './principals.js';
 import { lineStarts, lineOf, outline, sectionPath } from './markdown.js';
 
@@ -87,6 +88,7 @@ export function textChanges(docs: Documents, principals: Principals, docId: stri
   /** How the header describes the span (default "changed since you last looked"). */
   what?: string;
 }): ChangeSummary {
+  if (docs.isSheet(docId)) return sheetChanges(docs, principals, docId, base, opts);
   const doc = docs.ydoc(docId);
   const ytext = doc.getText('body');
   const now = opts.to ?? Y.snapshot(doc);
@@ -187,6 +189,49 @@ export function textChanges(docs: Documents, principals: Principals, docId: stri
   return {
     changed: true, text: out, authors: [...allAuthors].filter((a) => a !== '?'), hunks: patch.hunks.length, added, removed,
   };
+}
+
+/** A spreadsheet's changes: rows, columns and sheets added or removed, then each changed cell with what it held and who wrote it. */
+function sheetChanges(docs: Documents, principals: Principals, docId: string, base: Y.Snapshot, opts: { title: string; maxChars?: number; to?: Y.Snapshot; what?: string }): ChangeSummary {
+  const doc = docs.ydoc(docId);
+  const to = opts.to ?? Y.snapshot(doc);
+  const authorBy = new Map<string, string | null>();
+  const c = atSnapshots(doc, [base, to], () => {
+    const found = bookChanges(sheetStoreAt(doc, base), sheetStoreAt(doc, to));
+    const visible = (item: Y.Item, s: Y.Snapshot) => (s.sv.get(item.id.client) ?? 0) > item.id.clock && !Y.isDeleted(s.ds, item.id);
+    // Who wrote the value a cell has at the end; for a cell that was cleared, who cleared it.
+    const entries = (doc.getMap('cells') as unknown as { _map: Map<string, Y.Item> })._map;
+    for (const x of found.cells) {
+      if (!x.key) continue;
+      let atBase: Y.Item | null = null, who: string | null | undefined;
+      for (let item: Y.Item | null = entries.get(x.key) ?? null; item && who === undefined; item = item.left as Y.Item | null) {
+        if (visible(item, to)) who = docs.ownerOfClient(docId, item.id.client);
+        else if (!atBase && visible(item, base)) atBase = item;
+      }
+      authorBy.set(x.key, who ?? (atBase ? docs.deleterOf(docId, atBase.id.client, atBase.id.clock) : null));
+    }
+    return found;
+  });
+  if (!c.cells.length && !c.notes.length) return { changed: false, text: '', authors: [], hunks: 0, added: 0, removed: 0 };
+  const authorOf = (key: string) => authorBy.get(key) ?? null;
+  const authors = new Set<string>();
+  const show = (v: string) => (v === '' ? '(empty)' : v.length > 80 ? `${v.slice(0, 80)}…` : v).replace(/\n/g, '⏎');
+  let added = 0, removed = 0;
+  const lines = c.cells.map((x) => {
+    const who = x.key ? authorOf(x.key) : null;
+    if (who) authors.add(who);
+    added += x.after.length; removed += x.before.length;
+    return `${x.where}: ${show(x.before)} → ${show(x.after)}${who ? ` · ${principals.label(who)}` : ''}`;
+  });
+  const authorLabels = [...authors].map((s) => { const p = principals.get(s); return p ? `${principals.label(s)} (${p.kind})` : s; });
+  const n = c.cells.length;
+  let out = `“${opts.title}” (${docId}) ${opts.what ?? 'changed since you last looked'} — ${n} cell${n === 1 ? '' : 's'}${authorLabels.length ? ` by ${authorLabels.join(', ')}` : ''}:`;
+  if (c.notes.length) out += `\n${c.notes.join('\n')}`;
+  const max = opts.maxChars ?? 6000;
+  let shown = 0;
+  for (const line of lines) { if (out.length + line.length + 1 > max && shown > 0) break; out += `\n${line}`; shown++; }
+  if (shown < lines.length) out += `\n… ${lines.length - shown} more changed cell${lines.length - shown === 1 ? '' : 's'} not shown. read_document shows the sheet as it is.`;
+  return { changed: true, text: out, authors: [...authors], hunks: n + c.notes.length, added, removed };
 }
 
 /** Too large to diff line-by-line in bounded time: say who changed which sections, and how much. */

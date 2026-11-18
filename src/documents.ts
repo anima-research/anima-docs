@@ -11,6 +11,7 @@ import { diffChars, diffLines } from 'diff';
 import type { DB } from './db.js';
 import { Fault } from './auth.js';
 import { isGuest, type Actor, type Principals } from './principals.js';
+import { MAX_CELL_CHARS, SHEET, SHEET_MAPS, bookText, diffStores, initBook, liveStore, parseTsv, readBook, restoreStore, setBlock, type SheetMap, type Store } from './sheet.js';
 
 export type Role = 'viewer' | 'commenter' | 'editor' | 'owner';
 /** Retired: every document is 'restricted' (v12); kept as a type for old clients. */
@@ -71,8 +72,37 @@ export interface DocChange {
 
 type DocRow = { id: string; title: string; type: string; owner_sub: string; general_access: GeneralAccess; agents_by: AgentsBy; created_at: number; updated_at: number; rev: number; deleted_at: number | null };
 const meta = (r: DocRow): DocMeta => ({ id: r.id, title: r.title, type: r.type ?? 'markdown', ownerSub: r.owner_sub, generalAccess: r.general_access, agentsBy: r.agents_by ?? 'editors', createdAt: r.created_at, updatedAt: r.updated_at, rev: r.rev });
-/** 'files' is a file collection: the node's content is its files (see files.ts). */
-export const NODE_TYPES = ['markdown', 'html', 'latex', 'text', 'files'];
+/** 'files' is a file collection: the node's content is its files (see files.ts). 'sheet' is a spreadsheet: its content is its cells (see sheet.ts). */
+export const NODE_TYPES = ['markdown', 'html', 'latex', 'text', 'files', 'sheet'];
+/** Types whose content is not one text: a document is made as one of these and stays one. */
+const FIXED_TYPES: Record<string, string> = { files: 'File collection', sheet: 'Spreadsheet' };
+const MAX_SHEET_CELLS = 1_000_000;
+const SHEET_KEY = /^[0-9A-Za-z:]{1,64}$/;
+
+/**
+ * Run `fn` with the document's records cut at these snapshots. Yjs joins the
+ * successive values of a map entry into one record once they are all
+ * overwritten; a snapshot falling inside such a record can only be read after
+ * it is cut there (Y.Text does this itself when it renders a snapshot). The
+ * records are joined again when the transaction ends, so the reading happens inside.
+ */
+export function atSnapshots<T>(doc: Y.Doc, snaps: Y.Snapshot[], fn: () => T): T {
+  let out!: T;
+  doc.transact((txn) => {
+    for (const snap of snaps) {
+      snap.sv.forEach((clock, client) => { if (clock < Y.getState(doc.store, client)) Y.getItemCleanStart(txn, Y.createID(client, clock)); });
+      Y.iterateDeletedStructs(txn, snap.ds, () => { /* walking them cuts them */ });
+    }
+    out = fn();
+  }, 'snapshot-read');
+  return out;
+}
+
+/** A spreadsheet as it was at a snapshot. */
+export function sheetStoreAt(doc: Y.Doc, snap: Y.Snapshot): Store {
+  const maps = atSnapshots(doc, [snap], () => Object.fromEntries(SHEET_MAPS.map((m) => [m, Y.typeMapGetAllSnapshot(doc.getMap(m), snap) as Record<string, unknown>]))) as Record<SheetMap, Record<string, unknown>>;
+  return { get: (m, k) => maps[m][k], entries: (m) => Object.entries(maps[m]) };
+}
 /** How deep access may be derived through parents. */
 const DERIVE_DEPTH = 12;
 
@@ -112,6 +142,8 @@ export type DeleteSet = ReturnType<typeof Y.createDeleteSet>;
 
 export class Documents extends EventEmitter {
   private live = new Map<string, Y.Doc>();
+  /** A spreadsheet's text (what search reads), kept until its next change. */
+  private sheetText = new Map<string, string>();
   private lastUsed = new Map<string, number>();
   private pins = new Map<string, number>();
   private failed = new Set<string>();
@@ -241,7 +273,11 @@ export class Documents extends EventEmitter {
     const access: GeneralAccess = 'restricted'; // "everyone signed in" is retired (v12)
     this.db.prepare(`INSERT INTO documents (id, title, type, owner_sub, general_access, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
       .run(id, clean, type, p.owner ?? actor.sub, access, now, now);
-    if (p.content && type !== 'files') this.edit(id, actor, (text) => text.insert(0, p.content!));
+    if (type === SHEET) {
+      // A new spreadsheet has one sheet; content given as text (tabs or commas between cells, one row per line) fills it.
+      const rows = p.content?.trim() ? parseTsv(p.content, /\t/.test(p.content) ? '\t' : ',') : [];
+      this.editSheet(id, actor, (doc) => { initBook(doc); if (rows.length) { const book = readBook(liveStore(doc)); setBlock(doc, book, book.sheets[0].id, 0, 0, rows); } });
+    } else if (p.content && type !== 'files') this.edit(id, actor, (text) => text.insert(0, p.content!));
     this.emit('meta', { docId: id, kind: 'created', by: actor.sub });
     return this.get(id)!;
   }
@@ -260,9 +296,9 @@ export class Documents extends EventEmitter {
   setType(docId: string, actor: Actor, type: string): DocMeta {
     this.require(docId, actor, 'editor');
     if (!NODE_TYPES.includes(type)) throw new Fault(400, `type must be one of ${NODE_TYPES.join(', ')}.`);
-    // A collection is made as one: its files follow other rules and have a repository; a page's text has no place in it.
+    // A collection or a spreadsheet is made as one: its content is not a text, and a page's text has no place in it.
     const was = this.get(docId)!.type;
-    if (was !== type && (was === 'files' || type === 'files')) throw new Fault(400, was === 'files' ? 'A file collection stays a file collection.' : 'A file collection is made as one (New document ▸ File collection); a document cannot become one.');
+    if (was !== type && (FIXED_TYPES[was] || FIXED_TYPES[type])) throw new Fault(400, FIXED_TYPES[was] ? `A ${FIXED_TYPES[was].toLowerCase()} stays a ${FIXED_TYPES[was].toLowerCase()}.` : `A ${FIXED_TYPES[type].toLowerCase()} is made as one (New document ▸ ${FIXED_TYPES[type]}); a document cannot become one.`);
     this.db.prepare('UPDATE documents SET type = ?, updated_at = ? WHERE id = ?').run(type, Date.now(), docId);
     this.emit('meta', { docId, kind: 'retyped', by: actor.sub });
     return this.get(docId)!;
@@ -585,8 +621,15 @@ export class Documents extends EventEmitter {
     return doc;
   }
 
+  isSheet(docId: string): boolean { return this.get(docId)?.type === SHEET; }
+
+  /** A document's text. A spreadsheet's is its cells as typed, a line per row (see bookText). */
   text(docId: string): string {
-    return this.ydoc(docId).getText('body').toString();
+    const doc = this.ydoc(docId);
+    if (!this.isSheet(docId)) return doc.getText('body').toString();
+    let text = this.sheetText.get(docId);
+    if (text === undefined) this.sheetText.set(docId, text = bookText(readBook(liveStore(doc))));
+    return text;
   }
 
   /** Keep a document loaded while something (a browser room) holds it. */
@@ -628,6 +671,7 @@ export class Documents extends EventEmitter {
     });
 
     doc.on('update', (update: Uint8Array, origin: unknown) => {
+      this.sheetText.delete(docId);
       if (origin === 'load' || this.failed.has(docId)) return;
       const o = origin as ChangeOrigin | undefined;
       guard('persist', () => {
@@ -670,6 +714,35 @@ export class Documents extends EventEmitter {
       const change: DocChange = { docId, origin: o, added, removed, ranges, inserted };
       try { this.emit('change', change); } catch (e) { console.error(`[documents] ${docId}: change listener failed:`, e); }
     });
+
+    // A spreadsheet changes by entries of its maps: one change per transaction, counted in characters typed and removed.
+    if (this.isSheet(docId)) {
+      let pending: { added: number; removed: number; inserted: string } | null = null;
+      for (const name of SHEET_MAPS) {
+        const map = doc.getMap(name);
+        map.observe((event, txn) => {
+          const o = txn.origin as ChangeOrigin | undefined;
+          if (!o || typeof o !== 'object' || !o.sub) return;
+          pending ??= { added: 0, removed: 0, inserted: '' };
+          for (const [key, c] of event.changes.keys) {
+            const now = c.action === 'delete' ? '' : String(map.get(key) ?? ''), was = c.action === 'add' ? '' : String(c.oldValue ?? '');
+            // Rows and columns count as one each; cells by what they hold.
+            pending.added += name === 'cells' ? now.length : now ? 1 : 0;
+            pending.removed += name === 'cells' ? was.length : was ? 1 : 0;
+            if (name === 'cells' && now && pending.inserted.length < 4000) pending.inserted += `${now.slice(0, 4000 - pending.inserted.length)}\n`;
+          }
+        });
+      }
+      doc.on('afterTransaction', (txn: Y.Transaction) => {
+        const p = pending;
+        if (!p) return;
+        pending = null;
+        const o = txn.origin as ChangeOrigin;
+        guard('activity', () => activity.run(docId, o.sub, Math.floor(Date.now() / 60_000), p.added, p.removed));
+        const change: DocChange = { docId, origin: o, added: p.added, removed: p.removed, ranges: [], inserted: p.inserted };
+        try { this.emit('change', change); } catch (e) { console.error(`[documents] ${docId}: change listener failed:`, e); }
+      });
+    }
   }
 
   /** After a transaction: if persistence failed, drop the in-memory copy and tell rooms to resync. */
@@ -735,6 +808,7 @@ export class Documents extends EventEmitter {
    *   forge authorship;
    * - only plain text under the root "body" (no embeds, formats, nested or
    *   other root types): agents and anchors index the text by characters;
+   *   in a spreadsheet, only strings and numbers as entries of its maps;
    * - nothing would be left pending: no gaps, no references to unknown items,
    *   no deletions of items that don't exist yet. A parked deletion would fire
    *   later inside someone else's transaction and be attributed to them.
@@ -747,6 +821,8 @@ export class Documents extends EventEmitter {
     const reach = new Map(known); // state after this update, per client
     const claims: number[] = [];
     let adds = 0;
+    const sheet = this.isSheet(docId);
+    const fresh: Y.Item[] = [];
     for (const s of decoded.structs) {
       const { client, clock } = s.id;
       if (s instanceof Y.Skip) throw new Fault(400, 'Update has gaps.');
@@ -757,7 +833,8 @@ export class Documents extends EventEmitter {
       const owner = this.ownerOfClient(docId, client);
       if (owner === null) claims.push(client);
       else if (owner !== origin.sub) throw new Fault(403, 'Update carries content attributed to another principal.');
-      if (s instanceof Y.Item) {
+      if (s instanceof Y.Item && sheet) fresh.push(s);
+      else if (s instanceof Y.Item) {
         const content = s.content;
         if (!(content instanceof Y.ContentString) && !(content instanceof Y.ContentDeleted)) throw new Fault(400, 'Only plain text is accepted.');
         if (content instanceof Y.ContentString) adds += content.str.length;
@@ -775,6 +852,7 @@ export class Documents extends EventEmitter {
       for (const it of items) if (it.clock + it.len > (reach.get(client) ?? 0)) throw new Fault(400, 'Update deletes content that does not exist.');
     }
     if (adds && doc.getText('body').length + adds > MAX_DOC_CHARS) throw new Fault(413, `Documents are limited to ${MAX_DOC_CHARS.toLocaleString('en')} characters.`);
+    if (fresh.length) this.checkSheetItems(doc, fresh);
     for (const c of claims) this.claimClient(docId, c, origin.sub);
     Y.applyUpdate(doc, update, origin);
     // Backstop: nothing may be left pending (it would fire inside a later transaction).
@@ -784,6 +862,52 @@ export class Documents extends EventEmitter {
       this.failed.add(docId);
     }
     this.settle(docId);
+  }
+
+  /**
+   * A spreadsheet's new items: each must be one string or number set under a
+   * key of one of its maps. An item that overwrites an entry names it only by
+   * the item it follows, in the document or in this same update.
+   */
+  private checkSheetItems(doc: Y.Doc, fresh: Y.Item[]) {
+    const refuse = (): never => { throw new Fault(400, 'Only cell values are accepted in a spreadsheet.'); };
+    const byClient = new Map<number, Y.Item[]>();
+    for (const s of fresh) { let list = byClient.get(s.id.client); if (!list) byClient.set(s.id.client, list = []); list.push(s); }
+    const placed = new Map<Y.Item, { map: string; key: string }>();
+    const place = (s: Y.Item, depth = 0): { map: string; key: string } => {
+      const done = placed.get(s);
+      if (done) return done;
+      let at: { map: string; key: string };
+      const parent = s.parent as unknown;
+      if (typeof parent === 'string') at = { map: parent, key: s.parentSub ?? '' };
+      else if (parent !== null || depth > 10_000) return refuse(); // a nested type
+      else {
+        const prev = s.origin ?? s.rightOrigin;
+        if (!prev) return refuse();
+        const inUpdate = byClient.get(prev.client)?.find((x) => prev.clock >= x.id.clock && prev.clock < x.id.clock + x.length);
+        if (inUpdate) at = place(inUpdate, depth + 1);
+        else {
+          const item = Y.getItem(doc.store, prev);
+          const type = item.parent as Y.AbstractType<unknown>;
+          if (!(item instanceof Y.Item) || type._item !== null) return refuse();
+          at = { map: Y.findRootTypeKey(type), key: item.parentSub ?? '' };
+        }
+      }
+      placed.set(s, at);
+      return at;
+    };
+    let cells = 0;
+    for (const s of fresh) {
+      const { map, key } = place(s);
+      if (!(SHEET_MAPS as readonly string[]).includes(map) || !SHEET_KEY.test(key)) refuse();
+      const content = s.content;
+      if (content instanceof Y.ContentDeleted) continue;
+      // One record may hold several successive values of its entry (a client that keeps overwritten values sends them joined).
+      const values: unknown[] = content instanceof Y.ContentAny && content.arr.length ? content.arr : [undefined];
+      for (const v of values) if (typeof v === 'string' ? v.length > MAX_CELL_CHARS : !(typeof v === 'number' && Number.isFinite(v))) refuse();
+      if (map === 'cells') cells++;
+    }
+    if (cells && doc.getMap('cells').size + cells > MAX_SHEET_CELLS) throw new Fault(413, `A spreadsheet holds at most ${MAX_SHEET_CELLS.toLocaleString('en')} filled cells.`);
   }
 
   /**
@@ -817,7 +941,19 @@ export class Documents extends EventEmitter {
    * Returns the transaction's delete set and the client id used.
    */
   edit(docId: string, actor: Pick<Actor, 'sub'> & { via?: ChangeOrigin['via']; label?: string }, fn: (text: Y.Text) => void): { client: number; deleteSet: DeleteSet } {
-    if (this.get(docId)?.type === 'files') throw new Fault(400, 'A file collection has no text to edit: change its files (attach_file, move_file, remove_file).');
+    const type = this.get(docId)?.type;
+    if (type === 'files') throw new Fault(400, 'A file collection has no text to edit: change its files (attach_file, move_file, remove_file).');
+    if (type === SHEET) throw new Fault(400, 'A spreadsheet has no text to edit: change its cells (edit_sheet).');
+    return this.transactAs(docId, actor, (doc) => fn(doc.getText('body')));
+  }
+
+  /** Change a spreadsheet on an actor's behalf (see sheet.ts for what `fn` may call). */
+  editSheet(docId: string, actor: Pick<Actor, 'sub'> & { via?: ChangeOrigin['via']; label?: string }, fn: (doc: Y.Doc) => void): { client: number; deleteSet: DeleteSet } {
+    if (!this.isSheet(docId)) throw new Fault(400, 'That is not a spreadsheet.');
+    return this.transactAs(docId, actor, fn);
+  }
+
+  private transactAs(docId: string, actor: Pick<Actor, 'sub'> & { via?: ChangeOrigin['via']; label?: string }, fn: (doc: Y.Doc) => void): { client: number; deleteSet: DeleteSet } {
     const doc = this.ydoc(docId);
     const client = this.serverClientFor(docId, actor.sub);
     const saved = doc.clientID;
@@ -825,7 +961,7 @@ export class Documents extends EventEmitter {
     doc.clientID = client;
     try {
       doc.transact((txn) => {
-        fn(doc.getText('body'));
+        fn(doc);
         ds = txn.deleteSet;
       }, { sub: actor.sub, via: actor.via ?? 'mcpl', ...(actor.label ? { label: actor.label } : {}) } satisfies ChangeOrigin);
     } finally {
@@ -860,8 +996,16 @@ export class Documents extends EventEmitter {
   }
 
   textAt(docId: string, snap: Y.Snapshot): string {
+    if (this.isSheet(docId)) return bookText(readBook(sheetStoreAt(this.ydoc(docId), snap)));
     const delta = this.ydoc(docId).getText('body').toDelta(snap) as { insert: unknown }[];
     return delta.map((d) => (typeof d.insert === 'string' ? d.insert : '')).join('');
+  }
+
+  /** Make the document what it was at a snapshot, as one labelled edit by `actor` (history is kept). */
+  restoreTo(docId: string, actor: Pick<Actor, 'sub'> & { via?: ChangeOrigin['via'] }, snap: Y.Snapshot, label: string) {
+    if (this.isSheet(docId)) return this.editSheet(docId, { sub: actor.sub, via: actor.via, label }, (doc) => { restoreStore(doc, sheetStoreAt(doc, snap)); });
+    const target = this.textAt(docId, snap);
+    return this.edit(docId, { sub: actor.sub, via: actor.via, label }, (t) => Documents.replaceMinimal(t, 0, t.length, target));
   }
 
   /**
@@ -873,6 +1017,22 @@ export class Documents extends EventEmitter {
     const sv = new Map(base.sv);
     sv.set(client, Y.getState(doc.store, client));
     return Y.createSnapshot(Y.mergeDeleteSets([base.ds, deleteSet]), sv);
+  }
+
+  /**
+   * Undo what changed in a spreadsheet between two snapshots, keeping everything since:
+   * each entry that changed goes back to what it was. Refused if any of them was changed again later.
+   */
+  undoSheetChange(docId: string, actor: Pick<Actor, 'sub'> & { via?: ChangeOrigin['via'] }, before: Y.Snapshot, after: Y.Snapshot, label: string) {
+    const doc = this.ydoc(docId);
+    const changes = diffStores(sheetStoreAt(doc, before), sheetStoreAt(doc, after));
+    if (!changes.length) throw new Fault(409, 'That change left the sheet as it was; there is nothing to undo.');
+    const live = liveStore(doc);
+    if (changes.every((c) => live.get(c.map, c.key) === c.before)) throw new Fault(409, 'That change is no longer in the document.');
+    if (changes.some((c) => live.get(c.map, c.key) !== c.after)) throw new Fault(409, 'Later edits changed the same cells, so this change can’t be undone on its own. Restore an earlier state instead, or undo it by hand.');
+    return this.editSheet(docId, { sub: actor.sub, via: actor.via, label }, (d) => {
+      for (const c of changes) { const m = d.getMap(c.map); if (c.before === undefined) m.delete(c.key); else m.set(c.key, c.before); }
+    });
   }
 
   /** Named versions (Google-Docs "name current version"). */
@@ -898,9 +1058,9 @@ export class Documents extends EventEmitter {
   /** Restore a version by editing the live text toward it (history is kept). */
   restoreVersion(docId: string, actor: Actor, versionId: string) {
     this.require(docId, actor, 'editor');
-    const target = this.textAt(docId, this.versionSnapshot(docId, versionId));
+    const snap = this.versionSnapshot(docId, versionId);
     const name = (this.db.prepare('SELECT name FROM versions WHERE id = ?').get(versionId) as { name: string } | undefined)?.name ?? versionId;
-    this.edit(docId, { sub: actor.sub, via: actor.via, label: `Restored version “${name.slice(0, 80)}”` }, (t) => Documents.replaceMinimal(t, 0, t.length, target));
+    this.restoreTo(docId, actor, snap, `Restored version “${name.slice(0, 80)}”`);
   }
 
   activity(docId: string, sinceMs = 0): { sub: string; minute: number; added: number; removed: number }[] {
@@ -911,6 +1071,7 @@ export class Documents extends EventEmitter {
   unload(docId: string) {
     const doc = this.live.get(docId);
     if (doc) { doc.destroy(); this.live.delete(docId); }
+    this.sheetText.delete(docId);
     this.lastUsed.delete(docId);
   }
 }

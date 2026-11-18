@@ -13,8 +13,11 @@ import { EventEmitter } from 'node:events';
 import type { DB } from './db.js';
 import { Fault } from './auth.js';
 import { atLeast, Documents, type DocChange, type DocMeta, type Role } from './documents.js';
+import { SHEET } from './sheet.js';
 import type { Comments } from './comments.js';
 import type { Actor } from './principals.js';
+
+const NO_SHEET_SECTIONS = 'A spreadsheet is a document of its own: it has no sections, and cannot be mounted inside another document yet (link to it instead).';
 
 /** `{{node:<id>}}` mounts inline; `{{node:<id>|aside}}` mounts as a sidebar panel (a wiki aside). Still a whole line. */
 export const MARKER_RE = /^\{\{node:([A-Za-z0-9]+)(?:\|(aside))?\}\}[ \t]*$/;
@@ -82,7 +85,7 @@ export class Nodes extends EventEmitter {
   /** Rebuild the parent's mount rows from its body; emit what changed. */
   reindex(docId: string, by: string | null = null) {
     const d = this.docs.get(docId);
-    if (!d) return;
+    if (!d || d.type === SHEET) return; // a spreadsheet's cells are not text: nothing in them mounts anything
     let text: string;
     try { text = this.docs.text(docId); } catch { return; }
     const found = scanMounts(text);
@@ -223,6 +226,7 @@ export class Nodes extends EventEmitter {
   /** A new section: a node with no name, owned by the parent's owner, mounted at the end of the parent (or just created). */
   createSection(parent: string, actor: Actor, opts: { content?: string; type?: string; mount?: boolean; title?: string } = {}): DocMeta {
     const { doc } = this.docs.require(parent, actor, 'editor');
+    if ((opts.type ?? doc.type) === SHEET) throw new Fault(400, NO_SHEET_SECTIONS);
     const child = this.docs.createNode(actor, { title: opts.title ?? '', content: opts.content ?? '', type: opts.type ?? doc.type, owner: doc.ownerSub });
     if (opts.mount !== false) this.mount(parent, child.id, actor, { fresh: true });
     return this.docs.get(child.id)!;
@@ -233,6 +237,7 @@ export class Nodes extends EventEmitter {
     this.docs.require(parent, actor, 'editor');
     if (!opts.fresh) this.docs.require(child, actor, 'viewer');
     else if (!this.docs.get(child)) throw new Fault(404, `No document ${child}.`);
+    if (this.docs.isSheet(child) || this.docs.isSheet(parent)) throw new Fault(400, NO_SHEET_SECTIONS);
     if (this.wouldCycle(parent, child)) throw new Fault(409, 'That would mount a node inside itself.');
     this.docs.edit(parent, { sub: actor.sub, via: actor.via ?? 'mcpl', label: 'Mounted a section' }, (t) => {
       const text = t.toString();

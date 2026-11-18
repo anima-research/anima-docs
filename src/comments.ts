@@ -171,6 +171,7 @@ export class Comments extends EventEmitter {
 
   /** Relative positions for [start, end) in the live text. */
   anchorFromRange(docId: string, start: number, end: number): Anchor {
+    if (this.docs.isSheet(docId)) throw new Fault(400, 'A comment on a spreadsheet is on the whole document: leave out the quote and name the cells in your text.');
     const ytext = this.docs.ydoc(docId).getText('body');
     const len = ytext.length;
     if (!(start >= 0 && end > start && end <= len)) throw new Fault(400, `Anchor range ${start}–${end} is outside the document (length ${len}).`);
@@ -186,6 +187,7 @@ export class Comments extends EventEmitter {
    * (1-based) picks one, or `nearLine` picks the closest.
    */
   anchorFromQuote(docId: string, quote: string, opts: { occurrence?: number; nearLine?: number } = {}) {
+    if (this.docs.isSheet(docId)) throw new Fault(400, 'A comment on a spreadsheet is on the whole document: leave out the quote and name the cells in your text.');
     const text = this.docs.text(docId);
     const hits = occurrences(text, quote);
     if (!quote) throw new Fault(400, 'quote must be non-empty.');

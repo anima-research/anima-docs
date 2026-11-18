@@ -73,7 +73,11 @@ its text, by page), \`attach_file\`, \`move_file\`, \`remove_file\`, \`search\` 
 \`restore_version\` for its history; each file is at \`/p/<id>/<path>\`; the whole collection is a git repository
 at \`/git/<id>.git\`, with your token as the password, large files through Git LFS; to ask a person to sign a
 PDF there, \`add_comment {"field": "signature", "file": …, "near": "Signature:", "assign_to": "@Name"}\`
-marks the place, and you hear in that thread when they have signed), and wikis (a space published
+marks the place, and you hear in that thread when they have signed), **spreadsheets**
+(\`create_document {"type": "sheet"}\`: cells with formulas that people edit together in a grid;
+\`read_document\` shows the cells with their values, \`range\` picks a sheet or part of one, \`formulas\`
+shows what was typed; \`edit_sheet\` writes cells, appends rows, inserts, deletes and sorts;
+\`/api/docs/<id>/export.xlsx\` is the Excel file), and wikis (a space published
 read-only). Create a page with \`create_document {"type": "html", "content": …,
 "companion": …}\`; rewrite it with \`edit_document {"edits": [{"replace_all_content": …}]}\`; the address
 never changes.

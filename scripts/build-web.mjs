@@ -27,6 +27,8 @@ const options = {
     { in: 'web/styles.css', out: 'app' },
     // Filling and signing PDFs (pdf.js and pdf-lib): a bundle of its own, fetched the first time it is needed.
     { in: 'web/pdfsign.ts', out: 'pdfsign' },
+    // The spreadsheet grid and its formula engine: a bundle of its own, fetched the first time a spreadsheet is opened.
+    { in: 'web/sheetgrid.ts', out: 'sheet' },
   ],
   external: ['/pdfsign.js'],
   outdir: 'public',

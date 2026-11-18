@@ -1584,3 +1584,53 @@ button.card-field:hover { text-decoration: underline; }
 .sign.saving .sign-pages, .sign.saving .sign-tool { pointer-events: none; }
 .sign.saving .sign-pages { opacity: 0.75; }
 .sign-field.others, .sign-field.others:hover { background: rgba(120, 130, 150, 0.16); border-color: #8a93a3; color: #586173; cursor: default; }
+/* Spreadsheets: the page is its grid (sheetgrid.ts). Only the cells in view are elements; headers stay put with position: sticky. */
+.doc-app.sheet-doc .doc-toolbar-wrap, .doc-app.sheet-doc .mode-switch, .doc-app.sheet-doc .edit-pane, .doc-app.sheet-doc .preview-pane { display: none; }
+.sheet-pane { flex: 1 1 0; min-width: 0; display: flex; background: var(--surface); }
+.sheet-pane[hidden] { display: none; }
+.sheet-pane > .coll-loading, .sheet-pane > .empty-state { margin: 12vh auto; }
+.sheet-view { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; font-size: 13px; }
+.sheet-view [hidden] { display: none; }
+.sheet-bar { display: flex; align-items: center; gap: 4px; padding: 4px 10px; border-bottom: 1px solid var(--border); min-height: 40px; }
+.sheet-bar-sep { width: 1px; height: 20px; background: var(--border); margin: 0 4px; flex: none; }
+.sheet-format { min-width: 96px; justify-content: flex-start; }
+.sheet-name { min-width: 64px; padding: 0 8px; font-variant-numeric: tabular-nums; color: var(--text-2); white-space: nowrap; }
+.sheet-fx-mark { font-style: italic; font-family: Georgia, "Times New Roman", serif; color: var(--text-3); padding: 0 4px; user-select: none; }
+.sheet-fx { flex: 1 1 0; min-width: 80px; height: 28px; border: 1px solid transparent; border-radius: 6px; padding: 0 8px; font: inherit; font-family: var(--font-mono); font-size: 12.5px; color: var(--text); background: transparent; }
+.sheet-fx:hover { border-color: var(--border); }
+.sheet-fx:focus { outline: none; border-color: var(--accent); box-shadow: var(--focus-ring); background: var(--surface); }
+.sheet-scroll { position: relative; flex: 1 1 0; min-height: 0; overflow: auto; overscroll-behavior: contain; background: var(--surface); cursor: cell; user-select: none; -webkit-user-select: none; touch-action: pan-x pan-y; }
+.sheet-size { position: relative; min-width: 100%; }
+.sheet-colhead { position: sticky; top: 0; z-index: 4; height: 25px; background: var(--toolbar); border-bottom: 1px solid var(--border-strong); }
+.sheet-corner { position: sticky; left: 0; z-index: 5; width: 46px; height: 24px; background: var(--toolbar); border-right: 1px solid var(--border-strong); cursor: pointer; }
+.sheet-ch { position: absolute; top: 0; height: 24px; line-height: 24px; text-align: center; color: var(--text-2); border-right: 1px solid var(--border); box-sizing: border-box; cursor: pointer; font-size: 12px; }
+.sheet-rowhead { position: sticky; left: 0; z-index: 3; width: 46px; background: var(--toolbar); border-right: 1px solid var(--border-strong); box-sizing: border-box; }
+.sheet-rh { position: absolute; left: 0; width: 45px; height: 25px; line-height: 24px; text-align: center; color: var(--text-2); border-bottom: 1px solid var(--border); box-sizing: border-box; cursor: pointer; font-size: 12px; font-variant-numeric: tabular-nums; }
+.sheet-ch.on, .sheet-rh.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.sheet-grip { position: absolute; top: 0; right: -4px; width: 8px; height: 100%; cursor: col-resize; z-index: 1; }
+.sheet-grip:hover { background: var(--accent-line); }
+.sheet-view.read-only .sheet-grip { display: none; }
+.sheet-cells, .sheet-overlay { position: absolute; left: 46px; top: 25px; right: 0; bottom: 0; }
+.sheet-cells { background-image: linear-gradient(to bottom, transparent 24px, var(--border) 24px); background-size: 100% 25px; }
+.sheet-vline { position: absolute; width: 1px; background: var(--border); }
+.sc { position: absolute; height: 24px; line-height: 24px; padding: 0 5px; box-sizing: border-box; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--text); }
+.sc.number { text-align: right; font-variant-numeric: tabular-nums; }
+.sc.bool { text-align: center; }
+.sc.error { text-align: center; color: var(--danger); }
+.sheet-overlay { pointer-events: none; z-index: 1; }
+.sheet-range { position: absolute; background: rgba(36, 89, 224, 0.1); border: 1px solid var(--accent); box-sizing: border-box; }
+.sheet-active { position: absolute; border: 2px solid var(--accent); box-sizing: border-box; margin: -1px 0 0 -1px; padding: 0 1px 1px 0; }
+.sheet-fill { position: absolute; width: 7px; height: 7px; background: var(--accent); border: 1px solid var(--surface); box-sizing: content-box; cursor: crosshair; pointer-events: auto; }
+.sheet-peer { position: absolute; border: 2px solid; box-sizing: border-box; margin: -1px 0 0 -1px; }
+.sheet-peer span { position: absolute; left: -2px; bottom: 100%; max-width: 160px; padding: 0 5px; font-size: 10.5px; line-height: 15px; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border-radius: 3px 3px 3px 0; }
+.sheet-editor { position: absolute; z-index: 6; height: 26px; margin: -1px 0 0 -1px; padding: 0 5px; border: 2px solid var(--accent); box-sizing: border-box; font: inherit; color: var(--text); background: var(--surface); box-shadow: 0 2px 8px rgba(16, 24, 40, 0.18); outline: none; cursor: text; }
+.sheet-sink { position: absolute; width: 1px; height: 1px; padding: 0; border: 0; opacity: 0; resize: none; overflow: hidden; pointer-events: none; }
+.sheet-menu-anchor { position: absolute; width: 1px; height: 1px; pointer-events: none; }
+.sheet-foot { display: flex; align-items: center; gap: 8px; padding: 0 10px; min-height: 36px; border-top: 1px solid var(--border); background: var(--toolbar); }
+.sheet-tabs { display: flex; align-items: center; gap: 2px; min-width: 0; overflow-x: auto; }
+.sheet-tab { height: 28px; padding: 0 12px; border: 0; border-radius: 6px; background: none; font: inherit; color: var(--text-2); cursor: pointer; white-space: nowrap; }
+.sheet-tab:hover { background: var(--hover); color: var(--text); }
+.sheet-tab.on { background: var(--surface); color: var(--accent); font-weight: 600; box-shadow: var(--page-shadow); }
+.sheet-foot-space { flex: 1 1 0; }
+.sheet-stats { color: var(--text-2); white-space: nowrap; font-variant-numeric: tabular-nums; }
+@media (max-width: 700px) { .sheet-stats, .sheet-name { display: none; } }

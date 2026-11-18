@@ -14,8 +14,8 @@ export interface Presence { name: string; kind: Kind; color: string }
 /** Guests: people who opened an "anyone with the link" share link without signing in. */
 export const isGuestMe = (me: Pick<Me, 'kind'> | null | undefined) => me?.kind === 'guest';
 
-/** 'files' is a file collection: the page is its files. */
-export type NodeType = 'markdown' | 'html' | 'latex' | 'text' | 'files';
+/** 'files' is a file collection: the page is its files. 'sheet' is a spreadsheet: the page is its grid. */
+export type NodeType = 'markdown' | 'html' | 'latex' | 'text' | 'files' | 'sheet';
 
 export interface DocSummary {
   id: string;
@@ -217,6 +217,7 @@ export const api = {
   restoreChange: (id: string, seq: number, at: 'before' | 'after') => call<{ ok: true }>('POST', `/api/docs/${encodeURIComponent(id)}/history/${seq}/restore`, { at }),
   undoChange: (id: string, seq: number) => call<{ ok: true }>('POST', `/api/docs/${encodeURIComponent(id)}/history/${seq}/undo`, {}),
   exportUrl: (id: string) => `/api/docs/${encodeURIComponent(id)}/export.md`,
+  xlsxUrl: (id: string) => `/api/docs/${encodeURIComponent(id)}/export.xlsx`,
 
   // Nodes: the content tree and structural operations.
   tree: (id: string) => call<ContentTree>('GET', `/api/docs/${encodeURIComponent(id)}/tree`),
