@@ -135,6 +135,7 @@ export interface LinkPeek { active: boolean; audience?: LinkWho; role?: LinkRole
 export interface Redeemed { docId: string; title: string; role: Role; guest: boolean; you: Me }
 
 export interface DocFile { path: string; mime: string; size: number; mediaId: string; updatedAt: number; updatedBy: string; url: string }
+export interface GitCommit { oid: string; parent: string | null; author: string; at: number; message: string; changes: { status: 'A' | 'M' | 'D'; path: string }[] }
 export interface MediaInfo { id: string; mime: string; size: number; width: number | null; height: number | null; url: string; name: string | null; kind: 'image' | 'audio' | 'video' | 'file' }
 
 export class ApiError extends Error {
@@ -193,6 +194,11 @@ export const api = {
   putFile: (id: string, path: string, body: Blob) => call<DocFile>('PUT', `/api/docs/${encodeURIComponent(id)}/files/${path.split('/').map(encodeURIComponent).join('/')}`, body, { headers: { 'Content-Type': body.type || 'application/octet-stream' } }),
   deleteFile: (id: string, path: string) => call<{ removed: boolean }>('DELETE', `/api/docs/${encodeURIComponent(id)}/files/${path.split('/').map(encodeURIComponent).join('/')}`),
   deleteFolder: (id: string, path: string) => call<{ removed: number }>('DELETE', `/api/docs/${encodeURIComponent(id)}/files/${path.split('/').map(encodeURIComponent).join('/')}?folder=1`),
+  /** A collection's repository: where to clone it from, and whether you have a git password. */
+  gitInfo: (id: string) => call<{ available: boolean; url: string; password: { createdAt: number } | null }>('GET', `/api/docs/${encodeURIComponent(id)}/git`),
+  gitLog: (id: string, before?: string) => call<{ commits: GitCommit[] }>('GET', `/api/docs/${encodeURIComponent(id)}/git/log${q({ before })}`),
+  gitRestore: (id: string, commit: string, path?: string) => call<{ head: string | null }>('POST', `/api/docs/${encodeURIComponent(id)}/git/restore`, { commit, path }),
+  gitPassword: () => call<{ password: string }>('POST', '/api/git/password', {}),
   moveFile: (id: string, from: string, to: string) => call<{ moved: number }>('POST', `/api/docs/${encodeURIComponent(id)}/files/move`, { from, to }),
   share: (id: string, who: string, role: Role | 'none') => call<{ ok: true }>('POST', `/api/docs/${encodeURIComponent(id)}/share`, { who, role }),
   versions: (id: string) => call<{ versions: Version[] }>('GET', `/api/docs/${encodeURIComponent(id)}/versions`),

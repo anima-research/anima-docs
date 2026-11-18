@@ -1186,7 +1186,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     const files = isFiles();
     app.classList.toggle('files-doc', files);
     filesPane.hidden = !files;
-    if (files && !collection) { collection = collectionView({ docId, canEdit: canEdit() }); filesPane.replaceChildren(collection.el); }
+    if (files && !collection) { collection = collectionView({ docId, canEdit: canEdit(), guest }); filesPane.replaceChildren(collection.el); }
     else if (!files && collection) { collection.destroy(); collection = null; filesPane.replaceChildren(); }
     app.classList.toggle('html-doc', html);
     view.dispatch({ effects: [langC.reconfigure(html ? htmlLanguage() : markdown({ base: markdownLanguage, codeLanguages, addKeymap: true })), liveC.reconfigure(html ? [] : livePreview)] });
@@ -1331,7 +1331,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
 
   function moreItems(): MenuItem[] {
     const items: MenuItem[] = [
-      { label: 'History', icon: 'history', onSelect: () => openPanel('activity') },
+      ...(isFiles() ? [] : [{ label: 'History', icon: 'history', onSelect: () => openPanel('activity') }]),
     ];
     if (atLeast(role, 'commenter')) items.push({ label: 'Comment on whole document', icon: 'comment', onSelect: () => void rail.commentOnDocument() });
     if (atLeast(role, 'commenter') && !guest) items.push({ label: 'Ping an agent…', icon: 'bell', onSelect: () => pingAgent() });

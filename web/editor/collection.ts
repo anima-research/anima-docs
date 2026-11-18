@@ -18,6 +18,7 @@ import { renderDocument } from '../lib/markdown';
 import { confirmDialog, emptyState, errorMessage, iconButton, openMenu, promptDialog, spinner, toast, type MenuItem } from '../lib/ui';
 import { codeLanguages } from './languages';
 import { docHighlight } from './codestyle';
+import { openCloneDialog, openHistoryDialog } from './collection-git';
 
 export interface CollectionView { el: HTMLElement; setCanEdit(canEdit: boolean): void; destroy(): void }
 
@@ -49,8 +50,12 @@ const iconOf = (k: Kind) => (k === 'image' ? 'image' : k === 'video' ? 'film' : 
 
 function loadLayout(): 'list' | 'grid' { try { return localStorage.getItem('docs.files.layout') === 'grid' ? 'grid' : 'list'; } catch { return 'list'; } }
 function saveLayout(l: 'list' | 'grid') { try { localStorage.setItem('docs.files.layout', l); } catch { /* storage may be blocked */ } }
+/** Files whose names start with a dot (.gitattributes, .DS_Store) are out of sight unless asked for, as on a desk. */
+function loadHidden(): boolean { try { return localStorage.getItem('docs.files.hidden') === '1'; } catch { return false; } }
+function saveHidden(on: boolean) { try { localStorage.setItem('docs.files.hidden', on ? '1' : '0'); } catch { /* storage may be blocked */ } }
+const isHidden = (path: string) => path.startsWith('.') || path.includes('/.');
 
-export function collectionView(opts: { docId: string; canEdit: boolean }): CollectionView {
+export function collectionView(opts: { docId: string; canEdit: boolean; guest: boolean }): CollectionView {
   const { docId } = opts;
   let canEdit = opts.canEdit;
   let files: DocFile[] = [];
@@ -60,6 +65,7 @@ export function collectionView(opts: { docId: string; canEdit: boolean }): Colle
   /** The path of the file shown in the viewer. */
   let shown: string | null = null;
   let layout = loadLayout();
+  let showHidden = loadHidden();
   let destroyed = false;
   /** Folders made here that hold nothing yet (a folder exists on the server only through its files). */
   const emptyFolders = new Set<string>();
@@ -101,7 +107,7 @@ export function collectionView(opts: { docId: string; canEdit: boolean }): Colle
     const folders = new Map<string, Folder>();
     const here: DocFile[] = [];
     for (const f of files) {
-      if (!f.path.startsWith(base)) continue;
+      if (!f.path.startsWith(base) || (!showHidden && isHidden(f.path))) continue;
       const rest = f.path.slice(base.length);
       const cut = rest.indexOf('/');
       if (cut < 0) { here.push(f); continue; }
@@ -145,7 +151,15 @@ export function collectionView(opts: { docId: string; canEdit: boolean }): Colle
     { label: 'Upload files…', icon: 'file', onSelect: () => pickFiles.click() },
     { label: 'Upload a folder…', icon: 'folder', onSelect: () => pickFolder.click() },
   ], { align: 'end' }) }, icon('upload', 16), 'Upload');
-  const bar = h('div.coll-bar', null, crumbs, h('span.tb-spacer'), summary, layoutSwitch, newFolderBtn, uploadBtn, pickFiles, pickFolder);
+  const zip = (folder: string) => { const a = h('a', { href: `/api/docs/${docId}/zip${folder ? `?folder=${encodeURIComponent(folder)}` : ''}`, download: '' }); document.body.append(a); a.click(); a.remove(); };
+  const moreBtn: HTMLButtonElement = h('button.icon-btn.coll-menu', { type: 'button', 'aria-label': 'More', 'aria-haspopup': 'menu', 'data-tip': 'History, download, git', onclick: () => openMenu(moreBtn, [
+    { label: 'History…', icon: 'history', onSelect: () => openHistoryDialog(docId, canEdit, () => void load()) },
+    { label: cwd ? 'Download this folder (.zip)' : 'Download everything (.zip)', icon: 'download', disabled: !files.length, onSelect: () => zip(cwd) },
+    { label: 'Clone with git…', icon: 'code', onSelect: () => openCloneDialog(docId, canEdit, opts.guest) },
+    'separator',
+    { label: 'Show hidden files', hint: 'names that start with a dot', checked: showHidden, onSelect: () => { showHidden = !showHidden; saveHidden(showHidden); render(); } },
+  ], { align: 'end' }) }, icon('more', 18));
+  const bar = h('div.coll-bar', null, crumbs, h('span.tb-spacer'), summary, layoutSwitch, newFolderBtn, uploadBtn, moreBtn, pickFiles, pickFolder);
   const main = h('div.coll-main');
   const dropVeil = h('div.coll-drop', { hidden: true }, icon('upload', 28), h('span'));
   const uploads = h('div.coll-uploads', { hidden: true, role: 'status', 'aria-live': 'polite' });
@@ -179,7 +193,7 @@ export function collectionView(opts: { docId: string; canEdit: boolean }): Colle
     return items;
   }
   function folderMenu(d: Folder): MenuItem[] {
-    const items: MenuItem[] = [{ label: 'Open', icon: 'folder', onSelect: () => go(d.path) }, { label: 'Copy link', icon: 'link', onSelect: () => copy(linkTo(d.path)) }];
+    const items: MenuItem[] = [{ label: 'Open', icon: 'folder', onSelect: () => go(d.path) }, { label: 'Download (.zip)', icon: 'download', disabled: !d.files, onSelect: () => zip(d.path) }, { label: 'Copy link', icon: 'link', onSelect: () => copy(linkTo(d.path)) }];
     if (canEdit && d.files) items.push('separator',
       { label: 'Rename…', icon: 'pencil', onSelect: () => void rename(d.path, true) },
       { label: 'Move…', icon: 'folder', onSelect: () => void moveTo(d.path) },
@@ -486,7 +500,7 @@ export function collectionView(opts: { docId: string; canEdit: boolean }): Colle
     if (editor && shown !== editor.path) { editor.view.destroy(); editor = null; }
     el.classList.toggle('viewing', !!shown);
     newFolderBtn.hidden = uploadBtn.hidden = !canEdit || !!shown;
-    layoutSwitch.hidden = summary.hidden = !!shown;
+    layoutSwitch.hidden = summary.hidden = moreBtn.hidden = !!shown;
     layoutBtns.forEach((b, n) => { const on = (n === 0) === (layout === 'list'); b.classList.toggle('on', on); b.setAttribute('aria-checked', String(on)); });
     renderCrumbs();
     if (!loaded) { main.replaceChildren(failed ? emptyState({ art: icon('alert', 36, 'empty-art-icon'), title: 'Couldn’t load the files', text: failed, action: h('button.btn', { type: 'button', onclick: () => void load() }, 'Try again') }) : h('div.coll-loading', null, spinner(24))); return; }

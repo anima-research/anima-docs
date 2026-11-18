@@ -1510,3 +1510,26 @@ button.coll-crumb:hover { background: var(--hover); color: var(--text); }
   .coll-grid { grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); padding: 12px; }
   .coll-rendered { padding: 20px 18px 60px; }
 }
+
+/* A collection's history and its git address (collection-git.ts). */
+.coll-history { display: flex; flex-direction: column; max-height: 62vh; overflow: auto; margin: 0 -4px 12px; }
+.coll-commit { padding: 10px 4px; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; gap: 4px; }
+.coll-commit:last-child { border-bottom: 0; }
+.coll-commit-head { display: flex; align-items: center; gap: 10px; min-height: 30px; }
+.coll-commit-what { font-weight: 600; color: var(--text-strong); flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.coll-changes { display: flex; flex-direction: column; gap: 1px; margin-top: 2px; align-items: flex-start; }
+.coll-change { display: flex; align-items: baseline; gap: 8px; font-size: 13px; width: 100%; }
+.coll-change-sign { font-family: var(--font-mono); width: 12px; text-align: center; flex: none; color: var(--text-3); }
+.coll-change.s-A .coll-change-sign { color: var(--success); }
+.coll-change.s-D .coll-change-sign { color: var(--danger); }
+.coll-change-path { font-family: var(--font-mono); font-size: 12.5px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 0 1 auto; }
+.coll-change.s-D .coll-change-path { text-decoration: line-through; color: var(--text-3); }
+.coll-change .link-btn { flex: none; font-size: 12.5px; font-weight: 500; opacity: 0; }
+.coll-change:hover .link-btn, .coll-change .link-btn:focus-visible { opacity: 1; }
+@media (hover: none) { .coll-change .link-btn { opacity: 1; } }
+.coll-copy { display: flex; align-items: center; gap: 8px; }
+.coll-copy-text { flex: 1 1 auto; min-width: 0; font-family: var(--font-mono); font-size: 12.5px; background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; overflow-x: auto; white-space: nowrap; }
+.coll-clone .meta { margin: 0; line-height: 1.5; }
+.coll-clone .field { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+.coll-clone .field .coll-copy { align-self: stretch; }
+.coll-clone code { font-family: var(--font-mono); font-size: 0.92em; }

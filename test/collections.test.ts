@@ -1,9 +1,13 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFile, execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { startServer } from './server-harness.js';
 
 let S: Awaited<ReturnType<typeof startServer>>;
-before(async () => { S = await startServer(); });
+before(async () => { S = await startServer({}, { gitSettleMs: 30 }); });
 after(async () => { await S.close(); });
 
 const H = (extra: Record<string, string> = {}) => ({ Origin: S.base, 'Content-Type': 'application/json', ...extra });
@@ -126,4 +130,79 @@ test('agents: a collection reads as its top folder; list, read, attach, move and
   assert.ok((await op('read_file', { document: id, path: 'archive/november/notes.md', from_line: 2, to_line: 2 })).includes('line two'));
   assert.equal(await op('remove_file', { document: id, path: 'archive', folder: true }), 'Removed archive (2 files).');
   assert.ok((await op('list_files', { document: id })).startsWith('README  text/plain'));
+});
+
+/** A one-page PDF with real text in it. */
+function pdfSaying(words: string): Buffer {
+  const stream = `BT /F1 24 Tf 40 100 Td (${words}) Tj ET`;
+  const objs = ['<</Type/Catalog/Pages 2 0 R>>', '<</Type/Pages/Kids[3 0 R]/Count 1>>', '<</Type/Page/Parent 2 0 R/MediaBox[0 0 500 200]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>',
+    `<</Length ${stream.length}>>\nstream\n${stream}\nendstream`, '<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>'];
+  let pdf = '%PDF-1.4\n';
+  const offs: number[] = [];
+  objs.forEach((o, i) => { offs.push(pdf.length); pdf += `${i + 1} 0 obj\n${o}\nendobj\n`; });
+  const xref = pdf.length;
+  pdf += `xref\n0 ${objs.length + 1}\n0000000000 65535 f \n${offs.map((o) => `${String(o).padStart(10, '0')} 00000 n \n`).join('')}trailer\n<</Size ${objs.length + 1}/Root 1 0 R>>\nstartxref\n${xref}\n%%EOF\n`;
+  return Buffer.from(pdf);
+}
+const run = (cmd: string, args: string[]) => new Promise<string>((resolve, reject) => execFile(cmd, args, { maxBuffer: 64 * 1024 * 1024 }, (e, out, err) => (e ? reject(new Error(`${cmd}: ${err || e.message}`)) : resolve(out))));
+const installed = (cmd: string, arg: string) => { try { execFileSync(cmd, [arg], { stdio: 'ignore' }); return true; } catch { return false; } };
+
+test('a folder downloads as a zip any unzip reads: names, bytes and empty files intact', { skip: !installed('unzip', '-v') && 'unzip is not installed' }, async () => {
+  const ann = await signIn('Ann');
+  const c = await collection(ann, 'Trip photos');
+  const blob = Buffer.from(Array.from({ length: 70_000 }, (_, i) => (i * 7) % 256));
+  await c.put('trip/day 1/Été.bin', blob);
+  await c.put('trip/day 1/notes.md', '# Day one');
+  await c.put('trip/empty.txt', '');
+  await c.put('elsewhere.txt', 'not in the folder');
+  const res = await fetch(`${S.base}/api/docs/${c.id}/zip?folder=trip`, { headers: { Cookie: ann } });
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get('content-disposition') ?? '', /^attachment; filename="trip\.zip"/);
+  const dir = mkdtempSync(join(tmpdir(), 'adocs-zip-'));
+  writeFileSync(join(dir, 'trip.zip'), Buffer.from(await res.arrayBuffer()));
+  assert.match(await run('unzip', ['-t', join(dir, 'trip.zip')]), /No errors detected/);
+  await run('unzip', ['-q', join(dir, 'trip.zip'), '-d', join(dir, 'out')]);
+  assert.ok(readFileSync(join(dir, 'out/day 1/Été.bin')).equals(blob));
+  assert.equal(readFileSync(join(dir, 'out/day 1/notes.md'), 'utf8'), '# Day one');
+  assert.equal(readFileSync(join(dir, 'out/empty.txt')).length, 0);
+  // The whole collection is named after it.
+  const all = await fetch(`${S.base}/api/docs/${c.id}/zip`, { headers: { Cookie: ann } });
+  assert.match(all.headers.get('content-disposition') ?? '', /^attachment; filename="Trip photos\.zip"/);
+  writeFileSync(join(dir, 'all.zip'), Buffer.from(await all.arrayBuffer()));
+  assert.match(await run('unzip', ['-l', join(dir, 'all.zip')]), /elsewhere\.txt[\s\S]*4 files/);
+  assert.equal((await fetch(`${S.base}/api/docs/${c.id}/zip?folder=nowhere`, { headers: { Cookie: ann } })).status, 404);
+  assert.equal((await fetch(`${S.base}/api/docs/${c.id}/zip`)).status, 401);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('agents read the text of a PDF by page, and search a collection by name and by what its files say', { skip: !installed('pdftotext', '-v') && 'pdftotext is not installed' }, async () => {
+  const agent = S.token('Reader');
+  const op = async (name: string, args: unknown) => (await (await fetch(`${S.base}/api/operations/${name}`, { method: 'POST', headers: { Authorization: `Bearer ${agent}`, 'Content-Type': 'application/json' }, body: JSON.stringify(args) })).json()).content[0].text as string;
+  const id = /\((d[A-Za-z0-9]+)\)/.exec(await op('create_document', { title: 'Reports', type: 'files' }))![1];
+  await op('attach_file', { document: id, path: 'reports/Heron survey 2026.pdf', content: pdfSaying('Seventeen herons were counted at low tide').toString('base64'), encoding: 'base64' });
+  await op('attach_file', { document: id, path: 'notes/field.md', content: 'Tide tables\n\nThe herons arrive at dusk.' });
+  await op('attach_file', { document: id, path: 'photo.png', content: Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]).toString('base64'), encoding: 'base64' });
+  const read = await op('read_file', { document: id, path: 'reports/Heron survey 2026.pdf' });
+  assert.ok(read.startsWith('reports/Heron survey 2026.pdf: PDF, 1 page; pages 1–1:') && read.includes('— page 1 —\nSeventeen herons were counted at low tide'), read);
+  assert.ok((await op('read_file', { document: id, path: 'photo.png' })).includes('(binary)'));
+  const found = await op('search', { document: id, query: 'HERON' });
+  assert.deepEqual(found.split('\n'), ['reports/Heron survey 2026.pdf  (name)', 'notes/field.md:3  The herons arrive at dusk.', 'reports/Heron survey 2026.pdf  p.1  Seventeen herons were counted at low tide']);
+  assert.equal(await op('search', { document: id, query: 'albatross' }), 'No matches.');
+});
+
+test('agents see a collection’s history and bring back what was removed', async () => {
+  const agent = S.token('Keeper');
+  const op = async (name: string, args: unknown) => (await (await fetch(`${S.base}/api/operations/${name}`, { method: 'POST', headers: { Authorization: `Bearer ${agent}`, 'Content-Type': 'application/json' }, body: JSON.stringify(args) })).json()).content[0].text as string;
+  const id = /\((d[A-Za-z0-9]+)\)/.exec(await op('create_document', { title: 'Ledger', type: 'files' }))![1];
+  await op('attach_file', { document: id, path: 'a.md', content: 'kept' });
+  await op('attach_file', { document: id, path: 'old/b.md', content: 'to be removed' });
+  const before = await op('versions', { document: id });
+  assert.ok(before.includes('Keeper: Add 2 files') && before.includes('+ old/b.md') && before.includes(`/git/${id}.git`), before);
+  const added = /^ {2}([0-9a-f]{10}) /m.exec(before)![1];
+  await op('remove_file', { document: id, path: 'old', folder: true });
+  const after = await op('versions', { document: id });
+  assert.ok(after.includes('Keeper: Remove old/b.md') && after.includes('− old/b.md'), after);
+  assert.equal(await op('restore_version', { document: id, version: added, path: 'old/b.md' }), `Restored old/b.md as of ${added}.`);
+  assert.equal(await op('read_file', { document: id, path: 'old/b.md' }), 'to be removed');
+  assert.ok((await op('restore_version', { document: id, version: 'abcdef1' })).includes('No change abcdef1'));
 });

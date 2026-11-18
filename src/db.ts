@@ -507,5 +507,40 @@ export function openDatabase(file: string): DB {
       db.pragma('user_version = 12');
     })();
   }
+  if ((db.pragma('user_version', { simple: true }) as number) < 13) {
+    // v13: a file collection is also a git repository (gitrepo.ts). git_tree is the tree of the commit last
+    // taken in, path → (git object, stored file); git_head is that commit. lfs_objects are the Git LFS objects
+    // a collection holds, by their SHA-256. git_tokens are people's passwords for git, one each, kept hashed.
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS git_tree (
+          doc_id    TEXT NOT NULL,
+          path      TEXT NOT NULL,
+          oid       TEXT NOT NULL,
+          media_id  TEXT NOT NULL,
+          lfs       INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (doc_id, path)
+        );
+        CREATE INDEX IF NOT EXISTS git_tree_media ON git_tree(doc_id, media_id);
+        CREATE INDEX IF NOT EXISTS git_tree_oid ON git_tree(doc_id, oid);
+        CREATE TABLE IF NOT EXISTS git_head (doc_id TEXT PRIMARY KEY, head TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS lfs_objects (
+          doc_id    TEXT NOT NULL,
+          oid       TEXT NOT NULL,
+          media_id  TEXT NOT NULL,
+          size      INTEGER NOT NULL,
+          PRIMARY KEY (doc_id, oid)
+        );
+        CREATE INDEX IF NOT EXISTS lfs_objects_media ON lfs_objects(media_id);
+        CREATE TABLE IF NOT EXISTS git_tokens (
+          sub         TEXT PRIMARY KEY,
+          token_hash  TEXT NOT NULL UNIQUE,
+          identity    TEXT NOT NULL,
+          created_at  INTEGER NOT NULL
+        );
+      `);
+      db.pragma('user_version = 13');
+    })();
+  }
   return db;
 }

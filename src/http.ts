@@ -20,7 +20,10 @@ import { Realtime, maskFor, publicActor, type WebSession } from './realtime.js';
 import { TOOLS, runTool } from './tools.js';
 import { atLeast } from './documents.js';
 import { Media, inlineMime } from './media.js';
-import { COMPANION, isTextMime } from './files.js';
+import { COLLECTION, COMPANION, isTextMime } from './files.js';
+import { gitHttp } from './githttp.js';
+import { zipStream } from './zip.js';
+import { once } from 'node:events';
 import { excerpt } from './wiki.js';
 import { agentNote, agentsMarkdown, mcplUrl } from './agents-md.js';
 import { createReadStream } from 'node:fs';
@@ -77,7 +80,7 @@ function guestAllowed(method: string, path: string): boolean {
   const m = /^\/api\/docs\/[A-Za-z0-9]+(\/.*)?$/.exec(path);
   if (!m) return false;
   const rest = m[1] ?? '';
-  if (method === 'GET') return rest === '' || rest === '/files' || rest.startsWith('/files/') || rest.startsWith('/thumb/') || rest === '/versions' || /^\/versions\/[a-z0-9]+$/.test(rest) || rest === '/activity' || rest === '/history' || rest === '/history/compare' || rest === '/export.md';
+  if (method === 'GET') return rest === '' || rest === '/files' || rest.startsWith('/files/') || rest.startsWith('/thumb/') || rest === '/zip' || rest === '/git' || rest === '/git/log' || rest === '/versions' || /^\/versions\/[a-z0-9]+$/.test(rest) || rest === '/activity' || rest === '/history' || rest === '/history/compare' || rest === '/export.md';
   // Editors through a link may rename, name versions and restore them, as any editor can.
   return (method === 'PATCH' && rest === '') || (method === 'POST' && (rest === '/versions' || /^\/versions\/[a-z0-9]+\/restore$/.test(rest) || /^\/history\/\d+\/(restore|undo)$/.test(rest)));
 }
@@ -413,6 +416,9 @@ export function createHttp(app: App) {
     return app.wiki.mediaPublic(mediaId);
   }
 
+  // A collection's repository: git clients and Git LFS (their own sign-in; see githttp.ts).
+  const git = gitHttp(app, { streamFile, hookUrl: (key) => `http://127.0.0.1:${(server.address() as { port: number }).port}/git-hook/${key}` });
+
   const server = createServer(async (req, res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
@@ -504,6 +510,8 @@ export function createHttp(app: App) {
         send(200, { headers: Object.fromEntries(pick.map((h) => [h, req.headers[h] ?? null])), remote: req.socket.remoteAddress, network: clientNetwork(req, app.config.trustedProxyHops, app.config.clientIpHeader) });
         return;
       }
+
+      if ((path.startsWith('/git/') || path.startsWith('/git-hook/')) && await git(req, res, url)) return;
 
       // Same-origin rule for every cookie-authenticated mutation.
       if (!['GET', 'HEAD', 'OPTIONS'].includes(method) && !req.headers.authorization && req.headers.origin !== app.config.origin) {
@@ -748,6 +756,15 @@ export function createHttp(app: App) {
             publicLink: app.docs.hasPublicLink(id),
             role: app.docs.role(id, a), rev: d.rev, updatedAt: d.updatedAt, createdAt: d.createdAt, openComments: app.comments.openCount(id), present: realtime.presence(id) };
         };
+        // A person's password for git: one each, shown once when made; a new one ends the old.
+        if (path === '/api/git/password' && (method === 'POST' || method === 'DELETE')) {
+          const s = webSession(req);
+          const row = s && !isGuest(a.sub) ? app.db.prepare('SELECT identity FROM sessions WHERE token_hash = ?').get(s.tokenHash) as { identity: string } | undefined : undefined;
+          if (!row) throw new Fault(403, 'Sign in with Archipelago in the browser to make a git password (agents use their token).');
+          if (method === 'DELETE') { app.git.dropToken(a.sub); send(200, { ok: true }); return; }
+          send(201, { password: app.git.mintToken(JSON.parse(row.identity)) });
+          return;
+        }
         if (path === '/api/docs' && method === 'GET') {
           send(200, { docs: app.docs.list(a, { query: url.searchParams.get('q') ?? undefined, filter: (url.searchParams.get('filter') as any) ?? 'all' }).map((d) => docView(d.id)) });
           return;
@@ -826,6 +843,41 @@ export function createHttp(app: App) {
             streamFile(req, res, file, statSync(file).size, { 'Content-Type': 'image/webp', 'Cache-Control': 'private, max-age=31536000, immutable' });
             return;
           }
+          // ---------------------------------------------------------- a collection's repository: where to clone it, its history
+          if (rest === '/git' && method === 'GET') {
+            const { doc } = app.docs.require(id, a, 'viewer');
+            if (doc.type !== COLLECTION) throw new Fault(404, 'Not a file collection.');
+            send(200, { available: app.git.available, url: `${app.config.origin}/git/${id}.git`, password: isGuest(a.sub) ? null : app.git.tokenInfo(a.sub) });
+            return;
+          }
+          if (rest === '/git/log' && method === 'GET') {
+            const { doc } = app.docs.require(id, a, 'viewer');
+            if (doc.type !== COLLECTION) throw new Fault(404, 'Not a file collection.');
+            const before = url.searchParams.get('before') ?? undefined;
+            send(200, { commits: await app.git.log(id, { before, limit: Number(url.searchParams.get('limit')) || 50 }) });
+            return;
+          }
+          if (rest === '/git/restore' && method === 'POST') {
+            const { doc } = app.docs.require(id, a, 'editor');
+            if (doc.type !== COLLECTION) throw new Fault(404, 'Not a file collection.');
+            const b = await json(req);
+            send(200, { head: await app.git.restore(id, String(b.commit ?? ''), typeof b.path === 'string' && b.path ? b.path : null, a.sub) });
+            return;
+          }
+          // A collection, or one folder of it, as a zip.
+          if (rest === '/zip' && method === 'GET') {
+            const { doc } = app.docs.require(id, a, 'viewer');
+            if (doc.type !== COLLECTION) throw new Fault(404, 'Not a file collection.');
+            const folder = (url.searchParams.get('folder') ?? '').replace(/^\/+|\/+$/g, '');
+            const base = folder ? `${app.files.path(id, folder)}/` : '';
+            const entries = app.files.list(id, folder ? app.files.path(id, folder) : undefined).flatMap((f) => { const at = app.media.locate(f.mediaId); return at ? [{ name: f.path.slice(base.length), file: at.file, size: at.size, mtime: f.updatedAt }] : []; });
+            if (!entries.length) throw new Fault(404, 'Nothing to download there.');
+            res.writeHead(200, { 'Content-Type': 'application/zip', 'Content-Disposition': attachment(`${(folder ? folder.split('/').pop()! : doc.title || 'files').replace(/[\\/:*?"<>|]/g, ' ').trim() || 'files'}.zip`), 'Cache-Control': 'private, no-store' });
+            try { for await (const chunk of zipStream(entries)) { if (res.destroyed) break; if (!res.write(chunk)) await once(res, 'drain'); } }
+            catch (e) { console.error('[zip]', id, (e as Error).message); res.destroy(); return; }
+            res.end();
+            return;
+          }
           if (rest === '/files/move' && method === 'POST') {
             app.docs.require(id, a, 'editor');
             const b = await json(req);
@@ -836,7 +888,7 @@ export function createHttp(app: App) {
           if (fm && (method === 'PUT' || method === 'DELETE')) {
             app.docs.require(id, a, 'editor');
             // A collection's folder goes with everything in it (?folder=1).
-            if (method === 'DELETE') { send(200, url.searchParams.has('folder') ? { removed: app.files.removeFolder(id, decodeURIComponent(fm[1])) } : { removed: app.files.remove(id, decodeURIComponent(fm[1])) }); return; }
+            if (method === 'DELETE') { send(200, url.searchParams.has('folder') ? { removed: app.files.removeFolder(id, decodeURIComponent(fm[1]), a.sub) } : { removed: app.files.remove(id, decodeURIComponent(fm[1]), a.sub) }); return; }
             // Streamed to disk: a large file must not sit in memory.
             const f = await app.files.putStream(id, decodeURIComponent(fm[1]), req, a.sub, { maxBytes: app.config.uploadMaxBytes });
             send(201, { ...f, url: fileUrl(f) });

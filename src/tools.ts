@@ -85,6 +85,37 @@ function folderListing(app: App, id: string, folder: string): string {
   return lines.length > cap ? `${lines.slice(0, cap).join('\n')}\n… ${lines.length - cap} more here; list a subfolder to narrow.` : lines.join('\n');
 }
 
+/**
+ * Search a collection: names first, then inside text files and PDFs. PDFs are read as they are met, for a few
+ * seconds per call; what is left is said, and the next search goes on from there.
+ */
+async function searchCollection(app: App, id: string, query: string, limit: number): Promise<string> {
+  const needle = query.toLowerCase();
+  const files = app.files.list(id);
+  const hits: string[] = [];
+  for (const f of files) if (f.path.toLowerCase().includes(needle)) hits.push(`${f.path}  (name)`);
+  const started = Date.now();
+  let unread = 0;
+  for (const f of files) {
+    if (hits.length >= limit) break;
+    const pdf = f.mime === 'application/pdf';
+    if (!pdf && !(isTextMime(f.mime) && f.size <= 2 * 1024 * 1024)) continue;
+    const at = app.media.locate(f.mediaId);
+    if (!at) continue;
+    if (pdf) {
+      if (!app.pdf.available) continue;
+      if (!app.pdf.ready(f.mediaId) && Date.now() - started > 8000) { unread++; continue; }
+      const pages = await app.pdf.pages(f.mediaId, at.file);
+      (pages ?? []).forEach((p, n) => { for (const line of p.split('\n')) if (hits.length < limit && line.toLowerCase().includes(needle)) hits.push(`${f.path}  p.${n + 1}  ${clip(line.trim(), 240)}`); });
+      continue;
+    }
+    const lines = (app.files.text(id, f.path) ?? '').split('\n');
+    lines.forEach((line, n) => { if (hits.length < limit && line.toLowerCase().includes(needle)) hits.push(`${f.path}:${n + 1}  ${clip(line.trim(), 240)}`); });
+  }
+  const more = unread ? `\n(${unread} PDF${unread === 1 ? '' : 's'} not read yet: search again to include ${unread === 1 ? 'it' : 'them'}.)` : '';
+  return hits.length ? `${hits.slice(0, limit).join('\n')}${more}` : `No matches.${more}`;
+}
+
 function need(args: Record<string, any>, key: string): string {
   const v = args[key];
   if (typeof v !== 'string' || !v.trim()) throw new Fault(400, `${key} is required.`);
@@ -410,12 +441,13 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: 'search', featureSet: 'docs.read', toolClass: 'notes',
-    description: 'Search document text (case-insensitive substring) across everything you can access, or within one document.',
+    description: 'Search document text (case-insensitive substring) across everything you can access, or within one document. In a file collection: file names, and the text of its text files and PDFs.',
     inputSchema: { type: 'object', required: ['query'], properties: { query: S('Text to find.'), ...docArg, limit: { type: 'integer', minimum: 1, maximum: 100 } } },
-    run(app, actor, a) {
+    async run(app, actor, a) {
       const q = need(a, 'query');
       if (a.document) {
-        app.docs.require(a.document, actor, 'viewer');
+        const { doc } = app.docs.require(a.document, actor, 'viewer');
+        if (doc.type === COLLECTION) return text(await searchCollection(app, doc.id, q, a.limit ?? 30));
         const lines = app.docs.text(a.document).split('\n');
         const hits = lines.map((l, i) => [i + 1, l] as const).filter(([, l]) => l.toLowerCase().includes(q.toLowerCase())).slice(0, a.limit ?? 30);
         return text(hits.length ? hits.map(([n, l]) => `${a.document}:${n}  ${clip(l, 240)}`).join('\n') : 'No matches.');
@@ -521,9 +553,18 @@ export const TOOLS: ToolDef[] = [
     name: 'versions', featureSet: 'docs.read', toolClass: 'notes',
     description: 'A document\'s history: recorded changes (each stretch of editing, with who and how much; ids like "h123"), named versions, and editing by person. Diff with changes {from, to}; go back with restore_version or undo_change.',
     inputSchema: { type: 'object', required: ['document'], properties: { ...docArg, limit: { type: 'integer', minimum: 1, maximum: 100, description: 'Recorded changes to list (default 20).' } } },
-    run(app, actor, a) {
+    async run(app, actor, a) {
       const id = need(a, 'document');
-      app.docs.require(id, actor, 'viewer');
+      const { doc } = app.docs.require(id, actor, 'viewer');
+      if (doc.type === COLLECTION) {
+        // A collection's history is its repository's: one entry per change, with the files it touched.
+        const commits = await app.git.log(id, { limit: Math.min(100, a.limit ?? 20) });
+        if (!commits.length) return text(app.git.available ? 'No changes recorded yet.' : 'This server keeps no history of collections.');
+        return text(`Changes to this collection (newest first; UTC). restore_version with one of these ids brings back the whole collection as it was then, or with path one file or folder; a removed file is in the entry before the one that removed it.\nIt is also a git repository: ${app.config.origin}/git/${id}.git (any user name; your token as the password).\n\n${commits.map((c) => {
+          const shown = c.changes.slice(0, 12).map((x) => `      ${x.status === 'A' ? '+' : x.status === 'D' ? '−' : '~'} ${x.path}`).join('\n');
+          return `  ${c.oid.slice(0, 10)}  ${new Date(c.at).toISOString().slice(0, 16).replace('T', ' ')}  ${c.author}: ${c.message}\n${shown}${c.changes.length > 12 ? `\n      … ${c.changes.length - 12} more` : ''}`;
+        }).join('\n')}`);
+      }
       const cps = app.history.list(id, { limit: Math.min(100, a.limit ?? 20) });
       const fmt = (ms: number) => new Date(ms).toISOString().slice(5, 16).replace('T', ' ');
       const changes = cps.length ? `Recorded changes (newest first; UTC):\n${cps.map((c) => c.baseline
@@ -682,8 +723,8 @@ export const TOOLS: ToolDef[] = [
     run(app, actor, a) {
       const id = need(a, 'document');
       app.docs.require(id, actor, 'editor');
-      if (a.folder) { const n = app.files.removeFolder(id, need(a, 'path')); return text(n ? `Removed ${a.path} (${n} file${n === 1 ? '' : 's'}).` : `No folder ${a.path}.`); }
-      return text(app.files.remove(id, need(a, 'path')) ? `Removed ${a.path}.` : `No file ${a.path}.`);
+      if (a.folder) { const n = app.files.removeFolder(id, need(a, 'path'), actor.sub); return text(n ? `Removed ${a.path} (${n} file${n === 1 ? '' : 's'}).` : `No folder ${a.path}.`); }
+      return text(app.files.remove(id, need(a, 'path'), actor.sub) ? `Removed ${a.path}.` : `No file ${a.path}.`);
     },
   },
   {
@@ -699,20 +740,37 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: 'read_file', featureSet: 'docs.read', toolClass: 'notes',
-    description: 'Read an attached file, or a slice of it: json_pointer ("/arms/0/retention") for JSON, from_line/to_line for text. Binary files report size and type only.',
+    description: 'Read an attached file, or a slice of it: json_pointer ("/arms/0/retention") for JSON, from_line/to_line for text, from_page/to_page for a PDF (its text, page by page). Other binary files report size and type only.',
     inputSchema: { type: 'object', required: ['document', 'path'], properties: {
       ...docArg, path: S('The file\'s path.'),
       json_pointer: S('RFC 6901 pointer into a JSON file, e.g. "/arms/connectome/retention"; "" is the whole value.'),
       from_line: { type: 'integer', minimum: 1 }, to_line: { type: 'integer', minimum: 1 },
+      from_page: { type: 'integer', minimum: 1, description: 'For a PDF: the first page to read (default 1).' }, to_page: { type: 'integer', minimum: 1, description: 'For a PDF: the last page to read.' },
       max_chars: { type: 'integer', minimum: 100, description: 'Cap on the text returned (default 60000).' },
     } },
-    run(app, actor, a) {
+    async run(app, actor, a) {
       const id = need(a, 'document');
       app.docs.require(id, actor, 'viewer');
-      const r = app.files.read(id, need(a, 'path'));
-      if (!r) throw new Fault(404, `No file ${a.path} on ${id}. list_files shows what is attached.`);
+      const f = app.files.get(id, app.files.path(id, need(a, 'path')));
+      if (!f) throw new Fault(404, `No file ${a.path} on ${id}. list_files shows what is attached.`);
       const cap = Number(a.max_chars) || 60_000;
-      if (!isTextMime(r.file.mime)) return text(`${r.file.path}: ${r.file.mime.split(';')[0]}, ${r.file.size} bytes (binary). ${app.config.origin}/p/${id}/${r.file.path}`);
+      const address = `${app.config.origin}/p/${id}/${f.path.split('/').map(encodeURIComponent).join('/')}`;
+      if (f.mime === 'application/pdf') {
+        const at = app.media.locate(f.mediaId);
+        const pages = at ? await app.pdf.pages(f.mediaId, at.file) : null;
+        if (!pages) return text(`${f.path}: a PDF, ${f.size} bytes; its text could not be read here. ${address}`);
+        const from = Math.max(1, Number(a.from_page) || 1), to = Math.min(pages.length, Number(a.to_page) || pages.length);
+        let out = '', last = from - 1;
+        for (let n = from; n <= to; n++) {
+          const page = `— page ${n} —\n${pages[n - 1]}\n\n`;
+          if (out && out.length + page.length > cap) break;
+          out += page; last = n;
+        }
+        if (!out.trim().replace(/— page \d+ —/g, '').trim()) return text(`${f.path}: a PDF of ${pages.length} page${pages.length === 1 ? '' : 's'} with no text in ${from === to ? `page ${from}` : `pages ${from}–${to}`} (scanned pages are pictures). ${address}`);
+        return text(`${f.path}: PDF, ${pages.length} page${pages.length === 1 ? '' : 's'}; pages ${from}–${last}${last < to ? ` (from_page ${last + 1} continues)` : ''}:\n\n${out.length > cap ? `${out.slice(0, cap)}\n…` : out.trimEnd()}`);
+      }
+      if (!isTextMime(f.mime)) return text(`${f.path}: ${f.mime.split(';')[0]}, ${f.size} bytes (binary). ${address}`);
+      const r = app.files.read(id, f.path)!;
       let body = r.bytes.toString('utf8');
       if (typeof a.json_pointer === 'string') {
         let parsed: unknown;
@@ -750,9 +808,18 @@ export const TOOLS: ToolDef[] = [
     inputSchema: { type: 'object', required: ['document', 'version'], properties: {
       ...docArg, version: S('A saved version id, or a recorded change id like "h123" (see versions).'),
       at: S('For a recorded change: "after" (default) or "before" it.', { enum: ['after', 'before'] }),
+      path: S('For a file collection: bring back only this file or folder, as it was at that version.'),
     } },
-    run(app, actor, a) {
+    async run(app, actor, a) {
       const id = need(a, 'document');
+      const { doc } = app.docs.require(id, actor, 'editor');
+      if (doc.type === COLLECTION) {
+        const commits = await app.git.log(id, { limit: 200 });
+        const c = commits.find((x) => x.oid.startsWith(String(a.version ?? '').trim().toLowerCase()) && String(a.version ?? '').trim().length >= 7);
+        if (!c) throw new Fault(404, `No change ${a.version} in this collection's recent history (versions lists them).`);
+        await app.git.restore(id, c.oid, typeof a.path === 'string' && a.path ? a.path : null, actor.sub);
+        return text(a.path ? `Restored ${a.path} as of ${c.oid.slice(0, 10)}.` : `Restored the collection as of ${c.oid.slice(0, 10)}: ${app.files.count(id).files} files.`);
+      }
       const seq = parseCheckpointId(a.version);
       if (seq !== null) app.history.restore(id, { ...actor, via: 'mcpl' }, seq, a.at === 'before' ? 'before' : 'after');
       else app.docs.restoreVersion(id, actor, need(a, 'version'));

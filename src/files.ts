@@ -73,6 +73,8 @@ export function checkCollectionPath(path: string): string {
 const under = (dir: string) => `${dir.replace(/[\\%_]/g, '\\$&')}/%`;
 
 export class DocFiles {
+  /** Told when a collection's files change, and by whom (its repository commits them: gitrepo.ts). */
+  onChange: ((docId: string, by: string) => void) | null = null;
   constructor(private db: DB, private media: Media) {}
 
   isCollection(docId: string): boolean {
@@ -130,11 +132,11 @@ export class DocFiles {
     const p = collection ? checkCollectionPath(path) : checkPath(path);
     const max = collection ? MAX_FILES_PER_COLLECTION : MAX_FILES_PER_DOC;
     if (this.count(docId).files >= max && !this.get(docId, p)) throw new Fault(400, `At most ${max} files per ${collection ? 'collection' : 'document'}.`);
-    if (collection) this.clear(docId, p);
+    if (collection) this.checkFree(docId, p);
     return p;
   }
   /** A file cannot sit where a folder is, nor a folder where a file is. */
-  private clear(docId: string, p: string) {
+  checkFree(docId: string, p: string) {
     if (this.db.prepare(`SELECT 1 FROM doc_files WHERE doc_id = ? AND path LIKE ? ESCAPE '\\' LIMIT 1`).get(docId, under(p))) throw new Fault(409, `${p} is a folder.`);
     const parts = p.split('/');
     for (let i = 1; i < parts.length; i++) if (this.get(docId, parts.slice(0, i).join('/'))) throw new Fault(409, `${parts.slice(0, i).join('/')} is a file, not a folder.`);
@@ -144,24 +146,25 @@ export class DocFiles {
     this.db.prepare(`INSERT INTO doc_files (doc_id, path, media_id, mime, size, updated_at, updated_by) VALUES (?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(doc_id, path) DO UPDATE SET media_id = excluded.media_id, mime = excluded.mime, size = excluded.size, updated_at = excluded.updated_at, updated_by = excluded.updated_by`)
       .run(docId, p, info.id, mimeFor(p, info.mime), info.size, now, by);
-    if (collection) this.touch(docId, now);
+    if (collection) this.touch(docId, by, now);
     return this.get(docId, p)!;
   }
   /** A collection's files are its content: changing them is changing the document. */
-  private touch(docId: string, now = Date.now()) {
+  private touch(docId: string, by: string, now = Date.now()) {
     this.db.prepare('UPDATE documents SET updated_at = ? WHERE id = ?').run(now, docId);
+    this.onChange?.(docId, by);
   }
 
-  remove(docId: string, path: string): boolean {
+  remove(docId: string, path: string, by = ''): boolean {
     const gone = this.db.prepare('DELETE FROM doc_files WHERE doc_id = ? AND path = ?').run(docId, this.path(docId, path)).changes > 0;
-    if (gone && this.isCollection(docId)) this.touch(docId);
+    if (gone && this.isCollection(docId)) this.touch(docId, by);
     return gone;
   }
 
   /** Remove a folder of a collection: every file under it. */
-  removeFolder(docId: string, dir: string): number {
+  removeFolder(docId: string, dir: string, by = ''): number {
     const n = this.db.prepare(`DELETE FROM doc_files WHERE doc_id = ? AND path LIKE ? ESCAPE '\\'`).run(docId, under(checkCollectionPath(dir))).changes;
-    if (n) this.touch(docId);
+    if (n) this.touch(docId, by);
     return n;
   }
 
@@ -183,11 +186,11 @@ export class DocFiles {
       for (const r of rows) {
         const t = file ? dst : dst + r.path.slice(src.length);
         if (this.get(docId, t)) throw new Fault(409, `${t} already exists.`);
-        if (collection) this.clear(docId, t);
+        if (collection) this.checkFree(docId, t);
         ins.run(docId, t, r.mediaId, mimeFor(t, r.mime), r.size, now, by);
       }
     })();
-    if (collection) this.touch(docId, now);
+    if (collection) this.touch(docId, by, now);
     return rows.length;
   }
 }

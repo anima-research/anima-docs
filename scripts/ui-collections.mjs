@@ -5,15 +5,16 @@
 // a file collection, uploads files (by the picker and as a folder), sees them
 // as a list and as a grid with thumbnails, opens an image, a PDF and a
 // markdown file, edits and saves the markdown, renames, moves and deletes,
-// follows a link to a folder, and shares the collection with Bob, who can
-// look but not change. Screenshots (light, dark, narrow) go to SMOKE_SHOTS.
+// follows a link to a folder, looks at the history and brings a removed file
+// back, clones the collection with git, and shares it with Bob, who can look
+// but not change. Screenshots (light, dark, narrow) go to SMOKE_SHOTS.
 //
 //   npm run build:web && node scripts/ui-collections.mjs
 //   env: SMOKE_PORT (7368), SMOKE_SHOTS ($TMPDIR/anima-docs-collections-shots), SMOKE_HEADED=1
 
 import { chromium } from 'playwright';
-import { spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { execFile, spawn } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -223,11 +224,60 @@ try {
     await alice.getByRole('button', { name: 'Move', exact: true }).click();
     await row(alice, 'data').waitFor();
     assert((await listed(alice, id)).includes('data/2026/readings north.json'), 'moved, the folders made on the way');
+    // Changes made in the browser are committed once things are quiet; asking for the history commits what is waiting,
+    // so the removal below is a change of its own.
+    await alice.evaluate((i) => fetch(`/api/docs/${i}/git/log`).then((r) => r.json()), id);
     await act(alice, 'trip', 'Delete');
     await alice.locator('dialog[open]', { hasText: 'the 3 files in it' }).getByRole('button', { name: 'Delete' }).click();
     await row(alice, 'trip').waitFor({ state: 'detached' });
     assert(!(await listed(alice, id)).some((p) => p.startsWith('trip/')), 'the folder went with its files');
     await shot(alice, '10-list-after');
+  });
+
+  await step('the history says what each change did, and brings a removed file back', async () => {
+    await alice.locator('.coll-menu').click();
+    await alice.getByRole('menuitem', { name: 'History…' }).click();
+    const dlg = alice.locator('dialog.coll-history-dialog');
+    await dlg.locator('.coll-commit').first().waitFor();
+    assert((await dlg.locator('.coll-commit-what').first().textContent()) === 'Remove 3 files', `newest change: ${await dlg.locator('.coll-commit-what').first().textContent()}`);
+    assert((await dlg.locator('.coll-commit .meta').first().textContent()).startsWith('Alice Chen'), 'by whom');
+    await shot(alice, '10b-history');
+    const gone = dlg.locator('.coll-commit').first().locator('.coll-change', { hasText: 'trip/day 2/log.txt' });
+    await gone.hover();
+    await gone.getByRole('button', { name: 'Bring back' }).click();
+    await alice.locator('dialog[open]', { hasText: 'Bring back trip/day 2/log.txt?' }).getByRole('button', { name: 'Restore' }).click();
+    await alice.locator('.toast', { hasText: 'Restored' }).waitFor();
+    await dlg.locator('.coll-commit-what', { hasText: 'Restore trip/day 2/log.txt as of' }).waitFor();
+    await alice.keyboard.press('Escape');
+    await row(alice, 'trip').waitFor();
+    assert((await listed(alice, id)).filter((p) => p.startsWith('trip/')).join() === 'trip/day 2/log.txt', 'only that file came back');
+  });
+
+  await step('the collection clones with git, with a password made in the dialog; hidden files and the zip', async () => {
+    await alice.locator('.coll-menu').click();
+    await alice.getByRole('menuitem', { name: 'Clone with git…' }).click();
+    const dlg = alice.locator('dialog[open]', { hasText: 'This collection is a git repository' });
+    await dlg.waitFor();
+    assert((await dlg.locator('.coll-copy-text').first().textContent()) === `git clone ${ORIGIN}/git/${id}.git`, 'the clone command');
+    await dlg.getByRole('button', { name: 'Make a git password' }).click();
+    const password = await dlg.locator('.coll-copy-text.secret').textContent();
+    assert(/^adg_[\w-]{20,}$/.test(password), `a git password: ${password}`);
+    await shot(alice, '10c-clone');
+    await alice.keyboard.press('Escape');
+    const clone = join(LOCAL, 'clone');
+    await new Promise((ok, no) => execFile('git', ['clone', '--quiet', `${ORIGIN.replace('://', `://alice:${password}@`)}/git/${id}.git`, clone], { env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0' } }, (e, out, err) => (e ? no(new Error(err)) : ok())));
+    assert(readFileSync(join(clone, 'Field notes.md'), 'utf8').endsWith('- one seal\n'), 'the clone has the file as saved in the browser');
+    assert(readFileSync(join(clone, 'Island at dusk.png'), 'utf8').startsWith('version https://git-lfs.github.com/spec/v1'), 'the image is a Git LFS file');
+    // The attributes file the repository needs is a hidden file of the collection.
+    assert(!(await names(alice)).includes('.gitattributes'), 'out of sight');
+    await alice.locator('.coll-menu').click();
+    await alice.locator('.menu').getByText('Show hidden files', { exact: true }).click();
+    await row(alice, '.gitattributes').waitFor();
+    await alice.locator('.coll-menu').click();
+    await alice.locator('.menu').getByText('Show hidden files', { exact: true }).click();
+    await row(alice, '.gitattributes').waitFor({ state: 'detached' });
+    const zip = await alice.evaluate((i) => fetch(`/api/docs/${i}/zip?folder=data`).then(async (r) => [r.status, r.headers.get('content-type'), (await r.arrayBuffer()).byteLength]), id);
+    assert(zip[0] === 200 && zip[1] === 'application/zip' && zip[2] > 100, `zip: ${zip}`);
   });
 
   await step('a new folder exists once something is in it; replacing a file asks first', async () => {
