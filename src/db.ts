@@ -559,5 +559,20 @@ export function openDatabase(file: string): DB {
       db.pragma('user_version = 14');
     })();
   }
+  if ((db.pragma('user_version', { simple: true }) as number) < 15) {
+    // v15: chart_sources — the spreadsheet ranges that chart blocks of a document draw from, each recorded when
+    // someone who could read the spreadsheet wrote the reference (charts.ts). Readers of the document see those ranges.
+    db.transaction(() => {
+      db.exec(`CREATE TABLE IF NOT EXISTS chart_sources (
+        doc_id      TEXT NOT NULL,
+        source_id   TEXT NOT NULL,
+        range       TEXT NOT NULL,
+        granted_by  TEXT NOT NULL,
+        granted_at  INTEGER NOT NULL,
+        PRIMARY KEY (doc_id, source_id, range)
+      )`);
+      db.pragma('user_version = 15');
+    })();
+  }
   return db;
 }

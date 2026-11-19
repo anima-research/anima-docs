@@ -11,6 +11,7 @@
 import { syntaxTree } from '@codemirror/language';
 import { StateEffect, StateField, type EditorState, type Range, type Transaction } from '@codemirror/state';
 import { Decoration, EditorView, ViewPlugin, WidgetType, type DecorationSet, type ViewUpdate } from '@codemirror/view';
+import { mountChart } from '../lib/charthost';
 import type { SyntaxNodeRef } from '@lezer/common';
 import { isSafeImageSrc } from '../lib/markdown';
 import { EMBED_FRAME_HOSTS, embedOf } from '../../src/mdext';
@@ -387,6 +388,25 @@ const inlinePreview = ViewPlugin.fromClass(class {
 
 // ------------------------------------------------------------------ block layer
 
+/** The document whose charts are drawn here (a chart may draw from a spreadsheet, read through this document). */
+let chartDoc = '';
+export const setChartDoc = (docId: string) => { chartDoc = docId; };
+
+/** A chart, drawn under its ```chart block (the block stays as text above it, to be edited). */
+class ChartWidget extends WidgetType {
+  constructor(readonly text: string, readonly docId: string) { super(); }
+  eq(o: ChartWidget) { return o.text === this.text && o.docId === this.docId; }
+  toDOM() {
+    const el = document.createElement('div');
+    el.className = 'cm-chart md-chart';
+    chartDisposers.set(el, mountChart(el, this.text, { docId: this.docId }));
+    return el;
+  }
+  destroy(dom: HTMLElement) { chartDisposers.get(dom)?.(); chartDisposers.delete(dom); }
+  ignoreEvent() { return true; }
+}
+const chartDisposers = new WeakMap<HTMLElement, () => void>();
+
 function buildBlocks(state: EditorState): DecorationSet {
   const out: Range<Decoration>[] = [];
   const doc = state.doc;
@@ -404,6 +424,13 @@ function buildBlocks(state: EditorState): DecorationSet {
           const from = doc.lineAt(node.from).from, to = doc.lineAt(node.to).to;
           if (!touchesSelection(state, from, to)) {
             out.push(Decoration.replace({ widget: new TableWidget(doc.sliceString(from, to), !state.readOnly), block: true }).range(from, to));
+          }
+          return false;
+        }
+        case 'FencedCode': {
+          const first = doc.lineAt(node.from), last = doc.lineAt(node.to);
+          if (/^```chart\s*$/.test(first.text) && last.number > first.number && /^```\s*$/.test(last.text)) {
+            out.push(Decoration.widget({ widget: new ChartWidget(last.number - first.number > 1 ? doc.sliceString(first.to + 1, last.from - 1) : '', chartDoc), block: true, side: 1 }).range(last.to));
           }
           return false;
         }

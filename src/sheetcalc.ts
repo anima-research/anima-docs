@@ -200,3 +200,17 @@ export function sortOrder(calc: Calc, sheet: Sheet, top: number, bottom: number,
   });
   return keyed.map((k) => k.r);
 }
+
+/** The values of a rectangle of cells, row by row, for a chart: numbers as numbers (dates and times as they show), everything else as it shows. */
+export function rangeValues(calc: Calc, sheet: Sheet, top: number, left: number, bottom: number, right: number): (string | number | null)[][] {
+  const out: (string | number | null)[][] = [];
+  for (let r = top; r <= bottom; r++) {
+    const row: (string | number | null)[] = [];
+    for (let c = left; c <= right; c++) {
+      const v = calc.value(sheet, r, c);
+      row.push(typeof v === 'number' && !/[ymdh]/i.test(calc.formatFor(sheet, r, c).replace(/[0#]/g, '')) ? v : calc.shown(sheet, r, c).text || null);
+    }
+    out.push(row);
+  }
+  return out;
+}

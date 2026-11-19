@@ -926,7 +926,7 @@ export class Documents extends EventEmitter {
       // One record may hold several successive values of its entry (a client that keeps overwritten values sends them joined).
       const values: unknown[] = content instanceof Y.ContentAny && content.arr.length ? content.arr : [undefined];
       // A width is a number; everything else is text: what was typed, a number format, a name, an order key.
-      const longest = map === 'cells' ? MAX_CELL_CHARS : map === 'fmt' ? 60 : 200;
+      const longest = map === 'cells' ? MAX_CELL_CHARS : map === 'charts' ? 24_000 : map === 'fmt' ? 60 : 200;
       for (const v of values) if (map === 'widths' ? !(typeof v === 'number' && v > 0 && v < 10_000) : !(typeof v === 'string' && v.length <= longest)) refuse();
       if (map === 'cells' && !cells.has(key)) added.add(key);
     }

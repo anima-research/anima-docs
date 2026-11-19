@@ -18,6 +18,7 @@
   "dependencies": {
     "better-sqlite3": "^12.11.1",
     "diff": "^9.0.0",
+    "echarts": "^6.1.0",
     "exceljs": "^4.4.0",
     "fractional-indexing": "^4.0.0",
     "hyperformula": "^3.5.0",

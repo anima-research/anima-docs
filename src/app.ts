@@ -17,6 +17,7 @@ import { Nodes } from './nodes.js';
 import { Trees } from './trees.js';
 import { Wiki } from './wiki.js';
 import { Sheets } from './sheets.js';
+import { Charts } from './charts.js';
 import { DevIssuer, JtiCache, publicKeyFromString, verifyAid1, type Identity } from './auth.js';
 import type { Config } from './config.js';
 
@@ -35,6 +36,8 @@ export interface App {
   pageKeys: PageKeys;
   /** Spreadsheets: what agents read and change, and the Excel file. */
   sheets: Sheets;
+  /** Charts: where their data may come from, and charts as pictures for published pages. */
+  charts: Charts;
   groups: Groups;
   attention: Attention;
   history: History;
@@ -76,7 +79,8 @@ export function createApp(config: Config, issuers: Map<string, KeyObject>, opts:
   const nodes = new Nodes(db, docs);
   nodes.attachComments(comments);
   const trees = new Trees(db, docs, nodes);
-  const partial = { config, db, principals, docs, comments, media, files, git, pdf, pageKeys, sheets, groups, attention, history, nodes, trees } as unknown as App;
+  const charts = new Charts(db, docs, sheets, nodes, () => config.origin);
+  const partial = { config, db, principals, docs, comments, media, files, git, pdf, pageKeys, sheets, charts, groups, attention, history, nodes, trees } as unknown as App;
   const wiki = new Wiki(partial);
   let devIssuer: DevIssuer | null = null;
   if (config.devIssuer) {
@@ -98,7 +102,7 @@ export function createApp(config: Config, issuers: Map<string, KeyObject>, opts:
   }, 5 * 60_000);
   maintenance.unref();
   return {
-    config, db, principals, docs, comments, media, files, git, pdf, pageKeys, sheets, groups, attention, history, nodes, trees, wiki, issuers, devIssuer,
+    config, db, principals, docs, comments, media, files, git, pdf, pageKeys, sheets, charts, groups, attention, history, nodes, trees, wiki, issuers, devIssuer,
     jti: new JtiCache(),
     verify: (token: string) => verifyAid1(token, verifierOpts),
     close() { clearInterval(maintenance); sheets.close(); git.close(); history.shutdown(); attention.close(); db.close(); },

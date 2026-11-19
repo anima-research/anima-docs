@@ -79,6 +79,21 @@ export function galleryFence(md: MD) {
   };
 }
 
+/**
+ * A ```chart block becomes a place for a chart. `fill` (a published page) answers with the finished picture;
+ * without it the block's text is left on a placeholder that the page fills (web/lib/charthost.ts).
+ */
+export function chartFence(md: MD, fill?: (text: string, env: unknown) => string) {
+  const base = md.renderer.rules.fence!;
+  md.renderer.rules.fence = (tokens, idx, options, env, self) => {
+    const t = tokens[idx];
+    if ((t.info || '').trim().split(/\s+/)[0] !== 'chart') return base(tokens, idx, options, env, self);
+    if (fill) return fill(t.content, env);
+    const height = /^height:\s*(\d{3,4})\s*$/m.exec(t.content)?.[1] ?? '320';
+    return `<div class="md-chart" style="min-height:${esc(height)}px" data-chart="${esc(t.content)}"></div>\n`;
+  };
+}
+
 // ------------------------------------------------------------------ table column widths
 //
 // GFM lets the separator row hold any number of dashes. A separator longer

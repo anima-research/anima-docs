@@ -29,6 +29,9 @@ const options = {
     { in: 'web/pdfsign.ts', out: 'pdfsign' },
     // The spreadsheet grid and its formula engine: a bundle of its own, fetched the first time a spreadsheet is opened.
     { in: 'web/sheetgrid.ts', out: 'sheet' },
+    // Charts: drawing in the page, and the sandboxed frame that runs a chart's code. Each fetched when first needed.
+    { in: 'web/chartview.ts', out: 'charts' },
+    { in: 'web/chartframe.ts', out: 'chartframe' },
   ],
   external: ['/pdfsign.js'],
   outdir: 'public',

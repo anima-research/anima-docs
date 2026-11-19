@@ -78,7 +78,16 @@ marks the place, and you hear in that thread when they have signed), **spreadshe
 \`read_document\` shows the cells with their values, \`range\` picks a sheet or part of one, \`formulas\`
 shows what was typed; \`edit_sheet\` writes cells, appends rows, inserts, deletes and sorts;
 \`/api/docs/<id>/export.xlsx\` is the Excel file), and wikis (a space published
-read-only). Create a page with \`create_document {"type": "html", "content": …,
+read-only).
+
+**Charts.** In a markdown document a chart is a fenced block, \`\`\`chart: lines of settings (\`type: bar | line |
+area | pie | scatter\`, \`title:\`, \`x:\` and \`y:\` naming columns, \`stacked: yes\`, \`horizontal: yes\`, \`height:\`), an
+empty line, then the rows as CSV with the headings first; or instead of rows \`data: <spreadsheet id> Ledger!A1:C13\`,
+which draws those cells live (readers of the document see that range even if they cannot open the spreadsheet, so
+name only what they may see; it counts only if you can open the spreadsheet yourself). On a sheet, \`edit_sheet\`
+places a chart with \`{"chart": "A1:C13", "type": "bar"}\`. \`type: code\` makes the block's body (or \`"code"\`) your
+own JavaScript: the body of a function \`(data, echarts, el, theme)\` that returns ECharts options or draws into
+\`el\`; it runs in each reader's browser in a sandbox with no network, and is not drawn in the Excel file. Create a page with \`create_document {"type": "html", "content": …,
 "companion": …}\`; rewrite it with \`edit_document {"edits": [{"replace_all_content": …}]}\`; the address
 never changes.
 `;

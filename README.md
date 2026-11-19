@@ -306,6 +306,30 @@ A document of type **sheet** is a spreadsheet: sheets of cells with formulas, ed
 - **Many people at once.** A sheet is stored cell by cell, and rows, columns and sheets have identities of their own (see [docs/sheets.md](docs/sheets.md)). Two people writing one cell leave one of the two values, never a mixture; a row inserted, removed or sorted by one person does not move what another is typing, and a formula keeps pointing at its cells through inserts and deletes. After a sort, formulas read as they do after a sort in Excel: inside the sorted rows a formula points at the same places relative to itself (its own row, the row above), outside them it covers the same area.
 - Limits: 100,000 rows and 1,000 columns per sheet, 50 sheets, a million filled cells per spreadsheet. Not there yet: comments on a cell, suggestions, charts, cell styling beyond number formats, import of `.xlsx` files (paste works), find within a sheet, mounting a spreadsheet inside a document (a `{{node:…}}` line naming one shows an empty section). `RAND`, `NOW` and `TODAY` are worked out by each reader's own engine, so two people can see different values.
 
+## Charts
+
+A chart is a few lines of text: what kind, a title, which columns, and where the data is.
+
+- **In a document** it is a fenced block (*Insert ▸ Chart*), drawn under the block while editing, in the preview, and on published pages (as a picture, so a published page needs no scripts for it):
+
+  ````
+  ```chart
+  type: bar
+  title: Spending by month
+  stacked: yes
+
+  month, rent, food
+  Jan, 1200, 310
+  Feb, 1250, 280.5
+  ```
+  ````
+
+  Kinds: `bar`, `line`, `area`, `pie`, `scatter`. `x:` and `y:` name columns (default: the first column, and every other column of numbers); `horizontal: yes`, `height: 400`.
+- **From a spreadsheet.** `data: <spreadsheet id> Ledger!A1:C13` in place of the rows draws those cells, live. Whoever can read the document sees that range, whether or not they can open the spreadsheet, the way a mounted section is seen; so the reference counts only if the person who wrote it could open the spreadsheet when they wrote it (recorded per document, and dropped when the reference goes).
+- **On a sheet.** Select cells and press the chart button; the chart sits over the cells, moves by its header, and follows its cells through inserts, deletes and sorts. Agents: `edit_sheet` with `{"chart": "A1:C13", "type": "line", "title": …, "at": "E2"}`, `{"delete_chart": …}`. In the Excel file a chart is a picture.
+- **Your own code.** `type: code` makes the body JavaScript: the body of an async function `(data, echarts, el, theme)` that returns [ECharts](https://echarts.apache.org) options or draws into `el`; `data` is `{columns, rows}` from the rows or the spreadsheet range. It runs only in the reader's browser, in a sandboxed frame (`/chart-frame`): an origin of its own, no network, no way to the page around it or the session. The server never runs it, so a code chart is not in the Excel file, and on a published page it is a sandboxed frame carrying its data.
+- Colours are eight hues in a fixed order, checked for colour-blind readers in light and dark; a chart shows at most eight series (three for a scatter) and says what it left out. Drawing is ECharts (Apache-2.0), fetched when a page first shows a chart.
+
 ## Wikis
 
 - `GET /w/<address>/` — the root page; `/w/<address>/<page-slug>` — a page (slugs come from titles, unique within the tree); `/w/<address>/search?q=`; `/w/<address>/sitemap.xml`. On a custom domain the same paths are served from `/`.
