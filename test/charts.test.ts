@@ -139,6 +139,19 @@ test('a chart in a document draws from a spreadsheet for every reader, if whoeve
     assert.deepEqual(S.app.charts.data(moved.id, ann, { doc: sheet.id, range: 'Sheet1!A1:B2' }).rows, [['Jan', 1200]]);
     S.app.docs.edit(moved.id, { sub: bob.sub, via: 'web' }, (t) => { t.delete(0, anns.length); t.insert(t.length, `\n${anns}`); });
     assert.deepEqual(S.app.charts.data(moved.id, bob, { doc: sheet.id, range: 'Sheet1!A1:B2' }).rows, [['Jan', 1200]]);
+    // A moved grant goes to the block the change wrote, never to another block that happens to name the same range:
+    // Bob's refused block stands above; Ann's granted one below is moved; Ann then takes hers out, and nothing is left.
+    const slide = S.app.docs.create(ann, 'Slide', '');
+    S.app.docs.share(slide.id, ann, bob.sub, 'editor');
+    const refused = `\`\`\`chart\ntype: code\ndata: ${secret.id} A1:B2\n\nreturn {};\n\`\`\`\n`, own = `\`\`\`chart\ndata: ${secret.id} A1:B2\n\`\`\`\n`;
+    S.app.docs.edit(slide.id, { sub: bob.sub, via: 'web' }, (t) => t.insert(0, `${refused}\nmiddle\n\n`));
+    S.app.docs.edit(slide.id, { sub: ann.sub, via: 'web' }, (t) => t.insert(t.length, own));
+    assert.deepEqual(S.app.charts.data(slide.id, ann, { doc: secret.id, range: 'A1:B2' }).rows, [['Ann', 9000]]);
+    S.app.docs.edit(slide.id, { sub: ann.sub, via: 'web' }, (t) => { const x = t.toString(), i = x.lastIndexOf(own); t.delete(i, own.length); t.insert(x.indexOf('middle'), own); });
+    assert.deepEqual(S.app.charts.data(slide.id, ann, { doc: secret.id, range: 'A1:B2' }).rows, [['Ann', 9000]], 'her block, moved, is still granted');
+    S.app.docs.edit(slide.id, { sub: ann.sub, via: 'web' }, (t) => { const x = t.toString(), i = x.indexOf(own, refused.length); t.delete(i, own.length); });
+    assert.match(S.app.docs.text(slide.id), /type: code\ndata: /);
+    assert.throws(() => S.app.charts.data(slide.id, ann, { doc: secret.id, range: 'A1:B2' }), /not available/);
     // A grant belongs to its block. Bob copies Ann's granted block; while hers stands the range is the document's, and
     // when she takes hers out, his copy draws nothing.
     const copy = S.app.docs.create(ann, 'Copy', '');

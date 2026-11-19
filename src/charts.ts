@@ -76,11 +76,16 @@ export class Charts {
     // How many blocks named a range before this change, and how many do now: a change that only moves a block, or
     // writes it out again as an agent's rewrite of the page does, brings in nothing new.
     const same = (list: { source: Source }[], doc_: string, range: string) => list.filter((b) => b.source.doc === doc_ && b.source.range === range).length;
+    const was = this.docs.bodyBefore(c.docId);
     let earlier: { source: Source }[] | null = null;
-    const before = (doc_: string, range: string) => same(earlier ??= chartBlocks(this.docs.bodyBefore(c.docId)), doc_, range);
+    // (Not knowing the text before is knowing of nothing new.)
+    const before = (doc_: string, range: string) => (was === null ? Infinity : same(earlier ??= chartBlocks(was), doc_, range));
     const anchorAt = (at: number) => Buffer.from(Y.encodeRelativePosition(Y.createRelativePositionFromTypeIndex(ytext, at)));
-    // A grant lives while its anchor is in the data line of a block that still names the same range. If its line was
-    // only moved (as many blocks name the range as before), it goes with the block; otherwise it ends.
+    // A grant lives while its anchor is in the data line of a block that still names the same range. If this change
+    // took its line out and wrote the same line in elsewhere (a move: as many blocks name the range as before), the
+    // grant goes to the block this change wrote, and to no other; otherwise it ends.
+    const written = c.ranges.filter(([from, to]) => to > from);
+    const wrote = (b: { from: number; to: number }) => written.some(([from, to]) => from < b.to && to > b.from);
     const granted = new Set<number>();
     const lost: typeof rows = [];
     for (const r of rows) {
@@ -89,16 +94,15 @@ export class Charts {
       if (i < 0) lost.push(r); else granted.add(i);
     }
     for (const r of lost) {
-      const i = same(blocks, r.source_id, r.range) >= before(r.source_id, r.range) ? blocks.findIndex((b, k) => !granted.has(k) && b.source.doc === r.source_id && b.source.range === r.range) : -1;
+      const i = same(blocks, r.source_id, r.range) >= before(r.source_id, r.range) ? blocks.findIndex((b, k) => !granted.has(k) && b.source.doc === r.source_id && b.source.range === r.range && wrote(b)) : -1;
       if (i < 0) this.db.prepare('DELETE FROM chart_sources WHERE id = ?').run(r.id);
       else { this.db.prepare('UPDATE chart_sources SET anchor = ? WHERE id = ?').run(anchorAt(blocks[i].from), r.id); granted.add(i); }
     }
     // Written by hand: not the service acting for someone (a restore, an accepted suggestion, a split or a merge carry a label).
     if (c.origin.label) return;
-    const written = c.ranges.filter(([from, to]) => to > from);
     blocks.forEach((b, i) => {
       // Text put into the line itself: a line added just before or after it is not this line being written.
-      if (granted.has(i) || !written.some(([from, to]) => from < b.to && to > b.from)) return;
+      if (granted.has(i) || !wrote(b)) return;
       // And a block that was not there before: one more names this range than did.
       if (same(blocks, b.source.doc, b.source.range) <= before(b.source.doc, b.source.range)) return;
       if (!this.docs.isSheet(b.source.doc) || !this.docs.role(b.source.doc, { sub: c.origin.sub, admin: false })) return;

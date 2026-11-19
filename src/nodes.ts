@@ -99,8 +99,10 @@ export class Nodes extends EventEmitter {
     const written = (change?.ranges ?? []).filter(([from, to]) => to > from);
     const scanned = scanMounts(text);
     // Lines naming a node before this change and now: a change that only moves a line, or writes it out again, brings in nothing new.
+    const was = this.docs.bodyBefore(docId);
     let earlier: { child: string }[] | null = null;
-    const isNew = (child: string) => scanned.filter((m) => m.child === child).length > (earlier ??= scanMounts(this.docs.bodyBefore(docId))).filter((m) => m.child === child).length;
+    // (Not knowing the text before is knowing of nothing new.)
+    const isNew = (child: string) => was !== null && scanned.filter((m) => m.child === child).length > (earlier ??= scanMounts(was)).filter((m) => m.child === child).length;
     const found = scanned.filter((m) => prev.has(m.child) || this.mayMount(docId, m, by, written, !!change?.origin.label, isNew));
     for (const m of found) this.vouched.delete(`${docId}\n${m.child}`);
     const next = new Map<string, number>(); // child → count

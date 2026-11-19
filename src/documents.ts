@@ -145,7 +145,7 @@ export class Documents extends EventEmitter {
   private sheetText = new Map<string, string>();
   /** Each loaded document's own text as it stands, read once however many ask; and as it stood before the change in hand. */
   private bodies = new Map<string, string>();
-  private bodiesBefore = new Map<string, string>();
+  private bodiesBefore = new Map<string, string | null>();
   private lastUsed = new Map<string, number>();
   private pins = new Map<string, number>();
   private failed = new Set<string>();
@@ -637,8 +637,11 @@ export class Documents extends EventEmitter {
     return text;
   }
 
-  /** The document's own text as it was just before the change now being reported (for telling what a change brought in). */
-  bodyBefore(docId: string): string { return this.bodiesBefore.get(docId) ?? ''; }
+  /**
+   * The document's own text as it was just before the change now being reported (for telling what a change
+   * brought in); null when that is not known, which a caller must take as "nothing new".
+   */
+  bodyBefore(docId: string): string | null { return this.bodiesBefore.get(docId) ?? null; }
 
   /** A document's text. A spreadsheet's is its cells as typed, a line per row (see bookText). */
   text(docId: string): string {
@@ -690,8 +693,7 @@ export class Documents extends EventEmitter {
     });
 
     doc.on('update', (update: Uint8Array, origin: unknown) => {
-      this.sheetText.delete(docId);
-      this.bodies.delete(docId);
+      this.sheetText.delete(docId); // (the body's own text is dropped where it changes: in its observer)
       if (origin === 'load' || this.failed.has(docId)) return;
       const o = origin as ChangeOrigin | undefined;
       guard('persist', () => {
@@ -719,7 +721,7 @@ export class Documents extends EventEmitter {
     doc.getText('body').observe((event, txn) => {
       // The text changed: what was read before this transaction is the text before, and whoever asks next reads it afresh.
       // (Kept here and not when the transaction starts: a listener may start a transaction of its own before the others have run.)
-      this.bodiesBefore.set(docId, this.bodies.get(docId) ?? '');
+      this.bodiesBefore.set(docId, this.bodies.get(docId) ?? null);
       this.bodies.delete(docId);
       const o = txn.origin as ChangeOrigin | undefined;
       if (!o || typeof o !== 'object' || !o.sub) return;
