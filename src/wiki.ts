@@ -3,7 +3,7 @@
 // (`{{node:<id>|aside}}`) as sidebar panels, plus automatic Contents,
 // "In this section" and "Related" panels. Edit links lead back to the editor.
 
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import MarkdownIt from 'markdown-it';
 import type { StateCore } from 'markdown-it';
 type MD = InstanceType<typeof MarkdownIt>;
@@ -32,7 +32,7 @@ export class Wiki {
     imageSizes(this.md);
     galleryFence(this.md);
     // A chart block leaves a marked place; the finished chart (our own picture or frame) is put there after the page is sanitized.
-    chartFence(this.md, (text, env) => { const e = env as { charts?: string[] }; e.charts ??= []; e.charts.push(text); return `<span data-chart-slot="${e.charts.length - 1}"></span>\n`; });
+    chartFence(this.md, (text, env) => { const e = env as { charts?: string[]; slot?: string }; e.charts ??= []; e.charts.push(text); return `<span data-chart-slot="${e.slot}-${e.charts.length - 1}"></span>\n`; });
     tableWidths(this.md);
     this.md.core.ruler.after('inline', 'wiki-task-lists', (state: StateCore) => {
       const tokens = state.tokens;
@@ -138,7 +138,8 @@ export class Wiki {
   render(markdown: string, ctx: { base: string; pages: WikiPage[]; headings?: { id: string; text: string; level: number }[]; /** Leave HTML and scripts as written. */ raw?: boolean; /** The documents the page is made of (a chart may draw from what one of them was allowed to). */ nodes?: Iterable<string> }): string {
     const byId = new Map(ctx.pages.map((p) => [p.id, p]));
     const usedIds = new Set<string>();
-    const env: { charts?: string[] } = {};
+    // Each rendering marks its chart places with a word of its own, so a page cannot write one by hand.
+    const env: { charts?: string[]; slot: string } = { slot: randomBytes(6).toString('hex') };
     const tokens = this.md.parse(markdown, env);
     for (let i = 0; i < tokens.length; i++) {
       const t = tokens[i];
@@ -171,7 +172,7 @@ export class Wiki {
     const html = this.md.renderer.render(tokens, this.md.options, env);
     const safe = ctx.raw ? html : sanitizeRendered(html);
     const charts = env.charts;
-    return charts ? safe.replace(/<span data-chart-slot="(\d+)"><\/span>/g, (_m, n: string) => (charts[Number(n)] === undefined ? '' : this.app.charts.html(charts[Number(n)], ctx.nodes ?? []))) : safe;
+    return charts ? safe.replace(new RegExp(`<span data-chart-slot="${env.slot}-(\\d+)"></span>`, 'g'), (_m, n: string) => (charts[Number(n)] === undefined ? '' : this.app.charts.html(charts[Number(n)], ctx.nodes ?? []))) : safe;
   }
 
   // ------------------------------------------------------------------ pages

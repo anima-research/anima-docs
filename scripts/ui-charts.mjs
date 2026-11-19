@@ -193,6 +193,12 @@ try {
     eq(await alice.locator('iframe.md-chart-frame:visible').first().getAttribute('sandbox'), 'allow-scripts', 'the frame is sandboxed');
     await sleep(1200); // the bars grow in
     await shot(alice, '05-code-chart');
+    // Opened by itself (a link someone was sent), the frame's address runs nothing.
+    const lone = await aliceCtx.newPage();
+    await lone.goto(`${ORIGIN}/chart-frame#${Buffer.from(JSON.stringify({ text: 'type: code\n\nel.textContent = "ran";' })).toString('base64url')}`);
+    await lone.locator('.note', { hasText: 'shows nothing by itself' }).waitFor();
+    assert(!(await lone.locator('#chart').textContent()).includes('ran'), 'the code did not run');
+    await lone.close();
     // Code that throws says so in the frame, and nothing else breaks.
     eq((await api(alice, 'POST', `/api/operations/edit_document`, { document: docId, edits: [{ replace_all_content: '```chart\ntype: code\n\nthrow new Error("my mistake");\n```\n' }] })).status, 200, 'edit');
     await until(async () => (await alice.frameLocator('iframe.md-chart-frame:visible').first().locator('.note').textContent({ timeout: 500 }).catch(() => '')).includes('my mistake'), 'the error to show in the frame');

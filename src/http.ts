@@ -1099,7 +1099,7 @@ export function createHttp(app: App) {
       // ------------------------------------------------ static app shell
       if (method !== 'GET' && method !== 'HEAD') throw new Fault(405, 'Method not allowed.');
       // The frame a chart of type "code" runs in (web/chartframe.ts). Sandboxed: an origin of its own, and a policy
-      // that lets it load its one script and nothing else, so the code can reach neither the app nor the network.
+      // that lets it load its one script and nothing else, so the code cannot reach the app and its requests are refused.
       // It holds nothing of anyone's: what it draws is handed to it by the page around it, or in its address.
       if (path === '/chart-frame' && (method === 'GET' || method === 'HEAD')) {
         res.removeHeader('X-Frame-Options');

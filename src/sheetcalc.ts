@@ -201,6 +201,9 @@ export function sortOrder(calc: Calc, sheet: Sheet, top: number, bottom: number,
   return keyed.map((k) => k.r);
 }
 
+/** The most a chart reads of a range: beyond this a chart shows nothing a reader could make out. */
+export const CHART_ROWS = 5_000, CHART_COLS = 100;
+
 /** The values of a rectangle of cells, row by row, for a chart: numbers as numbers (dates and times as they show), everything else as it shows. */
 export function rangeValues(calc: Calc, sheet: Sheet, top: number, left: number, bottom: number, right: number): (string | number | null)[][] {
   const out: (string | number | null)[][] = [];
@@ -208,7 +211,9 @@ export function rangeValues(calc: Calc, sheet: Sheet, top: number, left: number,
     const row: (string | number | null)[] = [];
     for (let c = left; c <= right; c++) {
       const v = calc.value(sheet, r, c);
-      row.push(typeof v === 'number' && !/[ymdh]/i.test(calc.formatFor(sheet, r, c).replace(/[0#]/g, '')) ? v : calc.shown(sheet, r, c).text || null);
+      // A number stays a number unless it shows as a date or a time (colours in brackets and quoted words are not date letters).
+      const code = calc.formatFor(sheet, r, c).replace(/\[[^\]]*\]|"[^"]*"/g, '').split(';')[0];
+      row.push(typeof v === 'number' && !isDateCode(code) ? v : calc.shown(sheet, r, c).text || null);
     }
     out.push(row);
   }

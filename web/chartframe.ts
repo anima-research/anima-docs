@@ -1,6 +1,9 @@
 // The frame a chart of type "code" runs in (public/chartframe.js, loaded by
-// /chart-frame). The frame is sandboxed: an origin of its own, no network, no
-// way to the app or the reader's session. It is given the chart's text and
+// /chart-frame). The frame is sandboxed: an origin of its own, with no way to
+// the app, the reader's session or other documents, and its requests to the
+// network refused. It is still code: it could carry what it is handed away by
+// sending its own frame elsewhere, so it is handed only what every reader of
+// the document may see (see src/charts.ts). It is given the chart's text and
 // data by the page around it (a message), or in its address (after #, on a
 // published page), runs the code, and shows what it draws.
 //
@@ -49,9 +52,12 @@ async function show(p: Payload) {
   } catch (e) { say(`This chart's code failed: ${e instanceof Error ? e.message : String(e)}`); }
 }
 
+// Only ever a frame inside a page: opened by itself (a link to it, with something to run after the #) it does nothing.
+const framed = parent !== window;
 addEventListener('resize', () => chart?.resize());
-addEventListener('message', (e) => { if (e.source === parent && e.data && e.data.anima === 'chart') void show(e.data as Payload); });
-if (location.hash.length > 1) {
+addEventListener('message', (e) => { if (framed && e.source === parent && e.data && e.data.anima === 'chart') void show(e.data as Payload); });
+if (!framed) say('This address is the frame a chart runs in; it shows nothing by itself.');
+else if (location.hash.length > 1) {
   try { void show(JSON.parse(decodeURIComponent(escape(atob(location.hash.slice(1).replace(/-/g, '+').replace(/_/g, '/'))))) as Payload); } catch { say('This chart could not be read.'); }
 }
-parent.postMessage({ anima: 'chart-ready' }, '*');
+if (framed) parent.postMessage({ anima: 'chart-ready' }, '*');

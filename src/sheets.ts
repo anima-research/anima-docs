@@ -11,7 +11,8 @@ import {
   chartsOf, deleteChart, putChart, quoteSheet, readBook, renameSheet, reorderRows, setBlock, setFormat, type Book, type Rect, type Sheet,
 } from './sheet.js';
 import { Calc, rangeValues, sortOrder } from './sheetcalc.js';
-import { CHART_TYPES, chartText, parseChart, tableOf, type ChartType } from './chart.js';
+import { CHART_TYPES, chartText, parseChart, tableOf, type ChartSpec, type ChartType } from './chart.js';
+import { CHART_COLS, CHART_ROWS } from './sheetcalc.js';
 import { chartPng } from './chartsvg.js';
 
 /** One change of an edit_sheet call (see the tool's description). */
@@ -128,21 +129,35 @@ export class Sheets {
     return { text: out.join('\n'), partial: !!opts.range || cut };
   }
 
-  /**
-   * The values of a range, row by row, for a chart: numbers as numbers (dates and times as they show), everything
-   * else as it shows. `range` is a sheet name, cells, or both ("Ledger!A1:C13"); an open end runs as far as the sheet is filled.
-   */
-  values(docId: string, range: string, maxRows = 5000): (string | number | null)[][] {
-    const calc = this.calc(docId);
-    const book = calc.book;
+  /** The cells of a chart on a sheet, kept to what a chart reads (see CHART_ROWS). */
+  private rectOf(range: string, sheet: Sheet): [number, number, number, number] {
+    const r = parseRange(range)!.rect;
+    return [r.top, r.left, Math.min(r.bottom, sheet.rows.length - 1, r.top + CHART_ROWS - 1), Math.min(r.right, sheet.cols.length - 1, r.left + CHART_COLS - 1)];
+  }
+
+  /** The sheet and cells that a chart's range names: a sheet's name, cells, or both. */
+  private placeOf(book: Book, range: string): { sheet: Sheet; parsed: { sheet: string | null; rect: Rect } } {
     const text = range.trim();
     const named = book.byName.get(text.toLowerCase()) ?? book.byName.get(text.replace(/^'|'$/g, '').replace(/''/g, "'").toLowerCase());
     const parsed = named ? { sheet: named.name, rect: { top: 0, left: 0, bottom: -1, right: -1 } } : parseRange(text);
     if (!parsed) throw new Fault(400, `A chart's range is a sheet name or cells like "Ledger!A1:C13" (got "${range}").`);
-    const sheet = this.sheetNamed(book, parsed.sheet);
+    return { sheet: this.sheetNamed(book, parsed.sheet), parsed };
+  }
+
+  /** The id of the sheet a chart's range means, as the book stands now. */
+  sheetOf(docId: string, range: string): string { return this.placeOf(this.book(docId), range).sheet.id; }
+
+  /**
+   * The values of a range, row by row, for a chart: numbers as numbers (dates and times as they show), everything
+   * else as it shows. `range` is a sheet name, cells, or both ("Ledger!A1:C13"); an open end runs as far as the sheet is filled.
+   */
+  values(docId: string, range: string, maxRows = CHART_ROWS): (string | number | null)[][] {
+    const calc = this.calc(docId);
+    const book = calc.book;
+    const { sheet, parsed } = this.placeOf(book, range);
     const used = this.extents(book).get(sheet.id)!;
     const bottom = Math.min(parsed.rect.bottom < 0 ? used.rows - 1 : parsed.rect.bottom, sheet.rows.length - 1, parsed.rect.top + maxRows - 1);
-    const right = Math.min(parsed.rect.right < 0 ? used.cols - 1 : parsed.rect.right, sheet.cols.length - 1, parsed.rect.left + 99);
+    const right = Math.min(parsed.rect.right < 0 ? used.cols - 1 : parsed.rect.right, sheet.cols.length - 1, parsed.rect.left + CHART_COLS - 1);
     return rangeValues(calc, sheet, parsed.rect.top, parsed.rect.left, bottom, right);
   }
 
@@ -260,16 +275,26 @@ export class Sheets {
     if ('chart' in edit) {
       const { sheet, rect } = where(edit.chart, 'chart');
       const type = String(edit.type ?? (edit.code ? 'code' : 'bar')).toLowerCase();
+      const shown = edit.type === undefined && edit.code === undefined && edit.id !== undefined ? null : type;
       if (!(CHART_TYPES as readonly string[]).includes(type)) throw new Error(`type is one of ${CHART_TYPES.join(', ')}.`);
       const used = this.extents(book).get(sheet.id)!;
       const range = `${a1(rect.top, rect.left)}:${a1(rect.bottom < 0 ? Math.max(rect.top, used.rows - 1) : rect.bottom, rect.right < 0 ? Math.max(rect.left, used.cols - 1) : rect.right)}`;
       const at = edit.at === undefined ? null : parseRange(String(edit.at));
       if (edit.at !== undefined && !at) throw new Error(`at is the cell the chart's corner sits on, such as "E2" (got ${JSON.stringify(edit.at)}).`);
-      const text = chartText({ type: type as ChartType, title: String(edit.title ?? ''), x: String(edit.x ?? ''), y: Array.isArray(edit.y) ? edit.y.map(String) : edit.y ? [String(edit.y)] : [], stacked: edit.stacked === true, horizontal: edit.horizontal === true, code: String(edit.code ?? '') });
       const prior = edit.id === undefined ? undefined : chartsOf(book, sheet).find((c) => c.id === String(edit.id));
       if (edit.id !== undefined && !prior) throw new Error(`No chart ${edit.id} on ${quoteSheet(sheet.name)}.`);
+      // A change to a chart keeps every setting the change does not name.
+      const was: Partial<ChartSpec> = prior ? parseChart(prior.text) : {};
+      const text = chartText({
+        type: (edit.type === undefined && edit.code === undefined && was.type ? was.type : type) as ChartType,
+        title: edit.title === undefined ? was.title ?? '' : String(edit.title), x: edit.x === undefined ? was.x ?? '' : String(edit.x),
+        y: edit.y === undefined ? was.y ?? [] : Array.isArray(edit.y) ? edit.y.map(String) : [String(edit.y)],
+        stacked: edit.stacked === undefined ? !!was.stacked : edit.stacked === true, horizontal: edit.horizontal === undefined ? !!was.horizontal : edit.horizontal === true,
+        code: edit.code === undefined ? was.code ?? '' : String(edit.code),
+      });
       const id = putChart(doc, book, sheet, { id: prior?.id, text, range, row: at ? at.rect.top : prior?.row ?? rect.top, col: at ? at.rect.left : prior?.col ?? Math.min(sheet.cols.length - 1, (rect.right < 0 ? used.cols - 1 : rect.right) + 2) });
-      return `${prior ? 'Changed' : 'Placed'} chart ${id} (${type}) of ${tag(sheet)}${range}.${type === 'code' ? ' Its code runs in each reader’s browser, in a sandbox; it is not drawn in the Excel file.' : ''}`;
+      const kind = shown ?? parseChart(text).type;
+      return `${prior ? 'Changed' : 'Placed'} chart ${id} (${kind}) of ${tag(sheet)}${range}.${kind === 'code' ? ' Its code runs in each reader’s browser, in a sandbox; it is not drawn in the Excel file.' : ''}`;
     }
     if ('delete_chart' in edit) {
       const sheet = this.sheetNamed(book, named);
@@ -327,10 +352,13 @@ export class Sheets {
       });
       // Charts go in as pictures (the file format's own charts are not written). A chart that is code is not drawn here.
       for (const chart of chartsOf(book, s)) {
-        const spec = { ...parseChart(chart.text), height: chart.height };
-        if (spec.type === 'code' || chart.range.includes('#REF!')) continue;
-        const png = await chartPng(spec, tableOf(this.values(docId, `${quoteSheet(s.name)}!${chart.range}`)), chart.width);
-        ws.addImage(wb.addImage({ buffer: png as unknown as ExcelJS.Buffer, extension: 'png' }), { tl: { col: chart.col, row: chart.row }, ext: { width: chart.width, height: chart.height } });
+        // A chart that cannot be drawn here (it is code, or its cells are gone) is a picture saying so; one that fails does not cost the file.
+        try {
+          const spec = { ...parseChart(chart.text), height: chart.height };
+          const table = spec.type === 'code' || chart.range.includes('#REF!') ? { columns: [], rows: [] } : tableOf(rangeValues(calc, s, ...this.rectOf(chart.range, s)));
+          const png = await chartPng(spec, table, chart.width);
+          ws.addImage(wb.addImage({ buffer: png as unknown as ExcelJS.Buffer, extension: 'png' }), { tl: { col: chart.col, row: chart.row }, ext: { width: chart.width, height: spec.type === 'code' ? 96 : chart.height } });
+        } catch (e) { console.error(`[sheets] ${docId}: chart ${chart.id} left out of the Excel file:`, (e as Error).message); }
       }
     }
     return Buffer.from(await wb.xlsx.writeBuffer());

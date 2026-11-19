@@ -1353,6 +1353,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   cleanups.push(nodes.onMeta((id) => { if (id === docId && (app.classList.contains('html-doc') !== isHtml() || app.classList.contains('files-doc') !== isFiles())) applyDocType(); }));
   cleanups.push(() => collection?.destroy());
   cleanups.push(() => { sheetClosed = true; sheet?.destroy(); });
+  cleanups.push(() => dropCharts());
   (window as unknown as { __anima?: unknown }).__anima = { view, binding, nodes, nav: () => nav, docId, rail };
   cleanups.push(() => { delete (window as unknown as { __anima?: unknown }).__anima; });
 

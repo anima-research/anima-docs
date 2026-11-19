@@ -20,7 +20,7 @@ for free and failed the first: a text CRDT merges two replacements of `100` into
 
 ## 2. The stored form
 
-A spreadsheet's Y.Doc holds seven root maps of plain strings and numbers. Nothing is nested, so
+A spreadsheet's Y.Doc holds eight root maps of plain strings and numbers. Nothing is nested, so
 the server can check every incoming update completely (`Documents.applyClientUpdate`).
 
 ```
@@ -31,6 +31,7 @@ cols    <sheet>:<col>          -> order key
 cells   <sheet>:<row>:<col>    -> what was typed   (a formula starts with "=")
 fmt     <sheet>:<row>:<col>    -> number format    (<sheet>::<col> for a whole column)
 widths  <sheet>:<col>          -> column width, px
+charts  <sheet>:<chart>        -> a chart on the sheet (JSON: settings, its range by ids, the cell it sits on)
 ```
 
 - **Cells are map entries.** A map entry has one value: concurrent writes resolve to one of them.

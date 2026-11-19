@@ -3,21 +3,42 @@
 //
 // A chart block in a document may draw from a range of a spreadsheet. Whoever
 // can read the document then sees that range, whether or not they can open the
-// spreadsheet: the person who wrote the reference could, and put it there, as
-// with a mounted section. So a reference counts only if its writer could read
-// the spreadsheet at the moment they wrote it: that is recorded here
-// (chart_sources), per document, and taken away when the reference goes.
+// spreadsheet, as with a mounted section. Two rules keep that from opening
+// anything by accident:
+//
+// - A reference is judged once, by the change that brings it into the text:
+//   it is granted if that change's author could read the spreadsheet then.
+//   Nobody's later edit elsewhere in the document grants it for them; a
+//   reference taken out and put back is judged again; and someone who can
+//   read the spreadsheet grants a range by writing a block that names it
+//   themselves (also when another block already named it in vain).
+// - A chart is given only what its document was granted, never what the
+//   person looking at it could open themselves. A chart may be code written
+//   by someone else, and code can pass on what it is handed; so it is handed
+//   only what every reader of the document may see anyway.
 
+import MarkdownIt from 'markdown-it';
 import type { DB } from './db.js';
 import { Fault } from './auth.js';
 import type { Documents, DocChange } from './documents.js';
 import type { Nodes } from './nodes.js';
 import type { Actor } from './principals.js';
 import type { Sheets } from './sheets.js';
-import { chartSources, parseChart, tableOf, type Table } from './chart.js';
+import { parseChart, tableOf, type Table } from './chart.js';
 import { chartSvg, messageSvg } from './chartsvg.js';
 
 type Source = { doc: string; range: string };
+/** Finds the fenced blocks of a text exactly as the renderers do (a ```chart inside a longer fence is not one). */
+const fences = new MarkdownIt();
+function chartSources(markdown: string): Source[] {
+  const out: Source[] = [];
+  for (const t of fences.parse(markdown, {})) {
+    if (t.type !== 'fence' || (t.info || '').trim().split(/\s+/)[0] !== 'chart') continue;
+    const s = parseChart(t.content).source;
+    if (s?.doc) out.push(s);
+  }
+  return out;
+}
 /** The most a chart's data may weigh in the address of a frame on a published page. */
 const MAX_FRAME_PAYLOAD = 150_000;
 const escapeHtml = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]!));
@@ -29,36 +50,61 @@ export class Charts {
   constructor(private db: DB, private docs: Documents, private sheets: Sheets, private nodes: Nodes, private origin: () => string) {
     docs.on('loaded', (e: { docId: string }) => { if (this.db.prepare('SELECT 1 FROM chart_sources WHERE doc_id = ? LIMIT 1').get(e.docId)) this.known.add(e.docId); });
     docs.on('change', (c: DocChange) => { try { this.onChange(c); } catch (e) { console.error('[charts] scan failed:', e); } });
+    docs.on('unloaded', (e: { docId: string }) => this.known.delete(e.docId));
     docs.on('meta', (e: { docId: string; kind: string }) => { if (e.kind === 'deleted') { this.db.prepare('DELETE FROM chart_sources WHERE doc_id = ?').run(e.docId); this.known.delete(e.docId); } });
   }
 
-  /** After each change to a text: which spreadsheet ranges its chart blocks name now. New ones count if the person who made the change can read the spreadsheet. */
+  /**
+   * After each change to a text: which spreadsheet ranges its chart blocks name now. A reference that was not
+   * there before this change is this change's: granted if its author can read the spreadsheet, recorded as
+   * refused if not, and in either case not judged again while it stays.
+   */
   private onChange(c: DocChange) {
     const text = this.docs.ydoc(c.docId).getText('body').toString(); // a spreadsheet's own body is empty
-    const has = text.includes('```chart');
+    const has = text.includes('chart');
     if (!has && !this.known.has(c.docId)) return;
     const sources = has ? chartSources(text) : [];
     const key = (s: Source) => `${s.doc}\n${s.range}`;
-    const now = new Map(sources.map((s) => [key(s), s]));
-    const had = new Set((this.db.prepare('SELECT source_id, range FROM chart_sources WHERE doc_id = ?').all(c.docId) as { source_id: string; range: string }[]).map((r) => `${r.source_id}\n${r.range}`));
-    for (const k of had) if (!now.has(k)) { const [source, range] = k.split('\n'); this.db.prepare('DELETE FROM chart_sources WHERE doc_id = ? AND source_id = ? AND range = ?').run(c.docId, source, range); }
-    for (const [k, s] of now) {
-      if (had.has(k) || !this.docs.isSheet(s.doc) || !this.docs.role(s.doc, { sub: c.origin.sub, admin: false })) continue;
-      this.db.prepare('INSERT OR IGNORE INTO chart_sources (doc_id, source_id, range, granted_by, granted_at) VALUES (?, ?, ?, ?, ?)').run(c.docId, s.doc, s.range, c.origin.sub, Date.now());
+    const now = new Map<string, { s: Source; n: number }>();
+    for (const s of sources) { const e = now.get(key(s)); if (e) e.n++; else now.set(key(s), { s, n: 1 }); }
+    const had = new Map((this.db.prepare('SELECT source_id, range, n, granted_by FROM chart_sources WHERE doc_id = ?').all(c.docId) as { source_id: string; range: string; n: number; granted_by: string }[]).map((r) => [`${r.source_id}\n${r.range}`, r]));
+    for (const [k, r] of had) if (!now.has(k)) this.db.prepare('DELETE FROM chart_sources WHERE doc_id = ? AND source_id = ? AND range = ?').run(c.docId, r.source_id, r.range);
+    for (const [k, { s, n }] of now) {
+      const was = had.get(k);
+      if (was && was.n === n) continue;
+      // One more block names this range than before: this change's author wrote it, and it is theirs to be judged by.
+      // (One block fewer changes nothing but the count: what was granted stays while a block still names it.)
+      const added = !was || n > was.n;
+      const may = added && this.docs.isSheet(s.doc) && !!this.docs.role(s.doc, { sub: c.origin.sub, admin: false });
+      if (!was) this.db.prepare('INSERT OR IGNORE INTO chart_sources (doc_id, source_id, range, sheet_id, n, granted_by, granted_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(c.docId, s.doc, s.range, may ? this.sheetOf(s) : '', n, may ? c.origin.sub : '', Date.now());
+      else if (may && !was.granted_by) this.db.prepare('UPDATE chart_sources SET n = ?, sheet_id = ?, granted_by = ?, granted_at = ? WHERE doc_id = ? AND source_id = ? AND range = ?').run(n, this.sheetOf(s), c.origin.sub, Date.now(), c.docId, s.doc, s.range);
+      else this.db.prepare('UPDATE chart_sources SET n = ? WHERE doc_id = ? AND source_id = ? AND range = ?').run(n, c.docId, s.doc, s.range);
     }
-    if (this.db.prepare('SELECT 1 FROM chart_sources WHERE doc_id = ? LIMIT 1').get(c.docId)) this.known.add(c.docId); else this.known.delete(c.docId);
+    if (now.size) this.known.add(c.docId); else this.known.delete(c.docId);
   }
 
-  /** Whether one of these documents holds a counted reference to this range. */
+  /** The sheet a range means right now ('' if it means none). */
+  private sheetOf(s: Source): string {
+    try { return this.sheets.sheetOf(s.doc, s.range); } catch { return ''; }
+  }
+
+  /**
+   * Whether one of these documents was granted this range. The grant is for the sheet the range meant when it was
+   * written: if the same words mean another sheet now (a sheet renamed, added in front, or named like the range), it does not hold.
+   */
   private granted(docIds: Iterable<string>, s: Source): boolean {
-    const q = this.db.prepare('SELECT 1 FROM chart_sources WHERE doc_id = ? AND source_id = ? AND range = ?');
-    for (const id of docIds) if (q.get(id, s.doc, s.range)) return true;
+    const q = this.db.prepare("SELECT sheet_id FROM chart_sources WHERE doc_id = ? AND source_id = ? AND range = ? AND granted_by != ''");
+    let sheet: string | null = null;
+    for (const id of docIds) {
+      const row = q.get(id, s.doc, s.range) as { sheet_id: string } | undefined;
+      if (row && row.sheet_id && row.sheet_id === (sheet ??= this.sheetOf(s))) return true;
+    }
     return false;
   }
 
   /** The spreadsheets that charts in these documents draw from (a published page is as new as they are). */
   sourcesOf(docIds: Iterable<string>): string[] {
-    const q = this.db.prepare('SELECT DISTINCT source_id FROM chart_sources WHERE doc_id = ?');
+    const q = this.db.prepare("SELECT DISTINCT source_id FROM chart_sources WHERE doc_id = ? AND granted_by != ''");
     const out = new Set<string>();
     for (const id of docIds) for (const r of q.all(id) as { source_id: string }[]) out.add(r.source_id);
     return [...out].sort();
@@ -71,12 +117,13 @@ export class Charts {
     return seen;
   }
 
-  /** The data of a chart in document `docId` that draws from a spreadsheet, for a reader of that document. */
+  /**
+   * The data of a chart in document `docId` that draws from a spreadsheet, for a reader of that document: what the
+   * document was granted, and nothing on the strength of the reader's own access to the spreadsheet.
+   */
   data(docId: string, actor: Actor, source: Source): Table {
     this.docs.require(docId, actor, 'viewer');
-    const direct = this.docs.get(source.doc) && this.docs.role(source.doc, actor);
-    if (!direct && !this.granted(this.family(docId), source)) throw new Fault(404, 'This chart’s data is not available: the spreadsheet is not shared with you, and was not open to whoever placed the chart.');
-    if (!this.docs.isSheet(source.doc)) throw new Fault(404, 'A chart draws from a spreadsheet; that document is not one.');
+    if (!this.granted(this.family(docId), source) || !this.docs.isSheet(source.doc)) throw new Fault(404, 'This chart’s data is not available: the spreadsheet was not open to whoever wrote the chart’s data line. Someone who can open it can write the line again.');
     return tableOf(this.sheets.values(source.doc, source.range));
   }
 
@@ -89,7 +136,7 @@ export class Charts {
     let table: Table | null = spec.rows.length ? tableOf(spec.rows) : null, error = '';
     if (spec.source?.doc) {
       try {
-        if (!this.granted(nodes, spec.source) || !this.docs.isSheet(spec.source.doc)) throw new Fault(404, 'This chart’s spreadsheet was not open to whoever placed the chart.');
+        if (!this.granted(nodes, spec.source) || !this.docs.isSheet(spec.source.doc)) throw new Fault(404, 'This chart’s spreadsheet was not open to whoever wrote its data line.');
         table = tableOf(this.sheets.values(spec.source.doc, spec.source.range));
       } catch (e) { error = e instanceof Fault ? e.message : 'This chart’s data could not be read.'; }
     }

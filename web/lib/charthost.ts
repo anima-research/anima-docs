@@ -14,6 +14,7 @@ function sheetData(docId: string, source: { doc: string; range: string }): Promi
   const key = `${docId}\n${source.doc}\n${source.range}`;
   const had = fetched.get(key);
   if (had && Date.now() - had.at < 30_000) return had.table;
+  for (const [k, v] of fetched) if (Date.now() - v.at >= 30_000) fetched.delete(k);
   const table = fetch(`/api/docs/${encodeURIComponent(docId)}/chart-data?doc=${encodeURIComponent(source.doc)}&range=${encodeURIComponent(source.range)}`, { headers: { Accept: 'application/json' } })
     .then(async (r) => { const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error ?? 'The chart’s data could not be read.'); return j as Table; });
   table.catch(() => fetched.delete(key));
@@ -31,7 +32,12 @@ function codeFrame(el: HTMLElement, spec: ChartSpec, text: string, table: Table 
   frame.title = spec.title || 'Chart';
   frame.style.height = `${spec.height}px`;
   frame.src = '/chart-frame';
-  const onMessage = (e: MessageEvent) => { if (e.source === frame.contentWindow && e.data?.anima === 'chart-ready') frame.contentWindow?.postMessage({ anima: 'chart', text, table, theme: themeNow(), error }, '*'); };
+  // Answered once: whatever the frame holds after that (the code may send it elsewhere) is not handed the data again.
+  const onMessage = (e: MessageEvent) => {
+    if (e.source !== frame.contentWindow || e.data?.anima !== 'chart-ready') return;
+    removeEventListener('message', onMessage);
+    frame.contentWindow?.postMessage({ anima: 'chart', text, table, theme: themeNow(), error }, '*');
+  };
   addEventListener('message', onMessage);
   el.replaceChildren(frame);
   return () => removeEventListener('message', onMessage);
@@ -53,7 +59,21 @@ export function mountChart(el: HTMLElement, text: string, ctx: { docId?: string;
   } else {
     Promise.all([data, loadDrawing()]).then(([table, m]) => { if (!gone) { el.style.minHeight = ''; dispose = m.draw(el, spec, table ?? { columns: [], rows: [] }, themeNow()); } }, (e: Error) => { if (!gone) note(el, e.message); });
   }
-  return () => { gone = true; dispose(); };
+  // A chart of a spreadsheet range follows the spreadsheet: asked again every minute while it is on a visible page.
+  let last = '';
+  const again = spec.source?.doc && ctx.docId && ctx.table === undefined ? window.setInterval(() => {
+    if (gone || !el.isConnected) { clearInterval(again); return; }
+    if (document.visibilityState !== 'visible') return;
+    sheetData(ctx.docId!, spec.source!).then((table) => {
+      const now = JSON.stringify(table);
+      if (gone || now === (last ||= now)) return;
+      last = now;
+      dispose();
+      if (spec.type === 'code') dispose = codeFrame(el, spec, text, table);
+      else void loadDrawing().then((m) => { if (!gone) dispose = m.draw(el, spec, table, themeNow()); });
+    }, () => undefined);
+  }, 60_000) : 0;
+  return () => { gone = true; clearInterval(again); dispose(); };
 }
 
 /** Fill every chart placeholder under `root` (what a rendered ```chart block leaves). Returns what removes them. */

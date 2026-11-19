@@ -100,17 +100,6 @@ export function chartText(spec: Partial<ChartSpec>): string {
   return out.join('\n');
 }
 
-/** Every spreadsheet range the chart blocks of a markdown text draw from. */
-export function chartSources(markdown: string): { doc: string; range: string }[] {
-  const out: { doc: string; range: string }[] = [];
-  if (!markdown.includes('```chart')) return out;
-  for (const m of markdown.matchAll(/^```chart[^\n]*\n([\s\S]*?)^```/gm)) {
-    const s = parseChart(m[1]).source;
-    if (s?.doc) out.push(s);
-  }
-  return out;
-}
-
 const asNumber = (v: string): number | null => {
   const t = v.replace(/[,\s]/g, '');
   if (!/^[-+]?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?$/i.test(t)) return null;
@@ -155,8 +144,8 @@ function column(table: Table, name: string): number {
 export type Drawn = { option: Record<string, unknown>; note: string } | { error: string };
 
 /** The drawing options for a chart and its data. `note` says what could not be shown as asked. */
-export function chartOption(spec: ChartSpec, table: Table, theme: Theme, opts: { still?: boolean } = {}): Drawn {
-  if (!table.columns.length || !table.rows.length) return { error: 'This chart has no data yet: rows under the settings (the first row is the headings), or data: a range of a spreadsheet.' };
+export function chartOption(spec: ChartSpec, table: Table, theme: Theme, opts: { still?: boolean; /** Write the note into the picture, under the title (where nothing else can show it). */ noteInside?: boolean } = {}): Drawn {
+  if (!table.columns.length || !table.rows.length) return { error: 'This chart has no data to draw yet (the first row of its data is the headings).' };
   const ink = CHART_INK[theme], palette = CHART_COLORS[theme];
   const x = Math.max(0, column(table, spec.x));
   let ys = spec.y.length ? spec.y.map((n) => column(table, n)) : table.columns.map((_, i) => i).filter((i) => i !== x && table.rows.some((r) => typeof r[i] === 'number'));
@@ -166,17 +155,20 @@ export function chartOption(spec: ChartSpec, table: Table, theme: Theme, opts: {
   if (!ys.length) return { error: 'None of the columns holds numbers to draw.' };
   const notes: string[] = [];
   const cap = spec.type === 'scatter' ? MAX_SCATTER : spec.type === 'pie' ? 1 : MAX_SERIES;
-  if (ys.length > cap) { if (spec.type !== 'pie') notes.push(`Showing ${cap} of ${ys.length} series: ${ys.slice(cap).map((i) => table.columns[i]).join(', ')} left out.`); ys = ys.slice(0, cap); }
+  if (ys.length > cap) { notes.push(spec.type === 'pie' ? `A pie draws one series: showing ${table.columns[ys[0]]} only.` : `Showing ${cap} of ${ys.length} series: ${ys.slice(cap).map((i) => table.columns[i]).join(', ')} left out.`); ys = ys.slice(0, cap); }
   const num = (v: unknown) => (typeof v === 'number' ? v : null);
   const names = table.rows.map((r) => String(r[x] ?? ''));
   const text = { color: ink.text, fontFamily: FONT, fontSize: 12 };
+  const inside = opts.noteInside ? notes.join(' ') : '';
+  /** Where the title (and a note under it) end. */
+  const head = (spec.title ? 26 : 0) + (inside ? 16 : 0);
   const base: Record<string, unknown> = {
     color: palette, textStyle: text, animation: !opts.still, animationDuration: 250, backgroundColor: 'transparent',
-    title: spec.title ? { text: spec.title, left: 0, top: 0, textStyle: { color: ink.text, fontFamily: FONT, fontSize: 14, fontWeight: 600 } } : undefined,
+    title: spec.title || inside ? { text: spec.title, subtext: inside, left: 0, top: 0, itemGap: 4, textStyle: { color: ink.text, fontFamily: FONT, fontSize: 14, fontWeight: 600 }, subtextStyle: { color: ink.muted, fontFamily: FONT, fontSize: 11 } } : undefined,
     // One series is named by the title; two or more get a legend, in ink, the colour carried by the mark beside the name.
-    legend: ys.length > 1 || spec.type === 'pie' ? { type: 'scroll', top: spec.title ? 26 : 0, left: 0, icon: spec.type === 'line' ? 'roundRect' : 'circle', itemWidth: 10, itemHeight: 10, textStyle: { color: ink.muted, fontFamily: FONT }, pageTextStyle: { color: ink.muted }, pageIconColor: ink.muted } : undefined,
+    legend: ys.length > 1 || spec.type === 'pie' ? { type: 'scroll', top: head, left: 0, icon: spec.type === 'line' ? 'roundRect' : 'circle', itemWidth: 10, itemHeight: 10, textStyle: { color: ink.muted, fontFamily: FONT }, pageTextStyle: { color: ink.muted }, pageIconColor: ink.muted } : undefined,
   };
-  const top = (spec.title ? 30 : 6) + (base.legend ? 28 : 4);
+  const top = head + 4 + (base.legend ? 28 : 4);
   const tooltip = (trigger: 'axis' | 'item') => ({ trigger, confine: true, backgroundColor: ink.surface, borderColor: ink.rule, textStyle: { color: ink.text, fontFamily: FONT, fontSize: 12 }, axisPointer: trigger === 'axis' ? { type: 'line', lineStyle: { color: ink.rule } } : undefined });
 
   if (spec.type === 'pie') {

@@ -451,10 +451,8 @@ function deleteLines(doc: Y.Doc, book: Book, sheet: Sheet, map: 'rows' | 'cols',
   const end = index + ids.length - 1;
   // A range that loses an end keeps what is left of it (SUM(B2:B9) without row 9 is SUM(B2:B8)), as in Excel.
   // Written first, while every row and column still has its id; a range that goes entirely, or a single cell, reads #REF!.
-  for (const f of formulasTouching(book, sheet, gone, axis === 'row' ? 0 : 1)) {
-    if (f.sheet.id === sheet.id && f[axis] >= index && f[axis] <= end) continue; // going too
-    const next = mapRefs(f.text, (ref, original) => {
-      if (!ref.b || (ref.sheet === null ? f.sheet : book.byName.get(ref.sheet.toLowerCase()))?.id !== sheet.id) return original;
+  const shrink = (text: string, home: Sheet) => mapRefs(text, (ref, original) => {
+      if (!ref.b || (ref.sheet === null ? home : book.byName.get(ref.sheet.toLowerCase()))?.id !== sheet.id) return original;
       const x = ref.a[axis], y = ref.b[axis];
       if (x === null || y === null) return original;
       let lo = Math.min(x, y), hi = Math.max(x, y);
@@ -463,7 +461,17 @@ function deleteLines(doc: Y.Doc, book: Book, sheet: Sheet, map: 'rows' | 'cols',
       if (hi >= index && hi <= end) hi = index - 1;
       return `${prefixOf(original)}${cornerText({ ...ref.a, [axis]: lo })}:${cornerText({ ...ref.b, [axis]: hi })}`;
     });
+  for (const f of formulasTouching(book, sheet, gone, axis === 'row' ? 0 : 1)) {
+    if (f.sheet.id === sheet.id && f[axis] >= index && f[axis] <= end) continue; // going too
+    const next = shrink(f.text, f.sheet);
     if (next !== f.text) setInput(doc, book, f.sheet, f.row, f.col, next);
+  }
+  // Charts on the sheet: their cells shrink the same way, and one sitting on a line that goes moves to the next that stays.
+  const size = map === 'rows' ? sheet.rows.length : sheet.cols.length;
+  for (const c of chartsOf(book, sheet)) {
+    const at = c[axis] >= index && c[axis] <= end ? (end + 1 < size ? end + 1 : Math.max(0, index - 1)) : c[axis];
+    const range = c.range.includes(REF_ERROR) ? c.range : shrink(`=${c.range}`, sheet).slice(1);
+    if (at !== c[axis] || range !== c.range) putChart(doc, book, sheet, { ...c, [axis]: at, range });
   }
   const part = map === 'rows' ? 1 : 2;
   for (const name of ['cells', 'fmt'] as const) {
@@ -523,12 +531,15 @@ export function reorderRows(doc: Y.Doc, book: Book, sheet: Sheet, from: number, 
     for (const [i, key] of made.rekey) m.set(`${sheet.id}:${sheet.rows[i + order.length]}`, key);
   }
   order.forEach((was, i) => { if (sheet.rowKeys[was] !== slots[i]) m.set(`${sheet.id}:${sheet.rows[was]}`, slots[i]); });
+  const charts = chartsOf(book, sheet);
   const after = readBook(book.store);
   for (const f of formulas) {
     const home = after.byId.get(f.sheetId)!;
     const row = home.rowAt.get(f.rowId);
     if (row !== undefined) setInput(doc, after, home, row, f.col, f.text);
   }
+  // A chart covers the same area and sits at the same place after a sort, like a formula outside the sorted rows.
+  for (const c of charts) if (!c.range.includes(REF_ERROR)) putChart(doc, after, after.byId.get(sheet.id)!, c);
 }
 
 export function addSheet(doc: Y.Doc, book: Book, name: string, rows = NEW_ROWS, cols = NEW_COLS): string {
@@ -631,6 +642,8 @@ export interface SheetChart {
 }
 interface StoredChart { t: string; g: string; r: string; c: string; w: number; h: number }
 const CHART_W = 480, CHART_H = 300;
+/** The longest a stored chart may be (documents.ts refuses longer from a browser). */
+export const MAX_CHART_CHARS = 24_000;
 
 export function chartsOf(book: Book, sheet: Sheet): SheetChart[] {
   const out: SheetChart[] = [];
@@ -638,6 +651,7 @@ export function chartsOf(book: Book, sheet: Sheet): SheetChart[] {
     if (!key.startsWith(`${sheet.id}:`) || typeof v !== 'string') continue;
     let c: StoredChart;
     try { c = JSON.parse(v) as StoredChart; } catch { continue; }
+    if (!c || typeof c !== 'object') continue; // not a chart: someone wrote something else here
     out.push({
       id: key.slice(sheet.id.length + 1), text: String(c.t ?? ''), range: decodeFormula(book, sheet, `=${c.g ?? ''}`).slice(1),
       row: sheet.rowAt.get(c.r) ?? 0, col: sheet.colAt.get(c.c) ?? 0, width: Number(c.w) || CHART_W, height: Number(c.h) || CHART_H,
@@ -648,14 +662,16 @@ export function chartsOf(book: Book, sheet: Sheet): SheetChart[] {
 
 /** Place a chart on a sheet, or (with `id`) change the one there. Returns its id. */
 export function putChart(doc: Y.Doc, book: Book, sheet: Sheet, chart: { id?: string; text: string; range: string; row: number; col: number; width?: number; height?: number }): string {
-  if (chart.text.length > 20_000) throw new Error('A chart’s settings and code hold at most 20,000 characters.');
-  const range = parseRange(chart.range);
-  if (!range || range.sheet) throw new Error(`A chart on a sheet draws cells of that sheet, such as "A1:C13" (got "${chart.range}").`);
+  const range = chart.range.includes(REF_ERROR) ? null : parseRange(chart.range);
+  if (!chart.range.includes(REF_ERROR) && (!range || range.sheet)) throw new Error(`A chart on a sheet draws cells of that sheet, such as "A1:C13" (got "${chart.range}").`);
   const m = doc.getMap('charts');
   const id = chart.id ?? newId(5, (x) => m.has(`${sheet.id}:${x}`));
   const row = sheet.rows[Math.max(0, Math.min(sheet.rows.length - 1, chart.row))], col = sheet.cols[Math.max(0, Math.min(sheet.cols.length - 1, chart.col))];
   const stored: StoredChart = { t: chart.text, g: encodeFormula(book, sheet, `=${chart.range}`).slice(1), r: row, c: col, w: Math.round(chart.width ?? CHART_W), h: Math.round(chart.height ?? CHART_H) };
-  m.set(`${sheet.id}:${id}`, JSON.stringify(stored));
+  const json = JSON.stringify(stored);
+  // As it is stored (with its quotes and line breaks escaped), which is what the server measures.
+  if (json.length > MAX_CHART_CHARS) throw new Error('A chart’s settings and code are too long (about 20,000 characters at most).');
+  if (m.get(`${sheet.id}:${id}`) !== json) m.set(`${sheet.id}:${id}`, json);
   return id;
 }
 export function deleteChart(doc: Y.Doc, sheet: Sheet, id: string) {

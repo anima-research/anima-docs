@@ -17,7 +17,7 @@ import {
   addSheet, a1, chartsOf, colName, deleteChart, deleteCols, deleteRows, deleteSheet, formatOf, parseRange, putChart, input, insertCols, insertRows, liveStore, parseTsv, readBook, renameSheet, reorderRows,
   setBlock, setFormat, shiftFormula, stored, toTsv, MAX_ROWS, type Book, type Rect, type Sheet,
 } from '../src/sheet';
-import { Calc, FORMATS, rangeValues, sortOrder } from '../src/sheetcalc';
+import { CHART_COLS, CHART_ROWS, Calc, FORMATS, rangeValues, sortOrder } from '../src/sheetcalc';
 import { CHART_TYPES, chartText, parseChart, tableOf, type ChartType } from '../src/chart';
 import { mountChart } from './lib/charthost';
 
@@ -676,7 +676,7 @@ export function sheetView(deps: SheetDeps): SheetView {
       seen.add(c.id);
       const spec = parseChart(c.text);
       const where = c.range.includes('#REF!') ? null : parseRange(c.range);
-      const table = calc && where ? tableOf(rangeValues(calc, s, where.rect.top, where.rect.left, Math.min(where.rect.bottom, s.rows.length - 1), Math.min(where.rect.right, s.cols.length - 1))) : null;
+      const table = calc && where ? tableOf(rangeValues(calc, s, where.rect.top, where.rect.left, Math.min(where.rect.bottom, s.rows.length - 1, where.rect.top + CHART_ROWS - 1), Math.min(where.rect.right, s.cols.length - 1, where.rect.left + CHART_COLS - 1))) : null;
       const key = JSON.stringify([c.text, c.width, c.height, table]);
       let m = shownCharts.get(c.id);
       if (!m) {

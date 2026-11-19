@@ -16,7 +16,7 @@ export function messageSvg(title: string, message: string, opts: { theme?: Theme
 /** A chart as SVG. What cannot be drawn (no data, an unknown column, a chart that is code) is a picture of the reason. */
 export function chartSvg(spec: ChartSpec, table: Table, opts: { theme?: Theme; width?: number; background?: boolean } = {}): string {
   const theme = opts.theme ?? 'light', width = opts.width ?? 720, height = spec.height;
-  const drawn = spec.type === 'code' ? { error: 'This chart is drawn by code, in the reader’s browser: open the document to see it.' } : chartOption(spec, table, theme, { still: true });
+  const drawn = spec.type === 'code' ? { error: 'This chart is drawn by code, in the reader’s browser: open the document to see it.' } : chartOption(spec, table, theme, { still: true, noteInside: true });
   if ('error' in drawn) return messageSvg(spec.title, drawn.error, opts);
   const ink = CHART_INK[theme];
   const chart = echarts.init(null, null, { renderer: 'svg', ssr: true, width, height });

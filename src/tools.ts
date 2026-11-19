@@ -696,7 +696,7 @@ export const TOOLS: ToolDef[] = [
       '  {"sort": "A2:F90", "by": "C", "descending": true}  put those rows in order of a column (whole rows move)',
       '  {"format": "C2:C90", "as": "#,##0.00"}  how numbers show (Excel format codes: "0%", "$#,##0.00", "yyyy-mm-dd"; "" for automatic)',
       '  {"chart": "A1:C13", "type": "bar", "title": "Spending", "at": "E2"}  place a chart of those cells (the first row is the headings): type bar, line, area, pie or scatter; "x" and "y" name columns, "stacked" and "horizontal" are true or false; "id" changes a chart already there; {"delete_chart": "<id or title>"} removes one',
-      '  {"chart": "A1:C13", "code": "return { xAxis: {...}, series: [...] }"}  a chart drawn by your own JavaScript: the body of a function (data, echarts, el, theme) that returns ECharts options or draws into el; data is {columns, rows}; it runs in each reader\'s browser, sandboxed, with no network',
+      '  {"chart": "A1:C13", "code": "return { xAxis: {...}, series: [...] }"}  a chart drawn by your own JavaScript: the body of a function (data, echarts, el, theme) that returns ECharts options or draws into el; data is {columns, rows} of those cells; it runs in each reader\'s browser, in a sandboxed frame that cannot reach the app or make requests',
       '  {"add_sheet": "Summary"} / {"rename_sheet": "Sheet1", "to": "Ledger"} / {"delete_sheet": "Old"}',
       'A value is what a person would type: a number, text, a date as 2026-03-04, or a formula as in Excel ("=SUM(B2:B9)", "=Ledger!C2*0.2", "=SUMIF(A:A,\\"Rent\\",C:C)"). Rows and columns are named as read_document shows them at the moment each change applies. Formulas keep pointing at their cells when rows are inserted, removed or sorted.',
     ].join('\n'),

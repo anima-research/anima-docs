@@ -11,7 +11,7 @@ import { diffChars, diffLines } from 'diff';
 import type { DB } from './db.js';
 import { Fault } from './auth.js';
 import { isGuest, type Actor, type Principals } from './principals.js';
-import { MAX_CELLS, MAX_CELL_CHARS, MAX_COLS, MAX_ROWS, SHEET, SHEET_MAPS, bookText, diffStores, initBook, liveStore, parseTsv, readBook, restoreStore, setBlock, type SheetMap, type Store } from './sheet.js';
+import { MAX_CELLS, MAX_CELL_CHARS, MAX_CHART_CHARS, MAX_COLS, MAX_ROWS, SHEET, SHEET_MAPS, bookText, diffStores, initBook, liveStore, parseTsv, readBook, restoreStore, setBlock, type SheetMap, type Store } from './sheet.js';
 
 export type Role = 'viewer' | 'commenter' | 'editor' | 'owner';
 /** Retired: every document is 'restricted' (v12); kept as a type for old clients. */
@@ -926,7 +926,7 @@ export class Documents extends EventEmitter {
       // One record may hold several successive values of its entry (a client that keeps overwritten values sends them joined).
       const values: unknown[] = content instanceof Y.ContentAny && content.arr.length ? content.arr : [undefined];
       // A width is a number; everything else is text: what was typed, a number format, a name, an order key.
-      const longest = map === 'cells' ? MAX_CELL_CHARS : map === 'charts' ? 24_000 : map === 'fmt' ? 60 : 200;
+      const longest = map === 'cells' ? MAX_CELL_CHARS : map === 'charts' ? MAX_CHART_CHARS : map === 'fmt' ? 60 : 200;
       for (const v of values) if (map === 'widths' ? !(typeof v === 'number' && v > 0 && v < 10_000) : !(typeof v === 'string' && v.length <= longest)) refuse();
       if (map === 'cells' && !cells.has(key)) added.add(key);
     }
