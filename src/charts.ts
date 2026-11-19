@@ -68,17 +68,30 @@ export class Charts {
   /** After each change to a text: grants whose block is gone end; a block whose data line this change wrote may be granted. */
   private onChange(c: DocChange) {
     const doc = this.docs.ydoc(c.docId);
-    const ytext = doc.getText('body'); // a spreadsheet's own body is empty
-    const text = ytext.toString();
+    const ytext = doc.getText('body');
+    const text = this.docs.body(c.docId); // a spreadsheet's own body is empty
     const rows = this.db.prepare('SELECT id, source_id, range, anchor FROM chart_sources WHERE doc_id = ?').all(c.docId) as { id: number; source_id: string; range: string; anchor: Buffer }[];
     if (!rows.length && !text.includes('chart')) return;
     const blocks = chartBlocks(text);
-    // A grant lives while its anchor is in the data line of a block that still names the same range.
+    // How many blocks named a range before this change, and how many do now: a change that only moves a block, or
+    // writes it out again as an agent's rewrite of the page does, brings in nothing new.
+    const same = (list: { source: Source }[], doc_: string, range: string) => list.filter((b) => b.source.doc === doc_ && b.source.range === range).length;
+    let earlier: { source: Source }[] | null = null;
+    const before = (doc_: string, range: string) => same(earlier ??= chartBlocks(this.docs.bodyBefore(c.docId)), doc_, range);
+    const anchorAt = (at: number) => Buffer.from(Y.encodeRelativePosition(Y.createRelativePositionFromTypeIndex(ytext, at)));
+    // A grant lives while its anchor is in the data line of a block that still names the same range. If its line was
+    // only moved (as many blocks name the range as before), it goes with the block; otherwise it ends.
     const granted = new Set<number>();
+    const lost: typeof rows = [];
     for (const r of rows) {
       const at = Y.createAbsolutePositionFromRelativePosition(Y.decodeRelativePosition(r.anchor), doc)?.index;
-      const i = at === undefined ? -1 : blocks.findIndex((b) => b.source.doc === r.source_id && b.source.range === r.range && at >= b.from && at < Math.max(b.to, b.from + 1));
-      if (i < 0) this.db.prepare('DELETE FROM chart_sources WHERE id = ?').run(r.id); else granted.add(i);
+      const i = at === undefined ? -1 : blocks.findIndex((b, k) => !granted.has(k) && b.source.doc === r.source_id && b.source.range === r.range && at >= b.from && at < Math.max(b.to, b.from + 1));
+      if (i < 0) lost.push(r); else granted.add(i);
+    }
+    for (const r of lost) {
+      const i = same(blocks, r.source_id, r.range) >= before(r.source_id, r.range) ? blocks.findIndex((b, k) => !granted.has(k) && b.source.doc === r.source_id && b.source.range === r.range) : -1;
+      if (i < 0) this.db.prepare('DELETE FROM chart_sources WHERE id = ?').run(r.id);
+      else { this.db.prepare('UPDATE chart_sources SET anchor = ? WHERE id = ?').run(anchorAt(blocks[i].from), r.id); granted.add(i); }
     }
     // Written by hand: not the service acting for someone (a restore, an accepted suggestion, a split or a merge carry a label).
     if (c.origin.label) return;
@@ -86,11 +99,13 @@ export class Charts {
     blocks.forEach((b, i) => {
       // Text put into the line itself: a line added just before or after it is not this line being written.
       if (granted.has(i) || !written.some(([from, to]) => from < b.to && to > b.from)) return;
+      // And a block that was not there before: one more names this range than did.
+      if (same(blocks, b.source.doc, b.source.range) <= before(b.source.doc, b.source.range)) return;
       if (!this.docs.isSheet(b.source.doc) || !this.docs.role(b.source.doc, { sub: c.origin.sub, admin: false })) return;
       const sheet = this.sheetOf(b.source);
       if (!sheet) return;
       this.db.prepare('INSERT INTO chart_sources (doc_id, source_id, range, sheet_id, anchor, granted_by, granted_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
-        .run(c.docId, b.source.doc, b.source.range, sheet, Buffer.from(Y.encodeRelativePosition(Y.createRelativePositionFromTypeIndex(ytext, b.from))), c.origin.sub, Date.now());
+        .run(c.docId, b.source.doc, b.source.range, sheet, anchorAt(b.from), c.origin.sub, Date.now());
     });
   }
 

@@ -143,6 +143,9 @@ export class Documents extends EventEmitter {
   private live = new Map<string, Y.Doc>();
   /** A spreadsheet's text (what search reads), kept until its next change. */
   private sheetText = new Map<string, string>();
+  /** Each loaded document's own text as it stands, read once however many ask; and as it stood before the change in hand. */
+  private bodies = new Map<string, string>();
+  private bodiesBefore = new Map<string, string>();
   private lastUsed = new Map<string, number>();
   private pins = new Map<string, number>();
   private failed = new Set<string>();
@@ -313,6 +316,7 @@ export class Documents extends EventEmitter {
     const doc = this.live.get(docId);
     if (doc) { doc.destroy(); this.live.delete(docId); }
     this.sheetText.delete(docId);
+    this.bodies.delete(docId); this.bodiesBefore.delete(docId);
   }
 
   /**
@@ -626,10 +630,20 @@ export class Documents extends EventEmitter {
 
   isSheet(docId: string): boolean { return this.get(docId)?.type === SHEET; }
 
+  /** The document's own text (a spreadsheet's is empty). Kept until the next change, so the listeners of one change share one reading. */
+  body(docId: string): string {
+    let text = this.bodies.get(docId);
+    if (text === undefined) this.bodies.set(docId, text = this.ydoc(docId).getText('body').toString());
+    return text;
+  }
+
+  /** The document's own text as it was just before the change now being reported (for telling what a change brought in). */
+  bodyBefore(docId: string): string { return this.bodiesBefore.get(docId) ?? ''; }
+
   /** A document's text. A spreadsheet's is its cells as typed, a line per row (see bookText). */
   text(docId: string): string {
     const doc = this.ydoc(docId);
-    if (!this.isSheet(docId)) return doc.getText('body').toString();
+    if (!this.isSheet(docId)) return this.body(docId);
     let text = this.sheetText.get(docId);
     if (text === undefined) this.sheetText.set(docId, text = bookText(readBook(liveStore(doc))));
     return text;
@@ -668,6 +682,8 @@ export class Documents extends EventEmitter {
 
     // Before a change lands: the history closes a stretch of editing here, with the state before it.
     doc.on('beforeTransaction', (txn: Y.Transaction) => {
+      // Read the text now if nobody has since it last changed: the body's observer below keeps it as "the text before".
+      try { this.body(docId); } catch { /* being unloaded */ }
       const o = txn.origin as ChangeOrigin | undefined;
       if (!o || typeof o !== 'object' || !o.sub) return;
       try { this.emit('beforeChange', { docId, origin: o }); } catch (e) { console.error(`[documents] ${docId}: beforeChange listener failed:`, e); }
@@ -675,6 +691,7 @@ export class Documents extends EventEmitter {
 
     doc.on('update', (update: Uint8Array, origin: unknown) => {
       this.sheetText.delete(docId);
+      this.bodies.delete(docId);
       if (origin === 'load' || this.failed.has(docId)) return;
       const o = origin as ChangeOrigin | undefined;
       guard('persist', () => {
@@ -700,6 +717,10 @@ export class Documents extends EventEmitter {
     });
 
     doc.getText('body').observe((event, txn) => {
+      // The text changed: what was read before this transaction is the text before, and whoever asks next reads it afresh.
+      // (Kept here and not when the transaction starts: a listener may start a transaction of its own before the others have run.)
+      this.bodiesBefore.set(docId, this.bodies.get(docId) ?? '');
+      this.bodies.delete(docId);
       const o = txn.origin as ChangeOrigin | undefined;
       if (!o || typeof o !== 'object' || !o.sub) return;
       let pos = 0, added = 0, removed = 0, inserted = '';
@@ -720,6 +741,7 @@ export class Documents extends EventEmitter {
 
     // A spreadsheet changes by entries of its maps: one change per transaction, counted in characters typed and removed.
     if (this.isSheet(docId)) {
+      doc.on('afterTransaction', () => { this.sheetText.delete(docId); }); // before the change is announced below
       let pending: { added: number; removed: number; inserted: string } | null = null;
       for (const name of SHEET_MAPS) {
         const map = doc.getMap(name);
@@ -1112,6 +1134,7 @@ export class Documents extends EventEmitter {
     const doc = this.live.get(docId);
     if (doc) { doc.destroy(); this.live.delete(docId); }
     this.sheetText.delete(docId);
+    this.bodies.delete(docId); this.bodiesBefore.delete(docId);
     this.lastUsed.delete(docId);
     if (doc) this.emit('unloaded', { docId });
   }

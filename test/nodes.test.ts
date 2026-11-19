@@ -416,6 +416,10 @@ test('a mount line counts only if whoever wrote it could open the node: knowing 
   docs.edit(sugg.id, { sub: ann.sub, via: 'web', label: 'Accepted a suggestion' }, (t) => t.insert(t.length, `${marker(vault.id)}\n`));
   assert.deepEqual(nodes.childrenOf(sugg.id), []);
   assert.equal(docs.role(vault.id, eve), null);
+  // Nor is a line written out again a line written: Ann's change takes Eve's line out and puts it back lower down.
+  docs.edit(bait.id, { sub: ann.sub, via: 'web' }, (t) => { const x = t.toString(), i = x.indexOf(marker(vault.id)); t.delete(i, marker(vault.id).length); t.insert(t.length, `\n${marker(vault.id)}\n`); });
+  assert.ok(docs.text(bait.id).endsWith(`${marker(vault.id)}\n`));
+  assert.equal(docs.role(vault.id, eve), null);
   // A section taken out and mounted elsewhere has left: an editor of the old place cannot write it back.
   const moved = nodes.createSection(shared.id, ann, { content: 'was shared' });
   const priv = docs.create(ann, 'Private', '');

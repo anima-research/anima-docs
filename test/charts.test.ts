@@ -124,6 +124,21 @@ test('a chart in a document draws from a spreadsheet for every reader, if whoeve
     S.app.docs.edit(two.id, { sub: bob.sub, via: 'web' }, (t) => t.insert(0, `\`\`\`chart\ndata: ${secret.id} A1:A1\ndata: ${secret.id} A1:B2\n\`\`\`\n`));
     S.app.docs.edit(two.id, { sub: ann.sub, via: 'web' }, (t) => t.insert(t.toString().indexOf('A1:A1'), ' '));
     assert.throws(() => S.app.charts.data(two.id, ann, { doc: secret.id, range: 'A1:B2' }), /not available/);
+    // Text written out again is not text written: Ann's change takes Bob's refused block out and puts it back elsewhere
+    // (as an agent's rewrite of a page, or a drag, does). Nothing new names the range, so nothing is granted.
+    const moved = S.app.docs.create(ann, 'Moved', '');
+    S.app.docs.share(moved.id, ann, bob.sub, 'editor');
+    const bobs = `\`\`\`chart\ntype: code\ndata: ${secret.id} A1:B2\n\nreturn {};\n\`\`\`\n`;
+    S.app.docs.edit(moved.id, { sub: bob.sub, via: 'web' }, (t) => t.insert(0, `${bobs}\na paragraph\n`));
+    S.app.docs.edit(moved.id, { sub: ann.sub, via: 'web' }, (t) => { t.delete(0, bobs.length); t.insert(t.length, `\n${bobs}`); });
+    assert.match(S.app.docs.text(moved.id), /a paragraph\n\n```chart/);
+    assert.throws(() => S.app.charts.data(moved.id, ann, { doc: secret.id, range: 'A1:B2' }), /not available/);
+    // A granted block moved the same way keeps its grant: it is the same block in another place.
+    const anns = `\`\`\`chart\ndata: ${sheet.id} Sheet1!A1:B2\n\`\`\`\n`;
+    S.app.docs.edit(moved.id, { sub: ann.sub, via: 'web' }, (t) => t.insert(0, anns));
+    assert.deepEqual(S.app.charts.data(moved.id, ann, { doc: sheet.id, range: 'Sheet1!A1:B2' }).rows, [['Jan', 1200]]);
+    S.app.docs.edit(moved.id, { sub: bob.sub, via: 'web' }, (t) => { t.delete(0, anns.length); t.insert(t.length, `\n${anns}`); });
+    assert.deepEqual(S.app.charts.data(moved.id, bob, { doc: sheet.id, range: 'Sheet1!A1:B2' }).rows, [['Jan', 1200]]);
     // A grant belongs to its block. Bob copies Ann's granted block; while hers stands the range is the document's, and
     // when she takes hers out, his copy draws nothing.
     const copy = S.app.docs.create(ann, 'Copy', '');

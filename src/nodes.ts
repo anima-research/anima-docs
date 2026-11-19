@@ -97,7 +97,11 @@ export class Nodes extends EventEmitter {
     // a mount before counts only if whoever wrote it could have shown them that node anyway (see mayMount); a line
     // that does not count stays text.
     const written = (change?.ranges ?? []).filter(([from, to]) => to > from);
-    const found = scanMounts(text).filter((m) => prev.has(m.child) || this.mayMount(docId, m, by, written, !!change?.origin.label));
+    const scanned = scanMounts(text);
+    // Lines naming a node before this change and now: a change that only moves a line, or writes it out again, brings in nothing new.
+    let earlier: { child: string }[] | null = null;
+    const isNew = (child: string) => scanned.filter((m) => m.child === child).length > (earlier ??= scanMounts(this.docs.bodyBefore(docId))).filter((m) => m.child === child).length;
+    const found = scanned.filter((m) => prev.has(m.child) || this.mayMount(docId, m, by, written, !!change?.origin.label, isNew));
     for (const m of found) this.vouched.delete(`${docId}\n${m.child}`);
     const next = new Map<string, number>(); // child → count
     for (const m of found) next.set(m.child, (next.get(m.child) ?? 0) + 1);
@@ -134,14 +138,15 @@ export class Nodes extends EventEmitter {
    * Whether a mount line that has just appeared in `parent` may count.
    *
    * - This service wrote it after its own check (mount, split, merge): yes.
-   * - Someone wrote it by hand (their change put text into that very line): yes if they can open the node, or made it
+   * - Someone wrote it by hand (their change put text into that very line, and one more line names the node than
+   *   before): yes if they can open the node, or made it
    *   moments ago, or are putting back what was mounted here: a section that is mounted nowhere now, or anything
    *   they themselves took out within the last minutes (an undo, a move).
    * - The service acted for someone (a restore, an undo of a recorded change, an accepted suggestion: the change
    *   carries a label): only a section that was mounted here and is mounted nowhere now comes back. What such a
    *   change's text names besides is not that person's own writing.
    */
-  private mayMount(parent: string, m: { child: string; from: number; to: number }, by: string | null, written: [number, number][], labelled: boolean): boolean {
+  private mayMount(parent: string, m: { child: string; from: number; to: number }, by: string | null, written: [number, number][], labelled: boolean, isNew: (child: string) => boolean): boolean {
     if (this.vouched.has(`${parent}\n${m.child}`)) return true;
     const child = this.docs.get(m.child);
     if (!child || child.type === SHEET || by === null) return false;
@@ -149,7 +154,7 @@ export class Nodes extends EventEmitter {
     const wasHere = !!last && last.op === 'unmount';
     const orphanSection = wasHere && child.title === '' && !this.db.prepare('SELECT 1 FROM mounts WHERE child_id = ? LIMIT 1').get(m.child);
     if (labelled) return orphanSection;
-    if (!written.some(([from, to]) => from < m.to && to > m.from)) return false;
+    if (!written.some(([from, to]) => from < m.to && to > m.from) || !isNew(m.child)) return false;
     if (this.docs.role(m.child, { sub: by, admin: false })) return true;
     const made = this.fresh.get(m.child);
     if (made && made.sub === by && Date.now() - made.at < Nodes.SOON) return true;
