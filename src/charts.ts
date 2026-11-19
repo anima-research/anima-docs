@@ -27,32 +27,32 @@ import type { Documents, DocChange } from './documents.js';
 import type { Nodes } from './nodes.js';
 import type { Actor } from './principals.js';
 import type { Sheets } from './sheets.js';
-import { parseChart, tableOf, type Table } from './chart.js';
+import { dataLineOf, parseChart, tableOf, type Table } from './chart.js';
 import { chartSvg, messageSvg } from './chartsvg.js';
 
 type Source = { doc: string; range: string };
 /** Finds the fenced blocks of a text exactly as the renderers do (a ```chart inside a longer fence is not one). */
 const fences = new MarkdownIt();
-const SETTING = /^\s*([A-Za-z]+)\s*:/;
-/** The chart blocks of a text that name a spreadsheet, each with where its data line lies ([from, to] in the text). */
+/** The chart blocks of a text that name a spreadsheet, each with where its data line lies ([from, to) in the text). */
 function chartBlocks(markdown: string): { source: Source; from: number; to: number }[] {
   const out: { source: Source; from: number; to: number }[] = [];
   let starts: number[] | null = null;
   for (const t of fences.parse(markdown, {})) {
     if (t.type !== 'fence' || !t.map || (t.info || '').trim().split(/\s+/)[0] !== 'chart') continue;
     const source = parseChart(t.content).source;
-    if (!source?.doc) continue;
-    // The data line is among the settings at the top of the block (the first line that is not a setting ends them).
-    const lines = t.content.split('\n');
-    let k = 0;
-    while (k < lines.length && SETTING.test(lines[k]) && SETTING.exec(lines[k])![1].toLowerCase() !== 'data') k++;
-    if (!starts) { starts = [0]; for (let i = markdown.indexOf('\n'); i >= 0; i = markdown.indexOf('\n', i + 1)) starts.push(i + 1); }
+    const k = dataLineOf(t.content);
+    if (!source?.doc || k < 0) continue;
+    // Lines are counted as the parser counts them: a line ends at \n, at \r\n, or at a \r alone.
+    if (!starts) { starts = [0]; for (const m of markdown.matchAll(/\r\n?|\n/g)) starts.push(m.index + m[0].length); }
     const line = t.map[0] + 1 + k;
-    const from = starts[line] ?? markdown.length;
-    out.push({ source, from, to: (starts[line + 1] ?? markdown.length + 1) - 1 });
+    if (line >= starts.length) continue;
+    const from = starts[line];
+    const end = line + 1 < starts.length ? starts[line + 1] : markdown.length;
+    out.push({ source, from, to: from + markdown.slice(from, end).replace(/[\r\n]+$/, '').length });
   }
   return out;
 }
+
 /** How deep a document's mounted nodes count as its own (documents.ts derives access through as many levels). */
 const FAMILY_DEPTH = 12;
 /** The most a chart's data may weigh in the address of a frame on a published page. */
@@ -77,14 +77,15 @@ export class Charts {
     const granted = new Set<number>();
     for (const r of rows) {
       const at = Y.createAbsolutePositionFromRelativePosition(Y.decodeRelativePosition(r.anchor), doc)?.index;
-      const i = at === undefined ? -1 : blocks.findIndex((b) => b.source.doc === r.source_id && b.source.range === r.range && at >= b.from && at <= b.to);
+      const i = at === undefined ? -1 : blocks.findIndex((b) => b.source.doc === r.source_id && b.source.range === r.range && at >= b.from && at < Math.max(b.to, b.from + 1));
       if (i < 0) this.db.prepare('DELETE FROM chart_sources WHERE id = ?').run(r.id); else granted.add(i);
     }
     // Written by hand: not the service acting for someone (a restore, an accepted suggestion, a split or a merge carry a label).
     if (c.origin.label) return;
     const written = c.ranges.filter(([from, to]) => to > from);
     blocks.forEach((b, i) => {
-      if (granted.has(i) || !written.some(([from, to]) => from <= b.to && to >= b.from)) return;
+      // Text put into the line itself: a line added just before or after it is not this line being written.
+      if (granted.has(i) || !written.some(([from, to]) => from < b.to && to > b.from)) return;
       if (!this.docs.isSheet(b.source.doc) || !this.docs.role(b.source.doc, { sub: c.origin.sub, admin: false })) return;
       const sheet = this.sheetOf(b.source);
       if (!sheet) return;

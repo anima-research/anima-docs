@@ -40,15 +40,33 @@ export type Theme = 'light' | 'dark';
 const yes = (v: string) => /^(yes|true|on|1)$/i.test(v.trim());
 const HEADER = /^([A-Za-z]+)\s*:\s*(.*)$/;
 
+const SETTINGS = new Set(['type', 'title', 'data', 'x', 'y', 'stacked', 'horizontal', 'height']);
+/** The settings at the top of a block, each with the line it is on, and the line where they end. */
+function settingsOf(lines: string[]): { settings: { key: string; value: string; line: number }[]; end: number } {
+  const settings: { key: string; value: string; line: number }[] = [];
+  let i = 0;
+  for (; i < lines.length; i++) {
+    const m = HEADER.exec(lines[i]);
+    if (!m || !SETTINGS.has(m[1].toLowerCase())) break; // not a setting: the body starts here
+    settings.push({ key: m[1].toLowerCase(), value: m[2].trim(), line: i });
+  }
+  return { settings, end: i };
+}
+
+/** The line of a chart block (counted from its first) that names its data, as parseChart reads it; -1 if none. */
+export function dataLineOf(text: string): number {
+  let line = -1;
+  for (const s of settingsOf(text.replace(/\r\n?/g, '\n').split('\n')).settings) if (s.key === 'data' && s.value) line = s.line;
+  return line;
+}
+
 /** Read a chart block. Lines of "key: value" first; then, after an empty line, the rows (or for type code, the JavaScript). */
 export function parseChart(text: string): ChartSpec {
   const spec: ChartSpec = { type: 'bar', title: '', source: null, x: '', y: [], stacked: false, horizontal: false, height: 320, rows: [], code: '' };
   const lines = text.replace(/\r\n?/g, '\n').split('\n');
-  let i = 0;
-  for (; i < lines.length; i++) {
-    const m = HEADER.exec(lines[i]);
-    if (!m) break;
-    const key = m[1].toLowerCase(), value = m[2].trim();
+  const { settings, end } = settingsOf(lines);
+  let i = end;
+  for (const { key, value } of settings) {
     if (key === 'type') { if ((CHART_TYPES as readonly string[]).includes(value.toLowerCase())) spec.type = value.toLowerCase() as ChartType; }
     else if (key === 'title') spec.title = value.slice(0, 200);
     else if (key === 'data') {
@@ -60,7 +78,6 @@ export function parseChart(text: string): ChartSpec {
     else if (key === 'stacked') spec.stacked = yes(value);
     else if (key === 'horizontal') spec.horizontal = yes(value);
     else if (key === 'height') { const n = Number(value); if (n >= 120 && n <= 1200) spec.height = Math.round(n); }
-    else break; // not a setting: the body starts here
   }
   while (i < lines.length && lines[i].trim() === '') i++;
   const body = lines.slice(i).join('\n');

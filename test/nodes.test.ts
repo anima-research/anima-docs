@@ -402,6 +402,35 @@ test('a mount line counts only if whoever wrote it could open the node: knowing 
   cutOther(ann);
   type(shared.id, bob, `${marker(other.id)}\n`, 0);
   assert.equal(docs.role(other.id, bob), null, 'taken out by Ann: Bob cannot put it back on his own');
+  // Text put next to someone's line is not that line being written: Ann presses Enter after Eve's line and types above it.
+  const vault = docs.create(ann, 'Vault', 'gold');
+  const bait = docs.create(eve, 'Bait', `intro\n${marker(vault.id)}`);
+  docs.share(bait.id, eve, ann.sub, 'editor');
+  type(bait.id, ann, '\n');
+  type(bait.id, ann, 'a line of Ann\'s\n', 6);
+  assert.deepEqual(nodes.childrenOf(bait.id), []);
+  assert.equal(docs.role(vault.id, eve), null);
+  // The service acting for Ann (an accepted suggestion, a restore: a labelled change) writes Eve's line: not Ann's own writing.
+  const sugg = docs.create(eve, 'Suggested', 'text\n');
+  docs.share(sugg.id, eve, ann.sub, 'editor');
+  docs.edit(sugg.id, { sub: ann.sub, via: 'web', label: 'Accepted a suggestion' }, (t) => t.insert(t.length, `${marker(vault.id)}\n`));
+  assert.deepEqual(nodes.childrenOf(sugg.id), []);
+  assert.equal(docs.role(vault.id, eve), null);
+  // A section taken out and mounted elsewhere has left: an editor of the old place cannot write it back.
+  const moved = nodes.createSection(shared.id, ann, { content: 'was shared' });
+  const priv = docs.create(ann, 'Private', '');
+  docs.edit(shared.id, { sub: ann.sub, via: 'web' }, (t) => { const x = t.toString(), i = x.indexOf(marker(moved.id)); t.delete(i, marker(moved.id).length + 1); });
+  nodes.mount(priv.id, moved.id, ann);
+  type(shared.id, bob, `${marker(moved.id)}\n`);
+  assert.equal(docs.role(moved.id, bob), null);
+  // While it is mounted nowhere, a restore of the document it was part of brings it back.
+  const kept = nodes.createSection(shared.id, ann, { content: 'part of shared' });
+  docs.edit(shared.id, { sub: ann.sub, via: 'web' }, (t) => { const x = t.toString(), i = x.indexOf(marker(kept.id)); t.delete(i, marker(kept.id).length + 1); });
+  docs.edit(shared.id, { sub: bob.sub, via: 'web', label: 'Restored' }, (t) => t.insert(t.length, `${marker(kept.id)}\n`));
+  assert.ok(nodes.childrenOf(shared.id).some((c) => c.child === kept.id));
+  // A split of a long text carries its mounts however far down they are.
+  const big = docs.create(ann, 'Big', `top\n${'filler line\n'.repeat(600)}${marker(secret.id)}\nend\n`);
+  assert.deepEqual(nodes.childrenOf(nodes.split(big.id, ann, 4).id).map((c) => c.child), [secret.id]);
   // Split and merge carry the mounts in the text they move.
   const long = docs.create(ann, 'Long', `one\n${marker(secret.id)}\ntwo\n`);
   docs.share(long.id, ann, bob.sub, 'editor');

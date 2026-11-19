@@ -56,7 +56,10 @@ export class Nodes extends EventEmitter {
     this.setMaxListeners(100);
     docs.setParents((id) => this.parentsOf(id));
     docs.on('loaded', (e: { docId: string }) => this.reindex(e.docId));
-    docs.on('change', (c: DocChange) => { if (c.inserted.includes('{{') || c.inserted.includes('}') || c.removed > 0 || this.has(c.docId)) this.reindex(c.docId, c.origin.sub, c); });
+    docs.on('change', (c: DocChange) => {
+      // (A change reports at most its first 4,000 inserted characters: a longer one may hold anything.)
+      if (c.inserted.includes('{{') || c.inserted.includes('}') || c.inserted.length >= 4000 || c.removed > 0 || this.has(c.docId)) this.reindex(c.docId, c.origin.sub, c);
+    });
     docs.on('meta', (e: { docId: string; kind: string }) => { if (e.kind === 'deleted') this.forget(e.docId); });
     this.backfill();
   }
@@ -94,7 +97,7 @@ export class Nodes extends EventEmitter {
     // a mount before counts only if whoever wrote it could have shown them that node anyway (see mayMount); a line
     // that does not count stays text.
     const written = (change?.ranges ?? []).filter(([from, to]) => to > from);
-    const found = scanMounts(text).filter((m) => prev.has(m.child) || this.mayMount(docId, m, by, written));
+    const found = scanMounts(text).filter((m) => prev.has(m.child) || this.mayMount(docId, m, by, written, !!change?.origin.label));
     for (const m of found) this.vouched.delete(`${docId}\n${m.child}`);
     const next = new Map<string, number>(); // child → count
     for (const m of found) next.set(m.child, (next.get(m.child) ?? 0) + 1);
@@ -128,21 +131,29 @@ export class Nodes extends EventEmitter {
   private static readonly SOON = 10 * 60_000;
 
   /**
-   * Whether a mount line that has just appeared in `parent` may count. It may if this service wrote it after its
-   * own check (mount, split, merge); or if the change that wrote it (its text put in by hand, by `by`) comes from
-   * someone who can open the node, who made it moments ago, or who is putting back a mount that was here: a
-   * section of this document at any time, another document only by the person who took it out, just now.
+   * Whether a mount line that has just appeared in `parent` may count.
+   *
+   * - This service wrote it after its own check (mount, split, merge): yes.
+   * - Someone wrote it by hand (their change put text into that very line): yes if they can open the node, or made it
+   *   moments ago, or are putting back what was mounted here: a section that is mounted nowhere now, or anything
+   *   they themselves took out within the last minutes (an undo, a move).
+   * - The service acted for someone (a restore, an undo of a recorded change, an accepted suggestion: the change
+   *   carries a label): only a section that was mounted here and is mounted nowhere now comes back. What such a
+   *   change's text names besides is not that person's own writing.
    */
-  private mayMount(parent: string, m: { child: string; from: number; to: number }, by: string | null, written: [number, number][]): boolean {
+  private mayMount(parent: string, m: { child: string; from: number; to: number }, by: string | null, written: [number, number][], labelled: boolean): boolean {
     if (this.vouched.has(`${parent}\n${m.child}`)) return true;
     const child = this.docs.get(m.child);
     if (!child || child.type === SHEET || by === null) return false;
-    if (!written.some(([from, to]) => from <= m.to && to >= m.from)) return false;
+    const last = this.db.prepare('SELECT op, sub, at FROM mount_log WHERE parent_id = ? AND child_id = ? ORDER BY seq DESC LIMIT 1').get(parent, m.child) as { op: string; sub: string | null; at: number } | undefined;
+    const wasHere = !!last && last.op === 'unmount';
+    const orphanSection = wasHere && child.title === '' && !this.db.prepare('SELECT 1 FROM mounts WHERE child_id = ? LIMIT 1').get(m.child);
+    if (labelled) return orphanSection;
+    if (!written.some(([from, to]) => from < m.to && to > m.from)) return false;
     if (this.docs.role(m.child, { sub: by, admin: false })) return true;
     const made = this.fresh.get(m.child);
     if (made && made.sub === by && Date.now() - made.at < Nodes.SOON) return true;
-    const last = this.db.prepare('SELECT op, sub, at FROM mount_log WHERE parent_id = ? AND child_id = ? ORDER BY seq DESC LIMIT 1').get(parent, m.child) as { op: string; sub: string | null; at: number } | undefined;
-    return !!last && last.op === 'unmount' && (child.title === '' || (last.sub === by && Date.now() - last.at < Nodes.SOON));
+    return orphanSection || (wasHere && last!.sub === by && Date.now() - last!.at < Nodes.SOON);
   }
 
   private forget(docId: string) {
@@ -271,6 +282,10 @@ export class Nodes extends EventEmitter {
     if (this.docs.isSheet(child) || this.docs.isSheet(parent)) throw new Fault(400, NO_SHEET_SECTIONS);
     if (this.wouldCycle(parent, child)) throw new Fault(409, 'That would mount a node inside itself.');
     this.vouched.add(`${parent}\n${child}`);
+    try { this.writeMount(parent, child, actor, opts); } finally { this.vouched.delete(`${parent}\n${child}`); }
+  }
+
+  private writeMount(parent: string, child: string, actor: Actor, opts: { at?: number; role?: MountRole }): void {
     this.docs.edit(parent, { sub: actor.sub, via: actor.via ?? 'mcpl', label: 'Mounted a section' }, (t) => {
       const text = t.toString();
       if (opts.at !== undefined) {
@@ -323,6 +338,9 @@ export class Nodes extends EventEmitter {
     // The mounts in the text that moves were this document's: they are the new section's now.
     const moving = scanMounts(rest).map((m) => m.child).filter((c) => this.childrenOf(parent).some((x) => x.child === c));
     const child = this.docs.createNode(actor, { title: opts.title ?? '', content: rest, type: doc.type, owner: doc.ownerSub, label: 'Split off from a document', vouch: (id) => { for (const c of moving) this.vouched.add(`${id}\n${c}`); } });
+    // The moved text may be longer than a change reports of itself: index the new section now, while its mounts are vouched for.
+    this.reindex(child.id, actor.sub);
+    for (const c of moving) this.vouched.delete(`${child.id}\n${c}`);
     this.vouched.add(`${parent}\n${child.id}`);
     const plan = this.comments?.planMove(parent) ?? [];
     const sep = head.length === 0 || head.endsWith('\n') ? '' : '\n';
@@ -361,6 +379,7 @@ export class Nodes extends EventEmitter {
     });
     if (!copied) this.comments?.applyMove(plan, (node, off) => (node === child ? { node: parent, offset: m.from + off } : null));
     this.reindex(parent, actor.sub);
+    for (const c of this.childrenOf(child)) this.vouched.delete(`${parent}\n${c.child}`);
     return { copied };
   }
 

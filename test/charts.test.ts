@@ -108,6 +108,22 @@ test('a chart in a document draws from a spreadsheet for every reader, if whoeve
     const part = S.app.nodes.split(trap.id, ann, 2);
     assert.match(S.app.docs.text(part.id), /data: /);
     assert.throws(() => S.app.charts.data(trap.id, ann, { doc: secret.id, range: 'A1:B2' }), /not available/);
+    // The line that counts is the block's own data line, however the text above it ends its lines, and whichever of
+    // two data lines the block is read by; text put beside the line is not the line being written.
+    const odd = S.app.docs.create(ann, 'Odd', '');
+    S.app.docs.share(odd.id, ann, bob.sub, 'editor');
+    const end = (who: { sub: string }, text: string) => S.app.docs.edit(odd.id, { sub: who.sub, via: 'web' }, (t) => t.insert(t.length, text));
+    end(bob, `a\rb\rc\rd\re\r\n\`\`\`chart\ntype: code\ndata: ${secret.id} A1:B2\n\nreturn {};\n\`\`\`\n\nlater\n\nmore\n\nstill more\n`);
+    for (const word of ['later', 'more', 'still more']) S.app.docs.edit(odd.id, { sub: ann.sub, via: 'web' }, (t) => t.insert(t.toString().indexOf(word), 'x'));
+    end(ann, `\n\`\`\`chart\ndata: ${sheet.id} Sheet1!A1:B2\n\`\`\`\n`);
+    assert.throws(() => S.app.charts.data(odd.id, ann, { doc: secret.id, range: 'A1:B2' }), /not available/);
+    S.app.docs.edit(odd.id, { sub: ann.sub, via: 'web' }, (t) => t.insert(t.toString().indexOf(`data: ${secret.id}`), 'title: Pay\n'));
+    assert.throws(() => S.app.charts.data(odd.id, ann, { doc: secret.id, range: 'A1:B2' }), /not available/);
+    const two = S.app.docs.create(ann, 'Two', '');
+    S.app.docs.share(two.id, ann, bob.sub, 'editor');
+    S.app.docs.edit(two.id, { sub: bob.sub, via: 'web' }, (t) => t.insert(0, `\`\`\`chart\ndata: ${secret.id} A1:A1\ndata: ${secret.id} A1:B2\n\`\`\`\n`));
+    S.app.docs.edit(two.id, { sub: ann.sub, via: 'web' }, (t) => t.insert(t.toString().indexOf('A1:A1'), ' '));
+    assert.throws(() => S.app.charts.data(two.id, ann, { doc: secret.id, range: 'A1:B2' }), /not available/);
     // A grant belongs to its block. Bob copies Ann's granted block; while hers stands the range is the document's, and
     // when she takes hers out, his copy draws nothing.
     const copy = S.app.docs.create(ann, 'Copy', '');
