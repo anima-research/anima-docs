@@ -358,7 +358,7 @@ export async function mountSign(o: SignOptions): Promise<SignView> {
   function drawStamp(kind: StampKind): Promise<Uint8Array | null> {
     return new Promise((resolve) => {
       const W = 1120, H = kind === 'signature' ? 360 : 300;
-      const pad = h('canvas.sign-pad', { width: W, height: H, 'aria-label': `Draw your ${WORD[kind].noun}` });
+      const pad = h('canvas.sign-pad', { width: W, height: H, style: `--pad-ratio: ${W / H}`, 'aria-label': `Draw your ${WORD[kind].noun}` });
       const ctx = pad.getContext('2d')!;
       ctx.lineWidth = 5; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.strokeStyle = '#111827';
       let inked = false, last: { x: number; y: number } | null = null;
