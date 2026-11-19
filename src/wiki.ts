@@ -106,8 +106,9 @@ export class Wiki {
     const inline = (node: string, path: Set<string>, depth: number, collect: boolean): string => {
       nodes.add(node);
       let text: string;
-      try { text = this.app.docs.text(node); } catch { return ''; }
-      if (depth >= MAX_DEPTH) return text;
+      // A spreadsheet on a published page is its values, as tables.
+      try { text = this.app.docs.isSheet(node) ? this.app.sheets.markdown(node) : this.app.docs.text(node); } catch { return ''; }
+      if (depth >= MAX_DEPTH || this.app.docs.isSheet(node)) return text;
       const found = scanMounts(text);
       if (!found.length) return text;
       let out = '', at = 0;

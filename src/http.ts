@@ -102,6 +102,7 @@ async function json(req: IncomingMessage): Promise<any> {
 
 const STATIC: Record<string, [string, string]> = {
   '/app.js': ['app.js', 'text/javascript; charset=utf-8'],
+  '/sheet.js': ['sheet.js', 'text/javascript; charset=utf-8'],
   '/app.css': ['app.css', 'text/css; charset=utf-8'],
   '/style.css': ['style.css', 'text/css; charset=utf-8'],
   '/favicon.svg': ['favicon.svg', 'image/svg+xml'],
@@ -1023,6 +1024,14 @@ export function createHttp(app: App) {
             if (hr[2] === 'restore') app.history.restore(id, { ...a, via: 'http' }, Number(hr[1]), b.at === 'before' ? 'before' : 'after');
             else app.history.undo(id, { ...a, via: 'http' }, Number(hr[1]));
             send(200, { ok: true, rev: app.docs.get(id)!.rev });
+            return;
+          }
+          if (rest === '/export.xlsx' && method === 'GET') {
+            const { doc } = app.docs.require(id, a, 'viewer');
+            if (!app.docs.isSheet(id)) throw new Fault(400, 'Only a spreadsheet downloads as Excel.');
+            const bytes = await app.sheets.xlsx(id);
+            res.writeHead(200, { 'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'Content-Length': bytes.length, 'Content-Disposition': attachment(`${(doc.title || doc.id).replace(/[\\/:*?"<>|]/g, ' ').trim() || 'spreadsheet'}.xlsx`), 'Cache-Control': 'no-store' });
+            res.end(bytes);
             return;
           }
           if (rest === '/export.md' && method === 'GET') {

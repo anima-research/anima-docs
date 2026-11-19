@@ -166,7 +166,10 @@ export class Realtime {
         if (!m || typeof m !== 'object' || Array.isArray(m)) throw new Fault(400, 'Bad message.');
         this.onJson(room, conn, m as Record<string, unknown>).catch((e) => console.error('[realtime] message failed:', e));
       } catch (e) {
-        this.sendTo(conn, { type: 'error', message: e instanceof Fault ? e.message : 'Bad message.' });
+        // A refused change to a spreadsheet leaves the browser showing cells the server does not have, and everything it
+        // sends next builds on them: it starts again from what is saved. (A refused text edit stays on screen to be put right.)
+        const resync = isBinary && e instanceof Fault && this.app.docs.isSheet(room.docId);
+        this.sendTo(conn, { type: 'error', message: e instanceof Fault ? e.message : 'Bad message.', ...(resync ? { resync: true } : {}) });
         if (!(e instanceof Fault)) console.error('[realtime]', e);
       }
     });

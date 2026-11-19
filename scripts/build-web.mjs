@@ -27,6 +27,8 @@ const options = {
     { in: 'web/styles.css', out: 'app' },
     // Filling and signing PDFs (pdf.js and pdf-lib): a bundle of its own, fetched the first time it is needed.
     { in: 'web/pdfsign.ts', out: 'pdfsign' },
+    // The spreadsheet grid and its formula engine: a bundle of its own, fetched the first time a spreadsheet is opened.
+    { in: 'web/sheetgrid.ts', out: 'sheet' },
   ],
   external: ['/pdfsign.js'],
   outdir: 'public',
@@ -36,7 +38,8 @@ const options = {
   target: ['es2021', 'chrome100', 'firefox100', 'safari15'],
   minify: !watch,
   sourcemap: true,
-  legalComments: 'none',
+  // Licence notices of what is bundled stay in the files (the spreadsheet bundle carries HyperFormula, GPL-3.0).
+  legalComments: 'eof',
   logLevel: 'info',
   define: { 'process.env.NODE_ENV': JSON.stringify(watch ? 'development' : 'production') },
 };

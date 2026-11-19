@@ -18,6 +18,7 @@ import type { DB } from './db.js';
 import { Fault } from './auth.js';
 import { isGuest, type Actor, type Principal, type Principals } from './principals.js';
 import { atLeast, Documents, MAX_DOC_CHARS, type ChangeOrigin, type DeleteSet } from './documents.js';
+import { SHEET } from './sheet.js';
 import { lineStarts, lineOf, occurrences } from './markdown.js';
 import { FIELD_WORD, type FileField } from './fields.js';
 
@@ -171,6 +172,7 @@ export class Comments extends EventEmitter {
 
   /** Relative positions for [start, end) in the live text. */
   anchorFromRange(docId: string, start: number, end: number): Anchor {
+    if (this.docs.isSheet(docId)) throw new Fault(400, 'A comment on a spreadsheet is on the whole document: leave out the quote and name the cells in your text.');
     const ytext = this.docs.ydoc(docId).getText('body');
     const len = ytext.length;
     if (!(start >= 0 && end > start && end <= len)) throw new Fault(400, `Anchor range ${start}–${end} is outside the document (length ${len}).`);
@@ -186,6 +188,7 @@ export class Comments extends EventEmitter {
    * (1-based) picks one, or `nearLine` picks the closest.
    */
   anchorFromQuote(docId: string, quote: string, opts: { occurrence?: number; nearLine?: number } = {}) {
+    if (this.docs.isSheet(docId)) throw new Fault(400, 'A comment on a spreadsheet is on the whole document: leave out the quote and name the cells in your text.');
     const text = this.docs.text(docId);
     const hits = occurrences(text, quote);
     if (!quote) throw new Fault(400, 'quote must be non-empty.');
@@ -273,6 +276,7 @@ export class Comments extends EventEmitter {
     field?: FileField | null;
   }, internal: { throttled?: boolean } = {}): { comment: Comment; warnings: string[] } {
     const { doc } = this.docs.require(docId, actor, 'commenter');
+    if (doc.type === SHEET && (p.anchor || p.suggestion)) throw new Fault(400, 'A comment on a spreadsheet is on the whole document: leave out the quote and name the cells in your text.');
     const sugg = p.suggestion ? this.checkSuggestion(docId, actor, p.anchor ?? null, p.suggestion.text) : null;
     const body = sugg ? this.cleanNote(p.body) : p.field ? this.cleanNote(p.body) || `${FIELD_WORD[p.field.kind]} needed.` : this.cleanBody(p.body);
     if (!internal.throttled) this.throttle(actor);

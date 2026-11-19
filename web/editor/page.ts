@@ -19,6 +19,7 @@ import { findQuote, indexSource, indexedText } from '../../src/quote';
 import { openFilesDialog } from './files';
 import { docHighlight } from './codestyle';
 import { collectionView, type CollectionView } from './collection';
+import type { SheetView } from '../sheetgrid';
 import { followLinks } from './followlinks';
 import { annotationLayer, type AnnotationLayer } from './annotate';
 import { searchPeople } from '../lib/people';
@@ -360,7 +361,13 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   // A file collection shows its files instead of an editor (see collection.ts).
   const filesPane = h('div.files-pane', { hidden: true });
   let collection: CollectionView | null = null;
-  const body = h('div.doc-body', null, editPane, previewPane, filesPane, overlay);
+  // A spreadsheet shows its grid (see sheetgrid.ts): a bundle of its own, with the formula engine, fetched when first needed.
+  const sheetPane = h('div.sheet-pane', { hidden: true });
+  let sheet: SheetView | null = null;
+  let sheetAsked = false;
+  let sheetClosed = false;
+  let sheetTries = 0;
+  const body = h('div.doc-body', null, editPane, previewPane, filesPane, sheetPane, overlay);
   const app = h('div.doc-app', null, h('div.doc-chrome', null, header, h('div.doc-toolbar-wrap', null, toolbar)), body);
   pageEl.append(syncVeil);
   root.replaceChildren(app);
@@ -678,6 +685,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     else if (role === 'commenter' && !session && provider.synced) void setSuggesting(true);
     refreshWriteUi();
     collection?.setCanEdit(canEdit());
+    sheet?.setCanEdit(canEdit());
     titleInput.readOnly = !canEdit();
     titleInput.title = canEdit() ? 'Rename' : '';
     rolePill.textContent = canEdit() ? (role === 'owner' ? 'Owner' : 'Editing') : role === 'commenter' ? 'Commenting' : 'Viewing';
@@ -1180,12 +1188,37 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   // The live node info once the socket said hello; the fetched detail before that.
   const isHtml = () => (nodes.info.get(docId)?.type ?? detail.type ?? 'markdown') === 'html';
   const isFiles = () => (nodes.info.get(docId)?.type ?? detail.type ?? 'markdown') === 'files';
+  const isSheet = () => (nodes.info.get(docId)?.type ?? detail.type ?? 'markdown') === 'sheet';
+  /** A page that is not a text: no editor, no preview, no text tools. */
+  const isOther = () => isFiles() || isSheet();
+  function openSheet() {
+    if (sheetAsked) return;
+    sheetAsked = true;
+    sheetPane.replaceChildren(h('div.coll-loading', null, spinner(22)));
+    // A second try asks under another address: a failed module load is remembered for the address it failed at.
+    const url = `/sheet.js${sheetTries++ ? `?try=${sheetTries}` : ''}`;
+    const start = (m: typeof import('../sheetgrid')) => {
+      if (sheetClosed) return;
+      sheet = m.sheetView({
+        doc: provider.doc, awareness: provider.awareness, canEdit: canEdit(), exportUrl: api.xlsxUrl(docId),
+        makeUndo: (maps, origin) => new Y.UndoManager(maps, { trackedOrigins: new Set([origin]), captureTimeout: 400 }),
+        toast: (message, opts) => toast(message, opts), openMenu, promptDialog, confirmDialog,
+      });
+      sheetPane.replaceChildren(sheet.el);
+    };
+    // The grid needs the cells: it starts once the document has arrived.
+    const whenSynced = (m: typeof import('../sheetgrid')) => { if (provider.synced) start(m); else { const off = provider.on('synced', () => { off(); start(m); }); } };
+    (import(url) as Promise<typeof import('../sheetgrid')>).then(whenSynced, (e) => { sheetAsked = false; sheetPane.replaceChildren(emptyState({ title: 'The spreadsheet could not be loaded', text: errorMessage(e), action: h('button.btn', { type: 'button', onclick: () => openSheet() }, 'Try again') })); });
+  }
   /** Apply the document's type: language, inline previews, toolbar and preview surface. */
   function applyDocType() {
     typeApplied = true;
     const html = isHtml();
     const files = isFiles();
     app.classList.toggle('files-doc', files);
+    app.classList.toggle('sheet-doc', isSheet());
+    sheetPane.hidden = !isSheet();
+    if (isSheet()) openSheet();
     filesPane.hidden = !files;
     if (files && !collection) { collection = collectionView({ docId, canEdit: canEdit(), guest, me: me.sub, threads: () => latestThreads, request: (msg) => provider.request(msg) }); filesPane.replaceChildren(collection.el); }
     else if (!files && collection) { collection.destroy(); collection = null; filesPane.replaceChildren(); }
@@ -1282,7 +1315,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
 
   function computeLayout() {
     const wide = body.clientWidth >= 1180 - (panel.kind ? 0 : 0);
-    const margin = mode === 'edit' && wide && !listOpen && !panel.kind && !isFiles();
+    const margin = mode === 'edit' && wide && !listOpen && !panel.kind && !isOther();
     rail.setLayout(margin ? 'margin' : 'drawer');
     if (margin) { if (rail.el.parentElement !== canvas) canvas.append(rail.el); }
     else if (rail.el.parentElement !== body) body.append(rail.el);
@@ -1312,6 +1345,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   applyDocType();
   cleanups.push(nodes.onMeta((id) => { if (id === docId && (app.classList.contains('html-doc') !== isHtml() || app.classList.contains('files-doc') !== isFiles())) applyDocType(); }));
   cleanups.push(() => collection?.destroy());
+  cleanups.push(() => { sheetClosed = true; sheet?.destroy(); });
   (window as unknown as { __anima?: unknown }).__anima = { view, binding, nodes, nav: () => nav, docId, rail };
   cleanups.push(() => { delete (window as unknown as { __anima?: unknown }).__anima; });
 
@@ -1337,13 +1371,13 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     if (atLeast(role, 'commenter')) items.push({ label: 'Comment on whole document', icon: 'comment', onSelect: () => void rail.commentOnDocument() });
     if (atLeast(role, 'commenter') && !guest) items.push({ label: 'Ping an agent…', icon: 'bell', onSelect: () => pingAgent() });
     items.push('separator',
-      ...(isFiles() ? [] : [{ label: 'Download as Markdown (.md)', icon: 'download', onSelect: () => { const a = h('a', { href: api.exportUrl(docId), download: '' }); document.body.append(a); a.click(); a.remove(); } }]),
+      ...(isFiles() ? [] : [{ label: isSheet() ? 'Download as Excel (.xlsx)' : 'Download as Markdown (.md)', icon: 'download', onSelect: () => { const a = h('a', { href: isSheet() ? api.xlsxUrl(docId) : api.exportUrl(docId), download: '' }); document.body.append(a); a.click(); a.remove(); } }]),
       // A guest's /d/ address opens only for them: they copy the link they came through, or nothing.
       ...(guest && !shareUrl ? [] : [{ label: shareForAnyone ? 'Copy link (works for anyone)' : 'Copy link', icon: 'link', onSelect: () => { const url = shareUrl ?? `${location.origin}/d/${docId}`; void navigator.clipboard.writeText(url).then(() => toast('Link copied', { kind: 'success', timeout: 2000 }), () => toast(url)); } }]));
-    if (!guest && !isFiles()) items.push({ label: 'Attached files…', icon: 'file', onSelect: () => openFilesDialog(docId, canEdit(), isHtml()) });
+    if (!guest && !isOther()) items.push({ label: 'Attached files…', icon: 'file', onSelect: () => openFilesDialog(docId, canEdit(), isHtml()) });
     if (isHtml() && !guest) items.push({ label: shareForAnyone ? 'Copy page link (works for anyone)' : 'Copy page link', icon: 'link', onSelect: () => { const url = shareUrl ?? `${location.origin}/p/${docId}`; void navigator.clipboard.writeText(url).then(() => toast('Page link copied', { kind: 'success', timeout: 2000 }), () => toast(url)); } });
     if (canEdit() && !guest && !detail.section) items.push({ label: 'Add to a space…', icon: 'columns', onSelect: () => void addToSpace() });
-    if (canEdit() && !isFiles()) items.push({ label: `Document type: ${labelOf(docId)?.type ?? 'markdown'}…`, icon: 'file', onSelect: () => typeMenu(docId, moreBtn) });
+    if (canEdit() && !isOther()) items.push({ label: `Document type: ${labelOf(docId)?.type ?? 'markdown'}…`, icon: 'file', onSelect: () => typeMenu(docId, moreBtn) });
     if (nav.tree === docId && atLeast(role, 'owner')) items.push({ label: 'Stop being a space', icon: 'x', onSelect: () => void nav.dropTree() });
     if (atLeast(role, 'owner')) items.push('separator', { label: 'Delete document', icon: 'trash', danger: true, onSelect: () => void deleteDoc() });
     return items;

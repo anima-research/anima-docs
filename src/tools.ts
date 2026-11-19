@@ -10,6 +10,8 @@ import { atLeast, type Role } from './documents.js';
 import { Media, fetchImage } from './media.js';
 import { COLLECTION, COMPANION, isTextMime, jsonPointer } from './files.js';
 import { boxField, describeField, placeField, type FieldKind } from './fields.js';
+import { SHEET } from './sheet.js';
+import type { SheetEdit } from './sheets.js';
 import { textChanges } from './diff.js';
 import { findSections, lineOf, lineStarts, outline, withLineNumbers, images } from './markdown.js';
 import { BASE_SETTINGS, WATCH_PRESET, type WatchSettings } from './attention.js';
@@ -55,6 +57,7 @@ function describeKind(app: App, d: { id: string; title: string; type: string }):
     const n = app.files.count(d.id);
     return ` It is a file collection: its content is its files (${n.files} of them, ${size(n.bytes)}), in folders. list_files shows a folder, read_file reads a file, attach_file adds or replaces one, move_file renames or moves, remove_file deletes. People browse it at ${app.config.origin}/d/${d.id}.`;
   }
+  if (d.type === SHEET) return ` It is a spreadsheet: read_document shows its cells (values; "range" for a part, "formulas": true for what was typed), edit_sheet changes them. People work in it at ${app.config.origin}/d/${d.id}; it downloads as Excel at ${app.config.origin}/api/docs/${d.id}/export.xlsx.`;
   if (d.type === 'latex') return ' It is a LaTeX node (each paragraph renders as a display formula).';
   if (d.type === 'text') return ' It is a plain-text node (rendered verbatim).';
   return '';
@@ -360,19 +363,21 @@ export const TOOLS: ToolDef[] = [
       return text(list.map((d) => {
         const sug = app.comments.openSuggestionCount(d.id);
         const open = app.comments.openCount(d.id) - sug;
-        return `${d.id}  “${d.title}”${d.type !== 'markdown' ? ` [${d.type === 'html' ? 'HTML page' : d.type === COLLECTION ? 'file collection' : d.type}]` : ''} — you: ${d.role}; owner ${app.principals.label(d.ownerSub)}; updated ${ago(d.updatedAt)}; rev ${d.rev}${open ? `; ${open} open comment${open === 1 ? '' : 's'}` : ''}${sug ? `; ${sug} open suggestion${sug === 1 ? '' : 's'}` : ''}`;
+        return `${d.id}  “${d.title}”${d.type !== 'markdown' ? ` [${d.type === 'html' ? 'HTML page' : d.type === COLLECTION ? 'file collection' : d.type === SHEET ? 'spreadsheet' : d.type}]` : ''} — you: ${d.role}; owner ${app.principals.label(d.ownerSub)}; updated ${ago(d.updatedAt)}; rev ${d.rev}${open ? `; ${open} open comment${open === 1 ? '' : 's'}` : ''}${sug ? `; ${sug} open suggestion${sug === 1 ? '' : 's'}` : ''}`;
       }).join('\n'));
     },
   },
   {
     name: 'read_document', featureSet: 'docs.read', toolClass: 'notes',
-    description: 'Read a document\'s markdown. A full read also resets what "changed since you last looked" is measured from. Use section or from_line/to_line for part of a long document.',
+    description: 'Read a document\'s markdown. A full read also resets what "changed since you last looked" is measured from. Use section or from_line/to_line for part of a long document. A spreadsheet reads as its cells, sheet by sheet, a row per line (range for one sheet or part of one).',
     inputSchema: { type: 'object', required: ['document'], properties: {
       ...docArg,
       section: S('Read only this section: heading text, "## Heading", or "Parent > Child".'),
       from_line: { type: 'integer', minimum: 1 }, to_line: { type: 'integer', minimum: 1 },
       line_numbers: { type: 'boolean', description: 'Prefix lines with numbers (default false; quote text without them when editing).' },
       raw: { type: 'boolean', description: 'For an html page: the HTML source itself instead of its markdown companion (index.md).' },
+      range: S('For a spreadsheet: a sheet name, or cells such as "B2:D40", "B:D" or "Ledger!A1:F90" (default: every sheet, as far as it is filled).'),
+      formulas: { type: 'boolean', description: 'For a spreadsheet: show what was typed into each cell (formulas as written) instead of its value.' },
       comments: { type: 'boolean', description: 'Append open comment threads (default true).' },
       suggestions: S('Open suggestions: "list" (default: listed after the document, in full), "inline" (shown in place as CriticMarkup {~~old~>new~~} {++added++} {--deleted--} {>>id<<}; for reading only, quote the plain text when editing), or "none".', { enum: ['list', 'inline', 'none'] }),
       sections: S('Documents can mount other nodes (sections, or other documents) with a line {{node:<id>}}. "inline" (default) shows mounted content in place between "[section <id> begins]" and "[section <id> ends]" lines (not part of any text); "markers" shows this node\'s own text with the marker lines as they are. To edit a section, use edit_document with its id.', { enum: ['inline', 'markers'] }),
@@ -385,6 +390,15 @@ export const TOOLS: ToolDef[] = [
         app.attention.markRead(actor.sub, id, {});
         const n = app.files.count(id);
         return text(`“${doc.title}” (${id}) is a file collection: ${n.files} file${n.files === 1 ? '' : 's'}, ${size(n.bytes)}; you are ${role}; owner ${app.principals.label(doc.ownerSub)}; updated ${ago(doc.updatedAt)}.\nlist_files with folder shows a folder; read_file reads a file; files are also at ${app.config.origin}/p/${id}/<path>.\n\n${n.files ? folderListing(app, id, '') : 'It is empty. attach_file adds a file.'}`);
+      }
+      if (doc.type === SHEET) {
+        const r = app.sheets.read(id, { range: typeof a.range === 'string' && a.range.trim() ? a.range : undefined, formulas: a.formulas === true });
+        const out = [`# “${doc.title}” (${doc.id}, spreadsheet) — rev ${doc.rev}; you are ${role}; owner ${app.principals.label(doc.ownerSub)}; updated ${ago(doc.updatedAt)}`, r.text];
+        const threads = a.comments !== false && atLeast(role, 'commenter') ? app.comments.threads(id) : [];
+        if (threads.length) out.push(`\nOpen comments (${threads.length}):\n${threads.map((t) => threadText(app, t)).join('\n\n')}`);
+        if (!r.partial) app.attention.markRead(actor.sub, id, { comments: a.comments !== false && atLeast(role, 'commenter') });
+        if (!r.partial && !app.attention.isWatching(actor.sub, id) && app.attention.settings(actor.sub, id).comments === 'off') out.push(`\n(You are not watching this document, so new comments on it will not reach you. watch {"document":"${id}"} — comments wake you, edits stay quiet.)`);
+        return text(out.join('\n'));
       }
       if (doc.type === 'html' && !a.raw) {
         // An HTML page reads as its companion (what it is, where its data lives) plus its files; the source is a raw: true away.
@@ -611,10 +625,10 @@ export const TOOLS: ToolDef[] = [
   // ------------------------------------------------------------------ docs.write
   {
     name: 'create_document', featureSet: 'docs.write', toolClass: 'notes',
-    description: 'Create a document: markdown (default), or an HTML page (type "html": a whole page with its own styles and scripts, served as itself at /p/<id> in a sandbox — the way to publish an app, a visualisation or a report; keep it self-contained, inline CSS/JS, images as data: URIs or uploads; edit it later with edit_document, e.g. replace_all_content), or a file collection (type "files": a place for files in folders, such as PDFs, photos or datasets, that people browse, upload to and download from; fill it with attach_file). You become its owner and start watching it (edits quiet, comments wake). Optionally share it at once; create_link gives an address anyone can open.',
+    description: 'Create a document: markdown (default), or an HTML page (type "html": a whole page with its own styles and scripts, served as itself at /p/<id> in a sandbox — the way to publish an app, a visualisation or a report; keep it self-contained, inline CSS/JS, images as data: URIs or uploads; edit it later with edit_document, e.g. replace_all_content), or a file collection (type "files": a place for files in folders, such as PDFs, photos or datasets, that people browse, upload to and download from; fill it with attach_file), or a spreadsheet (type "sheet": cells with formulas, which people edit together in a grid and download as Excel; read it with read_document, change it with edit_sheet). You become its owner and start watching it (edits quiet, comments wake). Optionally share it at once; create_link gives an address anyone can open.',
     inputSchema: { type: 'object', required: ['title'], properties: {
-      title: S('Document title.'), content: S('Initial content: markdown, or the full HTML for an html page.'),
-      type: S('markdown (default), html, latex, text or files.', { enum: ['markdown', 'html', 'latex', 'text', 'files'] }),
+      title: S('Document title.'), content: S('Initial content: markdown, or the full HTML for an html page; for a spreadsheet, its first rows as text, one row per line, cells separated by tabs or commas (CSV).'),
+      type: S('markdown (default), html, latex, text, files or sheet.', { enum: ['markdown', 'html', 'latex', 'text', 'files', 'sheet'] }),
       companion: S('For an html page: a markdown description of the page (what it shows, where its data lives) stored as its index.md; read_document returns it instead of the HTML, and /p/<id>?format=md serves it.'),
       share_with: { type: 'array', items: { type: 'object', required: ['who', 'role'], properties: { who: S('@Name or principal id'), role: S('viewer, commenter or editor', { enum: ['viewer', 'commenter', 'editor'] }) } } },
     } },
@@ -657,7 +671,7 @@ export const TOOLS: ToolDef[] = [
     } },
     run(app, actor, a) {
       const id = need(a, 'document');
-      app.docs.require(id, actor, 'editor');
+      if (app.docs.require(id, actor, 'editor').doc.type === SHEET) throw new Fault(400, 'A spreadsheet is changed cell by cell: use edit_sheet.');
       let result: ReturnType<typeof applyEdits>;
       try { result = applyEdits(app.docs, id, { sub: actor.sub, via: 'mcpl' }, a.edits as AgentEdit[]); }
       catch (e) {
@@ -669,6 +683,42 @@ export const TOOLS: ToolDef[] = [
       app.attention.noteOwnEdit(actor.sub, id, client, deleteSet);
       const doc = app.docs.get(id)!;
       return text(`Applied to “${doc.title}” (rev ${doc.rev}):\n${report.applied.join('\n')}${report.lines.length ? `\n\nResult:\n${report.lines.join('\n…\n')}` : ''}`);
+    },
+  },
+  {
+    name: 'edit_sheet', featureSet: 'docs.write', toolClass: 'notes',
+    description: [
+      'Change a spreadsheet (a document of type "sheet"). The changes of one call apply in order, all or none, attributed to you; people in the sheet see them at once. Each change is ONE of:',
+      '  {"set": "B2", "values": [["Rent", 1200], ["Food", 300]]}  write a block of cells, from that cell down and to the right ("value" for a single cell; "" empties a cell)',
+      '  {"append": [["2026-03-04", "Rent", 1200]]}  add rows below the last row that holds anything',
+      '  {"insert_rows": 5, "count": 2} / {"delete_rows": 5, "count": 2}  rows by number; an inserted row is empty and takes that number',
+      '  {"insert_columns": "C", "count": 1} / {"delete_columns": "C"}',
+      '  {"sort": "A2:F90", "by": "C", "descending": true}  put those rows in order of a column (whole rows move)',
+      '  {"format": "C2:C90", "as": "#,##0.00"}  how numbers show (Excel format codes: "0%", "$#,##0.00", "yyyy-mm-dd"; "" for automatic)',
+      '  {"add_sheet": "Summary"} / {"rename_sheet": "Sheet1", "to": "Ledger"} / {"delete_sheet": "Old"}',
+      'A value is what a person would type: a number, text, a date as 2026-03-04, or a formula as in Excel ("=SUM(B2:B9)", "=Ledger!C2*0.2", "=SUMIF(A:A,\\"Rent\\",C:C)"). Rows and columns are named as read_document shows them at the moment each change applies. Formulas keep pointing at their cells when rows are inserted, removed or sorted.',
+    ].join('\n'),
+    inputSchema: { type: 'object', required: ['document', 'changes'], properties: {
+      ...docArg,
+      sheet: S('The sheet the changes are for when a change does not name one ("Ledger!B2" names one). Default: the first sheet.'),
+      changes: { type: 'array', minItems: 1, items: { type: 'object', properties: {
+        set: S('Top-left cell of the block to write, e.g. "B2".'), value: { description: 'With set: one cell\'s value.' }, values: { type: 'array', items: { type: 'array' }, description: 'With set: rows of cells.' },
+        append: { type: 'array', items: { type: 'array' } },
+        insert_rows: { type: 'integer', minimum: 1 }, delete_rows: { type: 'integer', minimum: 1 }, insert_columns: { type: 'string' }, delete_columns: { type: 'string' }, count: { type: 'integer', minimum: 1 },
+        sort: S('The rows to sort, e.g. "A2:F90" (leave the header row out).'), by: S('Column letter to sort by (default: the first column of the range).'), descending: { type: 'boolean' },
+        format: S('Cells to format, e.g. "C2:C90" or "C:C".'), as: S('Excel number format code.'),
+        add_sheet: { type: 'string' }, rename_sheet: { type: 'string' }, to: { type: 'string' }, delete_sheet: { type: 'string' },
+        sheet: S('The sheet this one change is for.'),
+      } } },
+    } },
+    run(app, actor, a) {
+      const id = need(a, 'document');
+      const { doc } = app.docs.require(id, actor, 'editor');
+      if (doc.type !== SHEET) throw new Fault(400, `“${doc.title}” is not a spreadsheet.`);
+      const { done, client, deleteSet } = app.sheets.apply(id, { sub: actor.sub, via: 'mcpl' }, a.changes as SheetEdit[], typeof a.sheet === 'string' ? a.sheet : undefined);
+      // Your own change is not news to you; what others changed meanwhile still is.
+      app.attention.noteOwnEdit(actor.sub, id, client, deleteSet);
+      return text(`Applied to “${doc.title}” (rev ${app.docs.get(id)!.rev}):\n${done.join('\n')}`);
     },
   },
   {
@@ -985,6 +1035,7 @@ export const TOOLS: ToolDef[] = [
     run(app, actor, a) {
       const id = need(a, 'document');
       const { doc } = app.docs.require(id, actor, 'commenter');
+      if (doc.type === SHEET) throw new Fault(400, 'A spreadsheet takes no suggestions yet: comment on it (add_comment, naming the cells), or change it with edit_sheet if you may.');
       // Pay before the (CPU-bound) planning, so a failing call still counts.
       app.comments.chargeWrite(actor);
       const current = app.docs.text(id);

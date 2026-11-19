@@ -16,6 +16,7 @@ import { History, type HistoryOptions } from './history.js';
 import { Nodes } from './nodes.js';
 import { Trees } from './trees.js';
 import { Wiki } from './wiki.js';
+import { Sheets } from './sheets.js';
 import { DevIssuer, JtiCache, publicKeyFromString, verifyAid1, type Identity } from './auth.js';
 import type { Config } from './config.js';
 
@@ -32,6 +33,8 @@ export interface App {
   /** The text of stored PDFs, for agents. */
   pdf: PdfText;
   pageKeys: PageKeys;
+  /** Spreadsheets: what agents read and change, and the Excel file. */
+  sheets: Sheets;
   groups: Groups;
   attention: Attention;
   history: History;
@@ -67,12 +70,13 @@ export function createApp(config: Config, issuers: Map<string, KeyObject>, opts:
   files.onMoved = (docId, moves) => comments.filesMoved(docId, moves);
   const pdf = new PdfText(config.dataDir === ':memory:' ? join(process.cwd(), 'data') : config.dataDir);
   const pageKeys = new PageKeys(config.dataDir === ':memory:' ? null : config.dataDir);
+  const sheets = new Sheets(docs);
   const attention = new Attention(db, docs, comments, principals, { log: opts.attentionLog, commentSettleMs: opts.commentSettleMs, suggestSettleMs: opts.suggestSettleMs });
   const history = new History(db, docs, principals, opts.history ?? config.history);
   const nodes = new Nodes(db, docs);
   nodes.attachComments(comments);
   const trees = new Trees(db, docs, nodes);
-  const partial = { config, db, principals, docs, comments, media, files, git, pdf, pageKeys, groups, attention, history, nodes, trees } as unknown as App;
+  const partial = { config, db, principals, docs, comments, media, files, git, pdf, pageKeys, sheets, groups, attention, history, nodes, trees } as unknown as App;
   const wiki = new Wiki(partial);
   let devIssuer: DevIssuer | null = null;
   if (config.devIssuer) {
@@ -94,10 +98,10 @@ export function createApp(config: Config, issuers: Map<string, KeyObject>, opts:
   }, 5 * 60_000);
   maintenance.unref();
   return {
-    config, db, principals, docs, comments, media, files, git, pdf, pageKeys, groups, attention, history, nodes, trees, wiki, issuers, devIssuer,
+    config, db, principals, docs, comments, media, files, git, pdf, pageKeys, sheets, groups, attention, history, nodes, trees, wiki, issuers, devIssuer,
     jti: new JtiCache(),
     verify: (token: string) => verifyAid1(token, verifierOpts),
-    close() { clearInterval(maintenance); git.close(); history.shutdown(); attention.close(); db.close(); },
+    close() { clearInterval(maintenance); sheets.close(); git.close(); history.shutdown(); attention.close(); db.close(); },
   };
 }
 

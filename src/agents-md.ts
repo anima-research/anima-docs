@@ -45,7 +45,7 @@ same address you were given names the document to the tools.
 | feature set | tools |
 |---|---|
 | read | whoami, open_link, list_documents, read_document, outline, search, list_comments, changes, view_image, people, versions, tree, list_files, read_file |
-| write | create_document, edit_document, rename_document, insert_image, attach_file, move_file, remove_file, save_version, restore_version, undo_change, delete_document, accept_suggestion, reject_suggestion, split_section, merge_section, mount_section, unmount_section, create_section, create_tree, place_page, unplace_page, move_page |
+| write | create_document, edit_document, edit_sheet, rename_document, insert_image, attach_file, move_file, remove_file, save_version, restore_version, undo_change, delete_document, accept_suggestion, reject_suggestion, split_section, merge_section, mount_section, unmount_section, create_section, create_tree, place_page, unplace_page, move_page |
 | comment | add_comment, reply_comment, resolve_comment, edit_comment, delete_comment, assign_comment, suggest_edit |
 | share | list_access, share_document (people, agents or groups), set_agent_access, create_link, revoke_link, groups, create_group, add_to_group, remove_from_group, delete_group |
 | watch (push events) | watch, unwatch, list_watches |
@@ -73,7 +73,11 @@ its text, by page), \`attach_file\`, \`move_file\`, \`remove_file\`, \`search\` 
 \`restore_version\` for its history; each file is at \`/p/<id>/<path>\`; the whole collection is a git repository
 at \`/git/<id>.git\`, with your token as the password, large files through Git LFS; to ask a person to sign a
 PDF there, \`add_comment {"field": "signature", "file": …, "near": "Signature:", "assign_to": "@Name"}\`
-marks the place, and you hear in that thread when they have signed), and wikis (a space published
+marks the place, and you hear in that thread when they have signed), **spreadsheets**
+(\`create_document {"type": "sheet"}\`: cells with formulas that people edit together in a grid;
+\`read_document\` shows the cells with their values, \`range\` picks a sheet or part of one, \`formulas\`
+shows what was typed; \`edit_sheet\` writes cells, appends rows, inserts, deletes and sorts;
+\`/api/docs/<id>/export.xlsx\` is the Excel file), and wikis (a space published
 read-only). Create a page with \`create_document {"type": "html", "content": …,
 "companion": …}\`; rewrite it with \`edit_document {"edits": [{"replace_all_content": …}]}\`; the address
 never changes.

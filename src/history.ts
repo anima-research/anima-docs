@@ -206,11 +206,10 @@ export class History {
     this.docs.require(docId, actor, 'editor');
     this.flush(docId);
     const cp = this.get(docId, seq);
-    const target = this.docs.textAt(docId, at === 'after' ? this.snapshotAfter(docId, seq) : this.snapshotBefore(docId, seq));
-    if (target === this.docs.text(docId)) throw new Fault(409, 'The document already reads exactly like that.');
+    const snap = at === 'after' ? this.snapshotAfter(docId, seq) : this.snapshotBefore(docId, seq);
+    if (this.docs.isAt(docId, snap)) throw new Fault(409, 'The document already reads exactly like that.');
     void cp;
-    return this.docs.edit(docId, { sub: actor.sub, via: actor.via ?? 'mcpl', label: `Restored to ${at === 'after' ? 'just after' : 'just before'} h${seq}` },
-      (t) => Documents.replaceMinimal(t, 0, t.length, target));
+    return this.docs.restoreTo(docId, { sub: actor.sub, via: actor.via ?? 'mcpl' }, snap, `Restored to ${at === 'after' ? 'just after' : 'just before'} h${seq}`);
   }
 
   /**
@@ -222,6 +221,7 @@ export class History {
     this.flush(docId);
     const cp = this.get(docId, seq);
     if (cp.baseline) throw new Fault(400, 'That is where the history starts; there is no change to undo.');
+    if (this.docs.isSheet(docId)) return this.docs.undoSheetChange(docId, { sub: actor.sub, via: actor.via ?? 'mcpl' }, this.snapshotBefore(docId, seq), this.snapshotAfter(docId, seq), `Undid h${seq}`);
     const before = this.docs.textAt(docId, this.snapshotBefore(docId, seq));
     const after = this.docs.textAt(docId, this.snapshotAfter(docId, seq));
     if (before === after) throw new Fault(409, 'That change left the text as it was; there is nothing to undo.');
