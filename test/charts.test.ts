@@ -96,6 +96,32 @@ test('a chart in a document draws from a spreadsheet for every reader, if whoeve
     S.app.sheets.apply(sheet.id, ann, [{ delete_sheet: 'A1' }, { delete_sheet: 'Sheet1' }, { rename_sheet: 'Zed', to: 'Sheet1' }]);
     assert.deepEqual(S.app.charts.data(note.id, eve, { doc: sheet.id, range: 'Sheet1!A1:B2' }).rows, [['Jan', 1200]]);
     type(ann, `\n\`\`\`chart\ntype: line\ndata: ${sheet.id} Sheet1!A1:C3\n\`\`\`\n\n\`\`\`chart\ntype: code\ntitle: Mine\ndata: ${sheet.id} Sheet1!A1:C3\n\nreturn {};\n\`\`\`\n`);
+    // A block comes to be a chart by someone else's edit around it, not by its data line being written: not granted.
+    const trap = S.app.docs.create(ann, 'Trap', 'x\n');
+    S.app.docs.share(trap.id, ann, bob.sub, 'editor');
+    const put = (who: { sub: string }, text: string) => S.app.docs.edit(trap.id, { sub: who.sub, via: 'web' }, (t) => t.insert(t.length, text));
+    put(bob, `~~~~\n\n\`\`\`chart\ntype: code\ndata: ${secret.id} A1:B2\n\nreturn {};\n\`\`\`\n`);
+    S.app.docs.edit(trap.id, { sub: ann.sub, via: 'web' }, (t) => { const i = t.toString().indexOf('~~~~\n'); t.delete(i, 5); }); // Ann tidies the stray line away
+    assert.match(S.app.docs.text(trap.id), /^x\n\n```chart/);
+    assert.throws(() => S.app.charts.data(trap.id, ann, { doc: secret.id, range: 'A1:B2' }), /not available/);
+    // Nor by Ann splitting the text that holds it into a section.
+    const part = S.app.nodes.split(trap.id, ann, 2);
+    assert.match(S.app.docs.text(part.id), /data: /);
+    assert.throws(() => S.app.charts.data(trap.id, ann, { doc: secret.id, range: 'A1:B2' }), /not available/);
+    // A grant belongs to its block. Bob copies Ann's granted block; while hers stands the range is the document's, and
+    // when she takes hers out, his copy draws nothing.
+    const copy = S.app.docs.create(ann, 'Copy', '');
+    S.app.docs.share(copy.id, ann, bob.sub, 'editor');
+    const block = `\`\`\`chart\ndata: ${secret.id} A1:B2\n\`\`\`\n`;
+    S.app.docs.edit(copy.id, { sub: ann.sub, via: 'web' }, (t) => t.insert(0, block));
+    S.app.docs.edit(copy.id, { sub: bob.sub, via: 'web' }, (t) => t.insert(t.length, `\n${block.replace('```chart\n', '```chart\ntype: code\n')}`));
+    assert.deepEqual(S.app.charts.data(copy.id, bob, { doc: secret.id, range: 'A1:B2' }).rows, [['Ann', 9000]]);
+    S.app.docs.edit(copy.id, { sub: ann.sub, via: 'web' }, (t) => t.delete(0, block.length));
+    assert.match(S.app.docs.text(copy.id), /type: code\ndata: /);
+    assert.throws(() => S.app.charts.data(copy.id, bob, { doc: secret.id, range: 'A1:B2' }), /not available/);
+    // A restore that brings a granted block back is not someone writing it: it stays ungranted until written again.
+    S.app.docs.edit(copy.id, { sub: ann.sub, via: 'web', label: 'Restored' }, (t) => t.insert(0, block));
+    assert.throws(() => S.app.charts.data(copy.id, ann, { doc: secret.id, range: 'A1:B2' }), /not available/);
     // Over HTTP, and the frame that runs code.
     const frame = await fetch(`${S.base}/chart-frame`);
     assert.equal(frame.status, 200);

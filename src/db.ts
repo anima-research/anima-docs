@@ -560,21 +560,21 @@ export function openDatabase(file: string): DB {
     })();
   }
   if ((db.pragma('user_version', { simple: true }) as number) < 15) {
-    // v15: chart_sources — every spreadsheet range that the chart blocks of a document name (charts.ts). A row is
-    // written by the change that brings the reference into the text, and says whether its author could read the
-    // spreadsheet then (granted_by; '' = could not), which sheet the range meant (sheet_id), and how many blocks
-    // name it (n). Readers of the document see the ranges that were granted.
+    // v15: chart_sources — the spreadsheet ranges that chart blocks of a document were granted (charts.ts): one
+    // row per granted block, anchored at its data line (a Yjs relative position, so the row lives and dies with
+    // that line), with who granted it and which sheet the range meant then. Readers of the document see those ranges.
     db.transaction(() => {
       db.exec(`CREATE TABLE IF NOT EXISTS chart_sources (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
         doc_id      TEXT NOT NULL,
         source_id   TEXT NOT NULL,
         range       TEXT NOT NULL,
-        sheet_id    TEXT NOT NULL DEFAULT '',
-        n           INTEGER NOT NULL DEFAULT 1,
+        sheet_id    TEXT NOT NULL,
+        anchor      BLOB NOT NULL,
         granted_by  TEXT NOT NULL,
-        granted_at  INTEGER NOT NULL,
-        PRIMARY KEY (doc_id, source_id, range)
-      )`);
+        granted_at  INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS chart_sources_doc ON chart_sources(doc_id)`);
       db.pragma('user_version = 15');
     })();
   }

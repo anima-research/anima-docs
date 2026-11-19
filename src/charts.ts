@@ -3,20 +3,23 @@
 //
 // A chart block in a document may draw from a range of a spreadsheet. Whoever
 // can read the document then sees that range, whether or not they can open the
-// spreadsheet, as with a mounted section. Two rules keep that from opening
+// spreadsheet, as with a mounted section. Three rules keep that from opening
 // anything by accident:
 //
-// - A reference is judged once, by the change that brings it into the text:
-//   it is granted if that change's author could read the spreadsheet then.
-//   Nobody's later edit elsewhere in the document grants it for them; a
-//   reference taken out and put back is judged again; and someone who can
-//   read the spreadsheet grants a range by writing a block that names it
-//   themselves (also when another block already named it in vain).
+// - A block is granted by someone writing its data line: a change made by
+//   hand (typed, pasted, an agent's edit) that puts text into that line, by
+//   an author who can read the spreadsheet at that moment. A block that comes
+//   to be a chart any other way (a fence opened or closed around it, an
+//   accepted suggestion, a split, a merge, a restore) is not granted by it.
+// - A grant belongs to its block: it is anchored at the block's data line,
+//   holds for the sheet the range meant when it was given, and ends when that
+//   line goes or names something else.
 // - A chart is given only what its document was granted, never what the
 //   person looking at it could open themselves. A chart may be code written
 //   by someone else, and code can pass on what it is handed; so it is handed
 //   only what every reader of the document may see anyway.
 
+import * as Y from 'yjs';
 import MarkdownIt from 'markdown-it';
 import type { DB } from './db.js';
 import { Fault } from './auth.js';
@@ -30,57 +33,64 @@ import { chartSvg, messageSvg } from './chartsvg.js';
 type Source = { doc: string; range: string };
 /** Finds the fenced blocks of a text exactly as the renderers do (a ```chart inside a longer fence is not one). */
 const fences = new MarkdownIt();
-function chartSources(markdown: string): Source[] {
-  const out: Source[] = [];
+const SETTING = /^\s*([A-Za-z]+)\s*:/;
+/** The chart blocks of a text that name a spreadsheet, each with where its data line lies ([from, to] in the text). */
+function chartBlocks(markdown: string): { source: Source; from: number; to: number }[] {
+  const out: { source: Source; from: number; to: number }[] = [];
+  let starts: number[] | null = null;
   for (const t of fences.parse(markdown, {})) {
-    if (t.type !== 'fence' || (t.info || '').trim().split(/\s+/)[0] !== 'chart') continue;
-    const s = parseChart(t.content).source;
-    if (s?.doc) out.push(s);
+    if (t.type !== 'fence' || !t.map || (t.info || '').trim().split(/\s+/)[0] !== 'chart') continue;
+    const source = parseChart(t.content).source;
+    if (!source?.doc) continue;
+    // The data line is among the settings at the top of the block (the first line that is not a setting ends them).
+    const lines = t.content.split('\n');
+    let k = 0;
+    while (k < lines.length && SETTING.test(lines[k]) && SETTING.exec(lines[k])![1].toLowerCase() !== 'data') k++;
+    if (!starts) { starts = [0]; for (let i = markdown.indexOf('\n'); i >= 0; i = markdown.indexOf('\n', i + 1)) starts.push(i + 1); }
+    const line = t.map[0] + 1 + k;
+    const from = starts[line] ?? markdown.length;
+    out.push({ source, from, to: (starts[line + 1] ?? markdown.length + 1) - 1 });
   }
   return out;
 }
+/** How deep a document's mounted nodes count as its own (documents.ts derives access through as many levels). */
+const FAMILY_DEPTH = 12;
 /** The most a chart's data may weigh in the address of a frame on a published page. */
 const MAX_FRAME_PAYLOAD = 150_000;
 const escapeHtml = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]!));
 
 export class Charts {
-  /** Documents that hold a recorded reference (so that its removal is noticed). */
-  private known = new Set<string>();
-
   constructor(private db: DB, private docs: Documents, private sheets: Sheets, private nodes: Nodes, private origin: () => string) {
-    docs.on('loaded', (e: { docId: string }) => { if (this.db.prepare('SELECT 1 FROM chart_sources WHERE doc_id = ? LIMIT 1').get(e.docId)) this.known.add(e.docId); });
     docs.on('change', (c: DocChange) => { try { this.onChange(c); } catch (e) { console.error('[charts] scan failed:', e); } });
-    docs.on('unloaded', (e: { docId: string }) => this.known.delete(e.docId));
-    docs.on('meta', (e: { docId: string; kind: string }) => { if (e.kind === 'deleted') { this.db.prepare('DELETE FROM chart_sources WHERE doc_id = ?').run(e.docId); this.known.delete(e.docId); } });
+    docs.on('meta', (e: { docId: string; kind: string }) => { if (e.kind === 'deleted') this.db.prepare('DELETE FROM chart_sources WHERE doc_id = ?').run(e.docId); });
   }
 
-  /**
-   * After each change to a text: which spreadsheet ranges its chart blocks name now. A reference that was not
-   * there before this change is this change's: granted if its author can read the spreadsheet, recorded as
-   * refused if not, and in either case not judged again while it stays.
-   */
+  /** After each change to a text: grants whose block is gone end; a block whose data line this change wrote may be granted. */
   private onChange(c: DocChange) {
-    const text = this.docs.ydoc(c.docId).getText('body').toString(); // a spreadsheet's own body is empty
-    const has = text.includes('chart');
-    if (!has && !this.known.has(c.docId)) return;
-    const sources = has ? chartSources(text) : [];
-    const key = (s: Source) => `${s.doc}\n${s.range}`;
-    const now = new Map<string, { s: Source; n: number }>();
-    for (const s of sources) { const e = now.get(key(s)); if (e) e.n++; else now.set(key(s), { s, n: 1 }); }
-    const had = new Map((this.db.prepare('SELECT source_id, range, n, granted_by FROM chart_sources WHERE doc_id = ?').all(c.docId) as { source_id: string; range: string; n: number; granted_by: string }[]).map((r) => [`${r.source_id}\n${r.range}`, r]));
-    for (const [k, r] of had) if (!now.has(k)) this.db.prepare('DELETE FROM chart_sources WHERE doc_id = ? AND source_id = ? AND range = ?').run(c.docId, r.source_id, r.range);
-    for (const [k, { s, n }] of now) {
-      const was = had.get(k);
-      if (was && was.n === n) continue;
-      // One more block names this range than before: this change's author wrote it, and it is theirs to be judged by.
-      // (One block fewer changes nothing but the count: what was granted stays while a block still names it.)
-      const added = !was || n > was.n;
-      const may = added && this.docs.isSheet(s.doc) && !!this.docs.role(s.doc, { sub: c.origin.sub, admin: false });
-      if (!was) this.db.prepare('INSERT OR IGNORE INTO chart_sources (doc_id, source_id, range, sheet_id, n, granted_by, granted_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(c.docId, s.doc, s.range, may ? this.sheetOf(s) : '', n, may ? c.origin.sub : '', Date.now());
-      else if (may && !was.granted_by) this.db.prepare('UPDATE chart_sources SET n = ?, sheet_id = ?, granted_by = ?, granted_at = ? WHERE doc_id = ? AND source_id = ? AND range = ?').run(n, this.sheetOf(s), c.origin.sub, Date.now(), c.docId, s.doc, s.range);
-      else this.db.prepare('UPDATE chart_sources SET n = ? WHERE doc_id = ? AND source_id = ? AND range = ?').run(n, c.docId, s.doc, s.range);
+    const doc = this.docs.ydoc(c.docId);
+    const ytext = doc.getText('body'); // a spreadsheet's own body is empty
+    const text = ytext.toString();
+    const rows = this.db.prepare('SELECT id, source_id, range, anchor FROM chart_sources WHERE doc_id = ?').all(c.docId) as { id: number; source_id: string; range: string; anchor: Buffer }[];
+    if (!rows.length && !text.includes('chart')) return;
+    const blocks = chartBlocks(text);
+    // A grant lives while its anchor is in the data line of a block that still names the same range.
+    const granted = new Set<number>();
+    for (const r of rows) {
+      const at = Y.createAbsolutePositionFromRelativePosition(Y.decodeRelativePosition(r.anchor), doc)?.index;
+      const i = at === undefined ? -1 : blocks.findIndex((b) => b.source.doc === r.source_id && b.source.range === r.range && at >= b.from && at <= b.to);
+      if (i < 0) this.db.prepare('DELETE FROM chart_sources WHERE id = ?').run(r.id); else granted.add(i);
     }
-    if (now.size) this.known.add(c.docId); else this.known.delete(c.docId);
+    // Written by hand: not the service acting for someone (a restore, an accepted suggestion, a split or a merge carry a label).
+    if (c.origin.label) return;
+    const written = c.ranges.filter(([from, to]) => to > from);
+    blocks.forEach((b, i) => {
+      if (granted.has(i) || !written.some(([from, to]) => from <= b.to && to >= b.from)) return;
+      if (!this.docs.isSheet(b.source.doc) || !this.docs.role(b.source.doc, { sub: c.origin.sub, admin: false })) return;
+      const sheet = this.sheetOf(b.source);
+      if (!sheet) return;
+      this.db.prepare('INSERT INTO chart_sources (doc_id, source_id, range, sheet_id, anchor, granted_by, granted_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run(c.docId, b.source.doc, b.source.range, sheet, Buffer.from(Y.encodeRelativePosition(Y.createRelativePositionFromTypeIndex(ytext, b.from))), c.origin.sub, Date.now());
+    });
   }
 
   /** The sheet a range means right now ('' if it means none). */
@@ -89,31 +99,33 @@ export class Charts {
   }
 
   /**
-   * Whether one of these documents was granted this range. The grant is for the sheet the range meant when it was
-   * written: if the same words mean another sheet now (a sheet renamed, added in front, or named like the range), it does not hold.
+   * Whether one of these documents was granted this range. A grant is for the sheet the range meant when it was
+   * given: if the same words mean another sheet now (a sheet renamed, added in front, or named like the range), it does not hold.
    */
   private granted(docIds: Iterable<string>, s: Source): boolean {
-    const q = this.db.prepare("SELECT sheet_id FROM chart_sources WHERE doc_id = ? AND source_id = ? AND range = ? AND granted_by != ''");
+    const q = this.db.prepare('SELECT sheet_id FROM chart_sources WHERE doc_id = ? AND source_id = ? AND range = ?');
     let sheet: string | null = null;
-    for (const id of docIds) {
-      const row = q.get(id, s.doc, s.range) as { sheet_id: string } | undefined;
-      if (row && row.sheet_id && row.sheet_id === (sheet ??= this.sheetOf(s))) return true;
-    }
+    for (const id of docIds) for (const row of q.all(id, s.doc, s.range) as { sheet_id: string }[]) if (row.sheet_id === (sheet ??= this.sheetOf(s))) return true;
     return false;
   }
 
   /** The spreadsheets that charts in these documents draw from (a published page is as new as they are). */
   sourcesOf(docIds: Iterable<string>): string[] {
-    const q = this.db.prepare("SELECT DISTINCT source_id FROM chart_sources WHERE doc_id = ? AND granted_by != ''");
+    const q = this.db.prepare('SELECT DISTINCT source_id FROM chart_sources WHERE doc_id = ?');
     const out = new Set<string>();
     for (const id of docIds) for (const r of q.all(id) as { source_id: string }[]) out.add(r.source_id);
     return [...out].sort();
   }
 
-  /** A document and every node mounted in it, however deep (a chart may sit in a section). */
+  /** A document and the nodes mounted in it, as deep as access itself is carried through mounts (a chart may sit in a section). */
   private family(docId: string): Set<string> {
-    const seen = new Set<string>(), stack = [docId];
-    while (stack.length && seen.size < 2000) { const id = stack.pop()!; if (seen.has(id)) continue; seen.add(id); for (const c of this.nodes.childrenOf(id)) stack.push(c.child); }
+    const seen = new Set<string>([docId]);
+    let level = [docId];
+    for (let depth = 0; depth < FAMILY_DEPTH && level.length && seen.size < 2000; depth++) {
+      const next: string[] = [];
+      for (const id of level) for (const c of this.nodes.childrenOf(id)) if (!seen.has(c.child)) { seen.add(c.child); next.push(c.child); }
+      level = next;
+    }
     return seen;
   }
 

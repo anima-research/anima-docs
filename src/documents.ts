@@ -262,7 +262,7 @@ export class Documents extends EventEmitter {
   }
 
   /** Any node: a document (named) or a section (title ''). Sections are owned by their parent's owner. */
-  createNode(actor: Actor, p: { title: string; content?: string; type?: string; owner?: string }): DocMeta {
+  createNode(actor: Actor, p: { title: string; content?: string; type?: string; owner?: string; /** Called with the new node's id before its content goes in (a split says which mounts the content brings). */ vouch?: (id: string) => void; /** Names the edit that puts the content in, when it is not its author writing (a split). */ label?: string }): DocMeta {
     if (isGuest(actor.sub)) throw new Fault(403, 'Sign in with Archipelago to create documents.');
     const type = p.type ?? 'markdown';
     if (!NODE_TYPES.includes(type)) throw new Fault(400, `type must be one of ${NODE_TYPES.join(', ')}.`);
@@ -279,7 +279,7 @@ export class Documents extends EventEmitter {
     if (type === SHEET) {
       // A new spreadsheet has one sheet.
       this.editSheet(id, actor, (doc) => { initBook(doc); if (rows.length) { const book = readBook(liveStore(doc)); setBlock(doc, book, book.sheets[0].id, 0, 0, rows); } });
-    } else if (p.content && type !== 'files') this.edit(id, actor, (text) => text.insert(0, p.content!));
+    } else if (p.content && type !== 'files') { p.vouch?.(id); this.edit(id, p.label ? { sub: actor.sub, via: actor.via, label: p.label } : actor, (text) => text.insert(0, p.content!)); }
     this.emit('meta', { docId: id, kind: 'created', by: actor.sub });
     return this.get(id)!;
   }
