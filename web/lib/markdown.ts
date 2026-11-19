@@ -4,7 +4,7 @@ import MarkdownIt from 'markdown-it';
 import type { StateCore } from 'markdown-it';
 import DOMPurify from 'dompurify';
 import katex from 'katex';
-import { EMBED_FRAME_HOSTS, galleryFence, hasMathHtml, imageSizes, math, mediaEmbeds, tableWidths } from '../../src/mdext';
+import { EMBED_FRAME_HOSTS, chartFence, galleryFence, hasMathHtml, imageSizes, math, mediaEmbeds, tableWidths } from '../../src/mdext';
 
 type MD = InstanceType<typeof MarkdownIt>;
 
@@ -42,6 +42,7 @@ docMd.core.ruler.push('source_lines', (state) => {
 docMd.use(taskLists);
 imageSizes(docMd);
 galleryFence(docMd);
+chartFence(docMd);
 tableWidths(docMd);
 mediaEmbeds(docMd);
 math(docMd, (tex, display) => katex.renderToString(tex, { displayMode: display, throwOnError: false, output: 'html' }));

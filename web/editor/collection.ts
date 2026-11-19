@@ -16,6 +16,7 @@ import { h } from '../lib/dom';
 import { fullTime, plural, relTime } from '../lib/format';
 import { icon } from '../lib/icons';
 import { renderDocument } from '../lib/markdown';
+import { hydrateCharts } from '../lib/charthost';
 import { confirmDialog, emptyState, errorMessage, iconButton, openDialog, openMenu, promptDialog, spinner, toast, type MenuItem } from '../lib/ui';
 import { codeLanguages } from './languages';
 import { docHighlight } from './codestyle';
@@ -451,7 +452,7 @@ export function collectionView(opts: {
       const target = fileAt(parts.join('/').normalize('NFC'));
       return target ? `${open}/media/${target.mediaId}${close}` : all;
     });
-    const draw = () => rendered.replaceChildren(renderDocument(withPictures(view.state.doc.toString())));
+    const draw = () => { rendered.replaceChildren(renderDocument(withPictures(view.state.doc.toString()))); hydrateCharts(rendered); };
     let asSource = false;
     const modes = (['Read', canEdit ? 'Edit' : 'Source'] as const).map((label, n) => h('button.seg-btn', { type: 'button', role: 'radio', onclick: () => setSource(n === 1) }, label));
     const setSource = (on: boolean) => {

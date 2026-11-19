@@ -3,6 +3,8 @@ dist/
 data/
 public/app.js
 public/sheet.js
+public/charts.js
+public/chartframe.js
 public/app.js.map
 public/app.css
 *.log

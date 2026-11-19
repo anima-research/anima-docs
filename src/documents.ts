@@ -11,7 +11,7 @@ import { diffChars, diffLines } from 'diff';
 import type { DB } from './db.js';
 import { Fault } from './auth.js';
 import { isGuest, type Actor, type Principals } from './principals.js';
-import { MAX_CELLS, MAX_CELL_CHARS, MAX_COLS, MAX_ROWS, SHEET, SHEET_MAPS, bookText, diffStores, initBook, liveStore, parseTsv, readBook, restoreStore, setBlock, type SheetMap, type Store } from './sheet.js';
+import { MAX_CELLS, MAX_CELL_CHARS, MAX_CHART_CHARS, MAX_COLS, MAX_ROWS, SHEET, SHEET_MAPS, bookText, diffStores, initBook, liveStore, parseTsv, readBook, restoreStore, setBlock, type SheetMap, type Store } from './sheet.js';
 
 export type Role = 'viewer' | 'commenter' | 'editor' | 'owner';
 /** Retired: every document is 'restricted' (v12); kept as a type for old clients. */
@@ -143,6 +143,9 @@ export class Documents extends EventEmitter {
   private live = new Map<string, Y.Doc>();
   /** A spreadsheet's text (what search reads), kept until its next change. */
   private sheetText = new Map<string, string>();
+  /** Each loaded document's own text as it stands, read once however many ask; and as it stood before the change in hand. */
+  private bodies = new Map<string, string>();
+  private bodiesBefore = new Map<string, string | null>();
   private lastUsed = new Map<string, number>();
   private pins = new Map<string, number>();
   private failed = new Set<string>();
@@ -262,7 +265,7 @@ export class Documents extends EventEmitter {
   }
 
   /** Any node: a document (named) or a section (title ''). Sections are owned by their parent's owner. */
-  createNode(actor: Actor, p: { title: string; content?: string; type?: string; owner?: string }): DocMeta {
+  createNode(actor: Actor, p: { title: string; content?: string; type?: string; owner?: string; /** Called with the new node's id before its content goes in (a split says which mounts the content brings). */ vouch?: (id: string) => void; /** Names the edit that puts the content in, when it is not its author writing (a split). */ label?: string }): DocMeta {
     if (isGuest(actor.sub)) throw new Fault(403, 'Sign in with Archipelago to create documents.');
     const type = p.type ?? 'markdown';
     if (!NODE_TYPES.includes(type)) throw new Fault(400, `type must be one of ${NODE_TYPES.join(', ')}.`);
@@ -279,7 +282,7 @@ export class Documents extends EventEmitter {
     if (type === SHEET) {
       // A new spreadsheet has one sheet.
       this.editSheet(id, actor, (doc) => { initBook(doc); if (rows.length) { const book = readBook(liveStore(doc)); setBlock(doc, book, book.sheets[0].id, 0, 0, rows); } });
-    } else if (p.content && type !== 'files') this.edit(id, actor, (text) => text.insert(0, p.content!));
+    } else if (p.content && type !== 'files') { p.vouch?.(id); this.edit(id, p.label ? { sub: actor.sub, via: actor.via, label: p.label } : actor, (text) => text.insert(0, p.content!)); }
     this.emit('meta', { docId: id, kind: 'created', by: actor.sub });
     return this.get(id)!;
   }
@@ -313,6 +316,7 @@ export class Documents extends EventEmitter {
     const doc = this.live.get(docId);
     if (doc) { doc.destroy(); this.live.delete(docId); }
     this.sheetText.delete(docId);
+    this.bodies.delete(docId); this.bodiesBefore.delete(docId);
   }
 
   /**
@@ -626,10 +630,23 @@ export class Documents extends EventEmitter {
 
   isSheet(docId: string): boolean { return this.get(docId)?.type === SHEET; }
 
+  /** The document's own text (a spreadsheet's is empty). Kept until the next change, so the listeners of one change share one reading. */
+  body(docId: string): string {
+    let text = this.bodies.get(docId);
+    if (text === undefined) this.bodies.set(docId, text = this.ydoc(docId).getText('body').toString());
+    return text;
+  }
+
+  /**
+   * The document's own text as it was just before the change now being reported (for telling what a change
+   * brought in); null when that is not known, which a caller must take as "nothing new".
+   */
+  bodyBefore(docId: string): string | null { return this.bodiesBefore.get(docId) ?? null; }
+
   /** A document's text. A spreadsheet's is its cells as typed, a line per row (see bookText). */
   text(docId: string): string {
     const doc = this.ydoc(docId);
-    if (!this.isSheet(docId)) return doc.getText('body').toString();
+    if (!this.isSheet(docId)) return this.body(docId);
     let text = this.sheetText.get(docId);
     if (text === undefined) this.sheetText.set(docId, text = bookText(readBook(liveStore(doc))));
     return text;
@@ -668,13 +685,15 @@ export class Documents extends EventEmitter {
 
     // Before a change lands: the history closes a stretch of editing here, with the state before it.
     doc.on('beforeTransaction', (txn: Y.Transaction) => {
+      // Read the text now if nobody has since it last changed: the body's observer below keeps it as "the text before".
+      try { this.body(docId); } catch { /* being unloaded */ }
       const o = txn.origin as ChangeOrigin | undefined;
       if (!o || typeof o !== 'object' || !o.sub) return;
       try { this.emit('beforeChange', { docId, origin: o }); } catch (e) { console.error(`[documents] ${docId}: beforeChange listener failed:`, e); }
     });
 
     doc.on('update', (update: Uint8Array, origin: unknown) => {
-      this.sheetText.delete(docId);
+      this.sheetText.delete(docId); // (the body's own text is dropped where it changes: in its observer)
       if (origin === 'load' || this.failed.has(docId)) return;
       const o = origin as ChangeOrigin | undefined;
       guard('persist', () => {
@@ -700,6 +719,10 @@ export class Documents extends EventEmitter {
     });
 
     doc.getText('body').observe((event, txn) => {
+      // The text changed: what was read before this transaction is the text before, and whoever asks next reads it afresh.
+      // (Kept here and not when the transaction starts: a listener may start a transaction of its own before the others have run.)
+      this.bodiesBefore.set(docId, this.bodies.get(docId) ?? null);
+      this.bodies.delete(docId);
       const o = txn.origin as ChangeOrigin | undefined;
       if (!o || typeof o !== 'object' || !o.sub) return;
       let pos = 0, added = 0, removed = 0, inserted = '';
@@ -720,6 +743,7 @@ export class Documents extends EventEmitter {
 
     // A spreadsheet changes by entries of its maps: one change per transaction, counted in characters typed and removed.
     if (this.isSheet(docId)) {
+      doc.on('afterTransaction', () => { this.sheetText.delete(docId); }); // before the change is announced below
       let pending: { added: number; removed: number; inserted: string } | null = null;
       for (const name of SHEET_MAPS) {
         const map = doc.getMap(name);
@@ -926,7 +950,7 @@ export class Documents extends EventEmitter {
       // One record may hold several successive values of its entry (a client that keeps overwritten values sends them joined).
       const values: unknown[] = content instanceof Y.ContentAny && content.arr.length ? content.arr : [undefined];
       // A width is a number; everything else is text: what was typed, a number format, a name, an order key.
-      const longest = map === 'cells' ? MAX_CELL_CHARS : map === 'fmt' ? 60 : 200;
+      const longest = map === 'cells' ? MAX_CELL_CHARS : map === 'charts' ? MAX_CHART_CHARS : map === 'fmt' ? 60 : 200;
       for (const v of values) if (map === 'widths' ? !(typeof v === 'number' && v > 0 && v < 10_000) : !(typeof v === 'string' && v.length <= longest)) refuse();
       if (map === 'cells' && !cells.has(key)) added.add(key);
     }
@@ -1112,6 +1136,7 @@ export class Documents extends EventEmitter {
     const doc = this.live.get(docId);
     if (doc) { doc.destroy(); this.live.delete(docId); }
     this.sheetText.delete(docId);
+    this.bodies.delete(docId); this.bodiesBefore.delete(docId);
     this.lastUsed.delete(docId);
     if (doc) this.emit('unloaded', { docId });
   }

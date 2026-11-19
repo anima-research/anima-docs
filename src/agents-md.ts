@@ -78,7 +78,18 @@ marks the place, and you hear in that thread when they have signed), **spreadshe
 \`read_document\` shows the cells with their values, \`range\` picks a sheet or part of one, \`formulas\`
 shows what was typed; \`edit_sheet\` writes cells, appends rows, inserts, deletes and sorts;
 \`/api/docs/<id>/export.xlsx\` is the Excel file), and wikis (a space published
-read-only). Create a page with \`create_document {"type": "html", "content": …,
+read-only).
+
+**Charts.** In a markdown document a chart is a fenced block, \`\`\`chart: lines of settings (\`type: bar | line |
+area | pie | scatter\`, \`title:\`, \`x:\` and \`y:\` naming columns, \`stacked: yes\`, \`horizontal: yes\`, \`height:\`), an
+empty line, then the rows as CSV with the headings first; or instead of rows \`data: <spreadsheet id> Ledger!A1:C13\`,
+which draws those cells and follows them (readers of the document see that range even if they cannot open the
+spreadsheet, so name only what they may see; the line counts only if you, who write it, can open the spreadsheet).
+On a sheet, \`edit_sheet {"document": …, "changes": [{"chart": "A1:C13", "type": "bar"}]}\` places a chart.
+\`type: code\` makes the block's body (or \`"code"\`) your own JavaScript: the body of an async function
+\`(data, echarts, el, theme)\` that returns ECharts options or draws into \`el\`; \`data\` is \`{columns, rows}\`
+from the \`data:\` range (in a document) or the chart's cells (on a sheet), otherwise null. It runs in each
+reader's browser, in a sandboxed frame that cannot reach the app or make requests; it is not drawn in the Excel file. Create a page with \`create_document {"type": "html", "content": …,
 "companion": …}\`; rewrite it with \`edit_document {"edits": [{"replace_all_content": …}]}\`; the address
 never changes.
 `;

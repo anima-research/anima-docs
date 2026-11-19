@@ -3,7 +3,7 @@
 // (`{{node:<id>|aside}}`) as sidebar panels, plus automatic Contents,
 // "In this section" and "Related" panels. Edit links lead back to the editor.
 
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import MarkdownIt from 'markdown-it';
 import type { StateCore } from 'markdown-it';
 type MD = InstanceType<typeof MarkdownIt>;
@@ -14,7 +14,7 @@ import { scanMounts, MAX_DEPTH } from './nodes.js';
 import { sanitizeTemplate, slugify, type PublishSettings } from './trees.js';
 import sanitizeHtml from 'sanitize-html';
 import katex from 'katex';
-import { EMBED_FRAME_HOSTS, galleryFence, hasMathHtml, imageSizes, math, mediaEmbeds, tableWidths, wrapByType } from './mdext.js';
+import { EMBED_FRAME_HOSTS, chartFence, galleryFence, hasMathHtml, imageSizes, math, mediaEmbeds, tableWidths, wrapByType } from './mdext.js';
 
 export interface WikiPage { id: string; title: string; slug: string; parent: string | null; depth: number }
 interface Assembled { body: string; asides: { id: string; title: string; body: string }[]; nodes: Set<string> }
@@ -31,6 +31,8 @@ export class Wiki {
     math(this.md, (tex, display) => katex.renderToString(tex, { displayMode: display, throwOnError: false, output: 'html' }));
     imageSizes(this.md);
     galleryFence(this.md);
+    // A chart block leaves a marked place; the finished chart (our own picture or frame) is put there after the page is sanitized.
+    chartFence(this.md, (text, env) => { const e = env as { charts?: string[]; slot?: string }; e.charts ??= []; e.charts.push(text); return `<span data-chart-slot="${e.slot}-${e.charts.length - 1}"></span>\n`; });
     tableWidths(this.md);
     this.md.core.ruler.after('inline', 'wiki-task-lists', (state: StateCore) => {
       const tokens = state.tokens;
@@ -133,10 +135,11 @@ export class Wiki {
   }
 
   /** Markdown → HTML with heading ids, document links rewritten to wiki paths, images pointing at this host. */
-  render(markdown: string, ctx: { base: string; pages: WikiPage[]; headings?: { id: string; text: string; level: number }[]; /** Leave HTML and scripts as written. */ raw?: boolean }): string {
+  render(markdown: string, ctx: { base: string; pages: WikiPage[]; headings?: { id: string; text: string; level: number }[]; /** Leave HTML and scripts as written. */ raw?: boolean; /** The documents the page is made of (a chart may draw from what one of them was allowed to). */ nodes?: Iterable<string> }): string {
     const byId = new Map(ctx.pages.map((p) => [p.id, p]));
     const usedIds = new Set<string>();
-    const env = {};
+    // Each rendering marks its chart places with a word of its own, so a page cannot write one by hand.
+    const env: { charts?: string[]; slot: string } = { slot: randomBytes(6).toString('hex') };
     const tokens = this.md.parse(markdown, env);
     for (let i = 0; i < tokens.length; i++) {
       const t = tokens[i];
@@ -167,7 +170,9 @@ export class Wiki {
       if (t.children) walk(t.children);
     }
     const html = this.md.renderer.render(tokens, this.md.options, env);
-    return ctx.raw ? html : sanitizeRendered(html);
+    const safe = ctx.raw ? html : sanitizeRendered(html);
+    const charts = env.charts;
+    return charts ? safe.replace(new RegExp(`<span data-chart-slot="${env.slot}-(\\d+)"></span>`, 'g'), (_m, n: string) => (charts[Number(n)] === undefined ? '' : this.app.charts.html(charts[Number(n)], ctx.nodes ?? []))) : safe;
   }
 
   // ------------------------------------------------------------------ pages
@@ -177,6 +182,7 @@ export class Wiki {
     const ps = this.app.trees.publishSettings(root);
     h.update(JSON.stringify(ps)).update(scripts ? 'raw' : 'safe').update('\0');
     for (const id of [...nodes].sort()) h.update(`${id}:${this.app.docs.get(id)?.rev ?? 0}:${this.app.docs.get(id)?.title ?? ''}\0`);
+    for (const id of this.app.charts.sourcesOf(nodes)) h.update(`chart:${id}:${this.app.docs.get(id)?.rev ?? 0}\0`);
     for (const p of this.pages(root)) h.update(`${p.id}=${p.slug}:${p.title}\0`);
     h.update(page.id);
     return `"${h.digest('base64url').slice(0, 24)}"`;
@@ -195,8 +201,8 @@ export class Wiki {
     const first = outline(body)[0];
     if (first && first.level === 1 && first.line === 1 && first.text.trim() === page.title.trim()) body = body.split('\n').slice(1).join('\n');
     const raw = !!opts.scripts && ps.scripts;
-    const article = this.render(body, { base, pages, headings, raw });
-    const asides = a.asides.map((x) => ({ ...x, html: this.render(x.body, { base, pages, raw }) }));
+    const article = this.render(body, { base, pages, headings, raw, nodes: a.nodes });
+    const asides = a.asides.map((x) => ({ ...x, html: this.render(x.body, { base, pages, raw, nodes: a.nodes }) }));
     const etag = this.etag(root, page, a.nodes, raw);
     const byId = new Map(pages.map((p) => [p.id, p]));
     const href = (p: WikiPage) => (p.depth === 0 ? `${base}/` : `${base}/${p.slug}`);

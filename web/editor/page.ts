@@ -29,7 +29,8 @@ import { guestSignInButton, userMenuButton } from '../pages/shell';
 import { linkKeyFor, onMeChanged, startSignIn, updateMe } from '../lib/session';
 import { DocProvider, type ConnStatus } from './provider';
 import { remoteCursors } from './cursors';
-import { livePreview } from './livepreview';
+import { livePreview, setChartDoc } from './livepreview';
+import { hydrateCharts } from '../lib/charthost';
 import { codeLanguages } from './languages';
 import { commentHighlights } from './highlights';
 import { CommentsRail } from './comments';
@@ -142,6 +143,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   const cleanups: (() => void)[] = [];
 
   const provider = new DocProvider(docId);
+  setChartDoc(docId);
   provider.role = role;
   provider.awareness.setLocalStateField('user', { name: me.name, color: me.color, sub: me.sub, kind: me.kind });
   const canEdit = () => atLeast(role, 'editor');
@@ -258,6 +260,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     onclick: () => openMenu(insertBtn, [
       { label: 'Gallery from images…', icon: 'image', onSelect: () => (guest ? needSignInForImages() : galleryInput.click()) },
       { label: 'Empty gallery block', icon: 'image', onSelect: () => { insertBlock(view, '```gallery\n\n```', { select: [11, 11] }); view.focus(); } },
+      { label: 'Chart', icon: 'activity', hint: 'rows in the block, or a spreadsheet range', onSelect: () => { insertBlock(view, '```chart\ntype: bar\ntitle: Title\n\nitem, amount\nFirst, 3\nSecond, 5\n```', { select: [26, 31] }); view.focus(); } },
       'separator',
       { label: 'Audio or video file…', icon: 'play', onSelect: () => (guest ? needSignInForImages() : avInput.click()) },
       { label: 'YouTube or Vimeo video…', icon: 'play', onSelect: () => void embedVideoDialog() },
@@ -1157,6 +1160,8 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   /** The frame was loaded before the first sync, from what the server had saved: the synced text becomes its key. */
   let frameAdopts = false;
   const loadFrame = () => { pageFrame.src = `/p/${docId}?raw=1&annotate=1&v=${Date.now().toString(36)}`; };
+  /** Removes the charts drawn in the preview (before it is drawn again). */
+  let dropCharts = () => undefined as void;
   const renderPreview = () => {
     if (mode === 'edit') return;
     if (isHtml()) {
@@ -1176,7 +1181,9 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
     }
     const edits = rail.openSuggestionEdits((p, a) => coords().toShared(p, a));
     const text = renderSource(binding.current, showApplied ? edits : []);
+    dropCharts();
     previewBody.replaceChildren(renderDocument(text));
+    dropCharts = hydrateCharts(previewBody, docId);
     if (!text.length) previewBody.replaceChildren(h('p.preview-empty', null, 'This document is empty.'));
     if (showApplied && edits.length) markApplied(previewBody);
     renderSuggBar(edits.length);
@@ -1202,7 +1209,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
       sheet = m.sheetView({
         doc: provider.doc, awareness: provider.awareness, canEdit: canEdit(), exportUrl: api.xlsxUrl(docId),
         makeUndo: (maps, origin) => new Y.UndoManager(maps, { trackedOrigins: new Set([origin]), captureTimeout: 400 }),
-        toast: (message, opts) => toast(message, opts), openMenu, promptDialog, confirmDialog,
+        toast: (message, opts) => toast(message, opts), openMenu, promptDialog, confirmDialog, openDialog,
       });
       sheetPane.replaceChildren(sheet.el);
     };
@@ -1346,6 +1353,7 @@ function build(root: HTMLElement, me: Me, detail: DocDetail, ctx: BuildContext):
   cleanups.push(nodes.onMeta((id) => { if (id === docId && (app.classList.contains('html-doc') !== isHtml() || app.classList.contains('files-doc') !== isFiles())) applyDocType(); }));
   cleanups.push(() => collection?.destroy());
   cleanups.push(() => { sheetClosed = true; sheet?.destroy(); });
+  cleanups.push(() => dropCharts());
   (window as unknown as { __anima?: unknown }).__anima = { view, binding, nodes, nav: () => nav, docId, rail };
   cleanups.push(() => { delete (window as unknown as { __anima?: unknown }).__anima; });
 

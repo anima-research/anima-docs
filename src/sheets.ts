@@ -8,9 +8,12 @@ import { Fault } from './auth.js';
 import type { Documents } from './documents.js';
 import {
   MAX_CELLS, MAX_ROWS, SHEET_MAPS, a1, addSheetNamed, colIndex, colName, deleteCols, deleteRows, deleteSheet, grids, input, insertCols, insertRows, liveStore, parseRange,
-  quoteSheet, readBook, renameSheet, reorderRows, setBlock, setFormat, type Book, type Rect, type Sheet,
+  chartsOf, deleteChart, putChart, quoteSheet, readBook, renameSheet, reorderRows, setBlock, setFormat, type Book, type Rect, type Sheet,
 } from './sheet.js';
-import { Calc, sortOrder } from './sheetcalc.js';
+import { Calc, rangeValues, sortOrder } from './sheetcalc.js';
+import { CHART_TYPES, chartText, parseChart, tableOf, type ChartSpec, type ChartType } from './chart.js';
+import { CHART_COLS, CHART_ROWS } from './sheetcalc.js';
+import { chartPng } from './chartsvg.js';
 
 /** One change of an edit_sheet call (see the tool's description). */
 export type SheetEdit = Record<string, unknown>;
@@ -19,7 +22,7 @@ const KEEP = 8;
 const NO_SHEETS = 'This spreadsheet has no sheets (the last one was removed). edit_sheet {"changes": [{"add_sheet": "Sheet1"}]} adds one.';
 /** In a read of many cells, one cell shows at most this much (a single cell read alone shows all of it). */
 const CELL_SHOWN = 2_000;
-const OPS = ['set', 'append', 'insert_rows', 'delete_rows', 'insert_columns', 'delete_columns', 'sort', 'format', 'add_sheet', 'rename_sheet', 'delete_sheet'];
+const OPS = ['set', 'append', 'insert_rows', 'delete_rows', 'insert_columns', 'delete_columns', 'sort', 'format', 'chart', 'delete_chart', 'add_sheet', 'rename_sheet', 'delete_sheet'];
 /** A number format as Excel takes it: a currency sign that is not "$" goes in quotes (unless it already is). */
 const excelFormat = (code: string) => code.split('"').map((part, i) => (i % 2 ? part : part.replace(/[^\x00-\x7F]+/g, '"$&"'))).join('"');
 const escapeCell = (s: string) => s.replace(/[\\\t\n\r]/g, (ch) => (ch === '\\' ? '\\\\' : ch === '\t' ? '\\t' : ch === '\n' ? '\\n' : '\\r'));
@@ -119,7 +122,43 @@ export class Sheets {
       out.push(`<<<SHEET ${name}!${a1(rect.top, rect.left)}:${a1(r - 1, rect.right)}\n${lines.join('\n')}\nSHEET>>>`);
       if (r <= rect.bottom) { cut = true; out.push(`Rows ${r + 1}–${rect.bottom + 1} of ${name} are not shown: pass range, e.g. "${name}!A${r + 1}:${colName(rect.right)}${rect.bottom + 1}".`); }
     }
+    for (const s of opts.range ? parts.map((p) => p.sheet) : book.sheets) {
+      const charts = chartsOf(book, s);
+      if (charts.length) out.push(`Charts on ${quoteSheet(s.name)}: ${charts.map((c) => { const spec = parseChart(c.text); return `${c.id} (${spec.type}${spec.title ? ` “${spec.title}”` : ''} of ${c.range}, at ${a1(c.row, c.col)})`; }).join('; ')}`);
+    }
     return { text: out.join('\n'), partial: !!opts.range || cut };
+  }
+
+  /** The cells of a chart on a sheet, kept to what a chart reads (see CHART_ROWS). */
+  private rectOf(range: string, sheet: Sheet): [number, number, number, number] {
+    const r = parseRange(range)!.rect;
+    return [r.top, r.left, Math.min(r.bottom, sheet.rows.length - 1, r.top + CHART_ROWS - 1), Math.min(r.right, sheet.cols.length - 1, r.left + CHART_COLS - 1)];
+  }
+
+  /** The sheet and cells that a chart's range names: a sheet's name, cells, or both. */
+  private placeOf(book: Book, range: string): { sheet: Sheet; parsed: { sheet: string | null; rect: Rect } } {
+    const text = range.trim();
+    const named = book.byName.get(text.toLowerCase()) ?? book.byName.get(text.replace(/^'|'$/g, '').replace(/''/g, "'").toLowerCase());
+    const parsed = named ? { sheet: named.name, rect: { top: 0, left: 0, bottom: -1, right: -1 } } : parseRange(text);
+    if (!parsed) throw new Fault(400, `A chart's range is a sheet name or cells like "Ledger!A1:C13" (got "${range}").`);
+    return { sheet: this.sheetNamed(book, parsed.sheet), parsed };
+  }
+
+  /** The id of the sheet a chart's range means, as the book stands now. */
+  sheetOf(docId: string, range: string): string { return this.placeOf(this.book(docId), range).sheet.id; }
+
+  /**
+   * The values of a range, row by row, for a chart: numbers as numbers (dates and times as they show), everything
+   * else as it shows. `range` is a sheet name, cells, or both ("Ledger!A1:C13"); an open end runs as far as the sheet is filled.
+   */
+  values(docId: string, range: string, maxRows = CHART_ROWS): (string | number | null)[][] {
+    const calc = this.calc(docId);
+    const book = calc.book;
+    const { sheet, parsed } = this.placeOf(book, range);
+    const used = this.extents(book).get(sheet.id)!;
+    const bottom = Math.min(parsed.rect.bottom < 0 ? used.rows - 1 : parsed.rect.bottom, sheet.rows.length - 1, parsed.rect.top + maxRows - 1);
+    const right = Math.min(parsed.rect.right < 0 ? used.cols - 1 : parsed.rect.right, sheet.cols.length - 1, parsed.rect.left + CHART_COLS - 1);
+    return rangeValues(calc, sheet, parsed.rect.top, parsed.rect.left, bottom, right);
   }
 
   /** A sheet's values as markdown tables, one per sheet (a published page shows a spreadsheet this way). */
@@ -233,6 +272,38 @@ export class Sheets {
       setFormat(doc, sheet, { ...rect, bottom: rect.bottom < 0 ? sheet.rows.length - 1 : rect.bottom, right: rect.right < 0 ? sheet.cols.length - 1 : rect.right }, code);
       return `${tag(sheet)}${String(edit.format).replace(/^.*!/, '')} now shows numbers as ${code || 'they come (automatic)'}.`;
     }
+    if ('chart' in edit) {
+      const { sheet, rect } = where(edit.chart, 'chart');
+      const type = String(edit.type ?? (edit.code ? 'code' : 'bar')).toLowerCase();
+      const shown = edit.type === undefined && edit.code === undefined && edit.id !== undefined ? null : type;
+      if (!(CHART_TYPES as readonly string[]).includes(type)) throw new Error(`type is one of ${CHART_TYPES.join(', ')}.`);
+      const used = this.extents(book).get(sheet.id)!;
+      const range = `${a1(rect.top, rect.left)}:${a1(rect.bottom < 0 ? Math.max(rect.top, used.rows - 1) : rect.bottom, rect.right < 0 ? Math.max(rect.left, used.cols - 1) : rect.right)}`;
+      const at = edit.at === undefined ? null : parseRange(String(edit.at));
+      if (edit.at !== undefined && !at) throw new Error(`at is the cell the chart's corner sits on, such as "E2" (got ${JSON.stringify(edit.at)}).`);
+      const prior = edit.id === undefined ? undefined : chartsOf(book, sheet).find((c) => c.id === String(edit.id));
+      if (edit.id !== undefined && !prior) throw new Error(`No chart ${edit.id} on ${quoteSheet(sheet.name)}.`);
+      // A change to a chart keeps every setting the change does not name.
+      const was: Partial<ChartSpec> = prior ? parseChart(prior.text) : {};
+      const text = chartText({
+        type: (edit.type === undefined && edit.code === undefined && was.type ? was.type : type) as ChartType,
+        title: edit.title === undefined ? was.title ?? '' : String(edit.title), x: edit.x === undefined ? was.x ?? '' : String(edit.x),
+        y: edit.y === undefined ? was.y ?? [] : Array.isArray(edit.y) ? edit.y.map(String) : [String(edit.y)],
+        stacked: edit.stacked === undefined ? !!was.stacked : edit.stacked === true, horizontal: edit.horizontal === undefined ? !!was.horizontal : edit.horizontal === true,
+        code: edit.code === undefined ? was.code ?? '' : String(edit.code),
+      });
+      const id = putChart(doc, book, sheet, { id: prior?.id, text, range, row: at ? at.rect.top : prior?.row ?? rect.top, col: at ? at.rect.left : prior?.col ?? Math.min(sheet.cols.length - 1, (rect.right < 0 ? used.cols - 1 : rect.right) + 2) });
+      const kind = shown ?? parseChart(text).type;
+      return `${prior ? 'Changed' : 'Placed'} chart ${id} (${kind}) of ${tag(sheet)}${range}.${kind === 'code' ? ' Its code runs in each reader’s browser, in a sandbox; it is not drawn in the Excel file.' : ''}`;
+    }
+    if ('delete_chart' in edit) {
+      const sheet = this.sheetNamed(book, named);
+      const want = String(edit.delete_chart ?? '');
+      const chart = chartsOf(book, sheet).find((c) => c.id === want || parseChart(c.text).title === want);
+      if (!chart) throw new Error(`No chart “${want}” on ${quoteSheet(sheet.name)} (read_document lists a sheet's charts).`);
+      deleteChart(doc, sheet, chart.id);
+      return `Removed chart ${chart.id} from ${quoteSheet(sheet.name)}.`;
+    }
     if ('add_sheet' in edit) {
       const name = String(edit.add_sheet ?? '').trim();
       if (!name) throw new Error('add_sheet is the new sheet’s name.');
@@ -249,7 +320,7 @@ export class Sheets {
       deleteSheet(doc, book, sheet);
       return `Deleted sheet “${sheet.name}”.`;
     }
-    throw new Error(`not a change I know (${Object.keys(edit).join(', ') || 'empty'}): use set, append, insert_rows, delete_rows, insert_columns, delete_columns, sort, format, add_sheet, rename_sheet or delete_sheet.`);
+    throw new Error(`not a change I know (${Object.keys(edit).join(', ') || 'empty'}): use set, append, insert_rows, delete_rows, insert_columns, delete_columns, sort, format, chart, delete_chart, add_sheet, rename_sheet or delete_sheet.`);
   }
 
   // ------------------------------------------------------------------ Excel
@@ -279,6 +350,16 @@ export class Sheets {
         const code = String(book.store.get('fmt', `${s.id}::${id}`) ?? '');
         if (code) ws.getColumn(c + 1).numFmt = excelFormat(code);
       });
+      // Charts go in as pictures (the file format's own charts are not written). A chart that is code is not drawn here.
+      for (const chart of chartsOf(book, s)) {
+        // A chart that cannot be drawn here (it is code, or its cells are gone) is a picture saying so; one that fails does not cost the file.
+        try {
+          const spec = { ...parseChart(chart.text), height: chart.height };
+          const table = spec.type === 'code' || chart.range.includes('#REF!') ? { columns: [], rows: [] } : tableOf(rangeValues(calc, s, ...this.rectOf(chart.range, s)));
+          const png = await chartPng(spec, table, chart.width);
+          ws.addImage(wb.addImage({ buffer: png as unknown as ExcelJS.Buffer, extension: 'png' }), { tl: { col: chart.col, row: chart.row }, ext: { width: chart.width, height: spec.type === 'code' ? 96 : chart.height } });
+        } catch (e) { console.error(`[sheets] ${docId}: chart ${chart.id} left out of the Excel file:`, (e as Error).message); }
+      }
     }
     return Buffer.from(await wb.xlsx.writeBuffer());
   }

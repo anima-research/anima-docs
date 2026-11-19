@@ -1637,3 +1637,25 @@ button.card-field:hover { text-decoration: underline; }
 .sheet-foot-space { flex: 1 1 0; }
 .sheet-stats { color: var(--text-2); white-space: nowrap; font-variant-numeric: tabular-nums; }
 @media (max-width: 700px) { .sheet-stats, .sheet-name { display: none; } }
+
+/* Charts: a ```chart block drawn in the preview, under its block in the editor, and on a sheet (charthost.ts). */
+.md-chart { margin: 1em 0; }
+.md-chart-plot { width: 100%; }
+.md-chart-frame { display: block; width: 100%; border: 0; border-radius: 8px; background: transparent; }
+.md-chart-note { padding: 10px 12px; font: 13px var(--font-ui); color: var(--text-2); border: 1px dashed var(--border-strong); border-radius: 8px; }
+.cm-chart { margin: 4px 0 10px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.sheet-charts { position: absolute; left: 46px; top: 25px; z-index: 2; }
+.sheet-chart { position: absolute; background: var(--surface); border: 1px solid var(--border-strong); border-radius: 8px; box-shadow: var(--page-shadow); cursor: default; overflow: hidden; }
+.sheet-chart-head { display: flex; align-items: center; gap: 2px; height: 30px; padding: 0 4px 0 10px; border-bottom: 1px solid var(--border); cursor: grab; user-select: none; touch-action: none; }
+.sheet-view.read-only .sheet-chart-head { cursor: default; }
+.sheet-chart-title { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; color: var(--text); }
+.sheet-chart-head .icon-btn { width: 24px; height: 24px; }
+.sheet-chart-body { padding: 6px 8px 4px; }
+.sheet-chart-form { display: flex; flex-direction: column; gap: 12px; }
+.sheet-chart-form [hidden] { display: none; }
+.sheet-chart-options { display: flex; gap: 18px; }
+.sheet-chart-code { font-family: var(--font-mono); font-size: 12.5px; resize: vertical; }
+.sheet-chart-form .field { display: flex; flex-direction: column; gap: 5px; }
+.sheet-chart-form .field-label { font-size: 12.5px; font-weight: 600; color: var(--text-2); }
+.sheet-chart-form .check { display: inline-flex; align-items: center; gap: 6px; }
+.sheet-chart-form .sheet-chart-code { min-height: 150px; }

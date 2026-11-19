@@ -357,3 +357,89 @@ test('searching finds what you can open through a space; browsing stays to what 
   assert.deepEqual(titled(reader, 'walrus'), []);
   assert.deepEqual(found(reader, 'penguin'), []);
 });
+
+test('a mount line counts only if whoever wrote it could open the node: knowing an id opens nothing', () => {
+  const { docs, nodes, actor } = setup();
+  const ann = actor('Ann'), eve = actor('Eve'), bob = actor('Bob');
+  const secret = docs.create(ann, 'Salaries', 'Ann: 9000');
+  const type = (docId: string, who: { sub: string }, text: string, at?: number) => docs.edit(docId, { sub: who.sub, via: 'web' }, (t) => t.insert(at ?? t.length, text));
+  // Eve has seen the id (a link, a chart's data line). She writes a mount line for it in a document of her own.
+  const hers = docs.create(eve, 'Mine', 'notes\n');
+  type(hers.id, eve, `${marker(secret.id)}\n`);
+  assert.equal(docs.role(secret.id, eve), null, 'the line is text: it gives her nothing');
+  assert.deepEqual(nodes.childrenOf(hers.id), []);
+  // Nor does it start counting when someone who can open the node edits elsewhere in her document.
+  docs.share(hers.id, eve, ann.sub, 'editor');
+  type(hers.id, ann, 'a note from Ann\n', 0);
+  assert.equal(docs.role(secret.id, eve), null);
+  // Ann writing the line herself is Ann showing the document: Eve reads it through hers from then on.
+  type(hers.id, ann, `${marker(secret.id)}\n`);
+  assert.equal(docs.role(secret.id, eve), 'editor');
+  // Letter by letter, as a person types it.
+  const typed = docs.create(ann, 'Typed', '');
+  for (const ch of marker(secret.id)) type(typed.id, ann, ch);
+  assert.deepEqual(nodes.childrenOf(typed.id).map((c) => c.child), [secret.id]);
+  // A section made by an editor who is not the owner: made without a mount, then its line written by its maker.
+  const shared = docs.create(ann, 'Shared', 'intro\n');
+  docs.share(shared.id, ann, bob.sub, 'editor');
+  const section = nodes.createSection(shared.id, bob, { content: 'section text', mount: false });
+  type(shared.id, bob, `${marker(section.id)}\n`);
+  assert.deepEqual(nodes.childrenOf(shared.id).map((c) => c.child), [section.id]);
+  // Its line cut and put back (an undo, a move) by an editor whose only way into the section was this document.
+  const cut = () => docs.edit(shared.id, { sub: bob.sub, via: 'web' }, (t) => { const s = t.toString(), i = s.indexOf(marker(section.id)); t.delete(i, marker(section.id).length + 1); });
+  cut();
+  assert.deepEqual(nodes.childrenOf(shared.id), []);
+  type(shared.id, bob, `${marker(section.id)}\n`, 0);
+  assert.deepEqual(nodes.childrenOf(shared.id).map((c) => c.child), [section.id]);
+  // A whole document mounted by Ann, its line moved by Bob at once: fine. Put back by someone else, or much later, it needs their own access.
+  const other = docs.create(ann, 'Appendix', 'appendix');
+  nodes.mount(shared.id, other.id, ann);
+  assert.equal(docs.role(other.id, bob), 'editor');
+  const cutOther = (who: { sub: string }) => docs.edit(shared.id, { sub: who.sub, via: 'web' }, (t) => { const s = t.toString(), i = s.indexOf(marker(other.id)); t.delete(i, marker(other.id).length + 1); });
+  cutOther(bob);
+  type(shared.id, bob, `${marker(other.id)}\n`, 0);
+  assert.equal(docs.role(other.id, bob), 'editor', 'moved by the one who cut it');
+  cutOther(ann);
+  type(shared.id, bob, `${marker(other.id)}\n`, 0);
+  assert.equal(docs.role(other.id, bob), null, 'taken out by Ann: Bob cannot put it back on his own');
+  // Text put next to someone's line is not that line being written: Ann presses Enter after Eve's line and types above it.
+  const vault = docs.create(ann, 'Vault', 'gold');
+  const bait = docs.create(eve, 'Bait', `intro\n${marker(vault.id)}`);
+  docs.share(bait.id, eve, ann.sub, 'editor');
+  type(bait.id, ann, '\n');
+  type(bait.id, ann, 'a line of Ann\'s\n', 6);
+  assert.deepEqual(nodes.childrenOf(bait.id), []);
+  assert.equal(docs.role(vault.id, eve), null);
+  // The service acting for Ann (an accepted suggestion, a restore: a labelled change) writes Eve's line: not Ann's own writing.
+  const sugg = docs.create(eve, 'Suggested', 'text\n');
+  docs.share(sugg.id, eve, ann.sub, 'editor');
+  docs.edit(sugg.id, { sub: ann.sub, via: 'web', label: 'Accepted a suggestion' }, (t) => t.insert(t.length, `${marker(vault.id)}\n`));
+  assert.deepEqual(nodes.childrenOf(sugg.id), []);
+  assert.equal(docs.role(vault.id, eve), null);
+  // Nor is a line written out again a line written: Ann's change takes Eve's line out and puts it back lower down.
+  docs.edit(bait.id, { sub: ann.sub, via: 'web' }, (t) => { const x = t.toString(), i = x.indexOf(marker(vault.id)); t.delete(i, marker(vault.id).length); t.insert(t.length, `\n${marker(vault.id)}\n`); });
+  assert.ok(docs.text(bait.id).endsWith(`${marker(vault.id)}\n`));
+  assert.equal(docs.role(vault.id, eve), null);
+  // A section taken out and mounted elsewhere has left: an editor of the old place cannot write it back.
+  const moved = nodes.createSection(shared.id, ann, { content: 'was shared' });
+  const priv = docs.create(ann, 'Private', '');
+  docs.edit(shared.id, { sub: ann.sub, via: 'web' }, (t) => { const x = t.toString(), i = x.indexOf(marker(moved.id)); t.delete(i, marker(moved.id).length + 1); });
+  nodes.mount(priv.id, moved.id, ann);
+  type(shared.id, bob, `${marker(moved.id)}\n`);
+  assert.equal(docs.role(moved.id, bob), null);
+  // While it is mounted nowhere, a restore of the document it was part of brings it back.
+  const kept = nodes.createSection(shared.id, ann, { content: 'part of shared' });
+  docs.edit(shared.id, { sub: ann.sub, via: 'web' }, (t) => { const x = t.toString(), i = x.indexOf(marker(kept.id)); t.delete(i, marker(kept.id).length + 1); });
+  docs.edit(shared.id, { sub: bob.sub, via: 'web', label: 'Restored' }, (t) => t.insert(t.length, `${marker(kept.id)}\n`));
+  assert.ok(nodes.childrenOf(shared.id).some((c) => c.child === kept.id));
+  // A split of a long text carries its mounts however far down they are.
+  const big = docs.create(ann, 'Big', `top\n${'filler line\n'.repeat(600)}${marker(secret.id)}\nend\n`);
+  assert.deepEqual(nodes.childrenOf(nodes.split(big.id, ann, 4).id).map((c) => c.child), [secret.id]);
+  // Split and merge carry the mounts in the text they move.
+  const long = docs.create(ann, 'Long', `one\n${marker(secret.id)}\ntwo\n`);
+  docs.share(long.id, ann, bob.sub, 'editor');
+  const part = nodes.split(long.id, bob, 4);
+  assert.deepEqual(nodes.childrenOf(part.id).map((c) => c.child), [secret.id]);
+  nodes.merge(long.id, part.id, bob);
+  assert.deepEqual(nodes.childrenOf(long.id).map((c) => c.child), [secret.id]);
+});

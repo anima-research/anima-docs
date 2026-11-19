@@ -103,6 +103,8 @@ async function json(req: IncomingMessage): Promise<any> {
 const STATIC: Record<string, [string, string]> = {
   '/app.js': ['app.js', 'text/javascript; charset=utf-8'],
   '/sheet.js': ['sheet.js', 'text/javascript; charset=utf-8'],
+  '/charts.js': ['charts.js', 'text/javascript; charset=utf-8'],
+  '/chartframe.js': ['chartframe.js', 'text/javascript; charset=utf-8'],
   '/app.css': ['app.css', 'text/css; charset=utf-8'],
   '/style.css': ['style.css', 'text/css; charset=utf-8'],
   '/favicon.svg': ['favicon.svg', 'image/svg+xml'],
@@ -428,7 +430,7 @@ export function createHttp(app: App) {
     // Discovery for agents handed an address here: the MCPL door and the guide, on every response.
     res.setHeader('Link', `<${mcplUrl(app.config.origin)}>; rel="mcpl", <${app.config.origin}/agents.md>; rel="help"`);
     const wsOrigin = app.config.origin.replace(/^http/, 'ws');
-    res.setHeader('Content-Security-Policy', `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data: blob:; media-src 'self' https: blob:; frame-src 'self' https://www.youtube-nocookie.com https://player.vimeo.com; connect-src 'self' ${wsOrigin}; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`);
+    res.setHeader('Content-Security-Policy', `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data: blob:; media-src 'self' https: blob:; frame-src 'self' ${app.config.origin} https://www.youtube-nocookie.com https://player.vimeo.com; connect-src 'self' ${wsOrigin}; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`);
     if (production) res.setHeader('Strict-Transport-Security', 'max-age=31536000');
     /** Who the response is for: guests get principal ids masked (they see people by name only). */
     let viewer: Actor | null = null;
@@ -1026,6 +1028,11 @@ export function createHttp(app: App) {
             send(200, { ok: true, rev: app.docs.get(id)!.rev });
             return;
           }
+          if (rest === '/chart-data' && method === 'GET') {
+            // The data of a chart in this document that draws from a spreadsheet (see charts.ts for who may see it).
+            send(200, app.charts.data(id, a, { doc: url.searchParams.get('doc') ?? '', range: (url.searchParams.get('range') ?? '').trim() }));
+            return;
+          }
           if (rest === '/export.xlsx' && method === 'GET') {
             const { doc } = app.docs.require(id, a, 'viewer');
             if (!app.docs.isSheet(id)) throw new Fault(400, 'Only a spreadsheet downloads as Excel.');
@@ -1091,6 +1098,18 @@ export function createHttp(app: App) {
 
       // ------------------------------------------------ static app shell
       if (method !== 'GET' && method !== 'HEAD') throw new Fault(405, 'Method not allowed.');
+      // The frame a chart of type "code" runs in (web/chartframe.ts). Sandboxed: an origin of its own, and a policy
+      // that lets it load its one script and nothing else, so the code cannot reach the app and its requests are refused.
+      // It holds nothing of anyone's: what it draws is handed to it by the page around it, or in its address.
+      if (path === '/chart-frame' && (method === 'GET' || method === 'HEAD')) {
+        res.removeHeader('X-Frame-Options');
+        res.writeHead(200, {
+          'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'public, max-age=300',
+          'Content-Security-Policy': `sandbox allow-scripts; default-src 'none'; script-src ${app.config.origin}/chartframe.js 'unsafe-eval'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; frame-ancestors *`,
+        });
+        res.end('<!doctype html><html><head><meta charset="utf-8"><title>Chart</title><style>html,body{margin:0;height:100%;overflow:hidden;font:13px ui-sans-serif,-apple-system,"Segoe UI",Roboto,sans-serif}#chart{width:100%;height:100%}.note{margin:0;padding:16px;opacity:.75;white-space:pre-wrap}</style></head><body><div id="chart"></div><script src="/chartframe.js"></script></body></html>');
+        return;
+      }
       // KaTeX's stylesheet and fonts (copied into public/katex by the web build); on wiki hosts too.
       const km = /^\/katex\/(katex\.min\.css|fonts\/KaTeX_[A-Za-z0-9-]+\.(?:woff2|woff|ttf))$/.exec(path);
       // pdf.js's worker, character maps and standard fonts (copied into public/pdfjs by the web build).

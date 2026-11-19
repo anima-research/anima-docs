@@ -14,10 +14,12 @@ import { h, rafThrottle } from './lib/dom';
 import { icon } from './lib/icons';
 import type { MenuItem } from './lib/ui';
 import {
-  addSheet, a1, colName, deleteCols, deleteRows, deleteSheet, formatOf, input, insertCols, insertRows, liveStore, parseTsv, readBook, renameSheet, reorderRows,
+  addSheet, a1, chartsOf, colName, deleteChart, deleteCols, deleteRows, deleteSheet, formatOf, parseRange, putChart, input, insertCols, insertRows, liveStore, parseTsv, readBook, renameSheet, reorderRows,
   setBlock, setFormat, shiftFormula, stored, toTsv, MAX_ROWS, type Book, type Rect, type Sheet,
 } from '../src/sheet';
-import { Calc, FORMATS, sortOrder } from '../src/sheetcalc';
+import { CHART_COLS, CHART_ROWS, Calc, FORMATS, rangeValues, sortOrder } from '../src/sheetcalc';
+import { CHART_TYPES, chartText, parseChart, tableOf, type ChartType } from '../src/chart';
+import { mountChart } from './lib/charthost';
 
 export interface UndoStack { undo(): unknown; redo(): unknown; stopCapturing(): void; destroy(): void }
 export interface SheetDeps {
@@ -30,6 +32,7 @@ export interface SheetDeps {
   openMenu(anchor: HTMLElement, items: MenuItem[], opts?: { align?: 'start' | 'end' }): () => void;
   promptDialog(opts: { title: string; label: string; value?: string; confirmLabel?: string; maxLength?: number }): Promise<string | null>;
   confirmDialog(opts: { title: string; message: string; confirmLabel?: string; danger?: boolean }): Promise<boolean>;
+  openDialog(opts: { title: string; body: Node; footer?: Node; size?: 'sm' | 'md' | 'lg' }): { close(): void };
   exportUrl: string;
 }
 export interface SheetView { el: HTMLElement; setCanEdit(canEdit: boolean): void; destroy(): void }
@@ -43,7 +46,7 @@ export function sheetView(deps: SheetDeps): SheetView {
   let canEdit = deps.canEdit;
   /** The origin of this view's own changes: what the undo stack follows. */
   const LOCAL = { sheet: 'local' };
-  const maps = { sheets: doc.getMap('sheets'), names: doc.getMap('names'), rows: doc.getMap('rows'), cols: doc.getMap('cols'), cells: doc.getMap('cells'), fmt: doc.getMap('fmt'), widths: doc.getMap('widths') };
+  const maps = { sheets: doc.getMap('sheets'), names: doc.getMap('names'), rows: doc.getMap('rows'), cols: doc.getMap('cols'), cells: doc.getMap('cells'), fmt: doc.getMap('fmt'), widths: doc.getMap('widths'), charts: doc.getMap('charts') };
   const undo = deps.makeUndo(Object.values(maps), LOCAL);
   let book: Book = readBook(liveStore(doc));
   let calc: Calc | null = book.sheets.length ? new Calc(book) : null;
@@ -72,7 +75,8 @@ export function sheetView(deps: SheetDeps): SheetView {
   const tool = (name: string, label: string, onClick: () => void) => { const b = h('button.icon-btn', { type: 'button', 'aria-label': label, 'data-tip': label, onclick: onClick }, icon(name, 18)); return b; };
   const undoBtn = tool('undo', `Undo (${isMac ? '⌘' : 'Ctrl+'}Z)`, () => { undo.undo(); sink.focus(); });
   const redoBtn = tool('redo', `Redo (${isMac ? '⇧⌘Z' : 'Ctrl+Y'})`, () => { undo.redo(); sink.focus(); });
-  const bar = h('div.sheet-bar', null, undoBtn, redoBtn, h('span.sheet-bar-sep'), formatBtn, h('span.sheet-bar-sep'), nameBox, h('span.sheet-fx-mark', { 'aria-hidden': 'true' }, 'fx'), fx,
+  const chartBtn = tool('activity', 'Chart the selected cells', () => { const sr = rect(); editChart({ text: 'type: bar', range: `${a1(sr.top, sr.left)}:${a1(sr.bottom, sr.right)}`, row: sr.top, col: Math.min(sheet().cols.length - 1, sr.right + 2) }); });
+  const bar = h('div.sheet-bar', null, undoBtn, redoBtn, h('span.sheet-bar-sep'), formatBtn, chartBtn, h('span.sheet-bar-sep'), nameBox, h('span.sheet-fx-mark', { 'aria-hidden': 'true' }, 'fx'), fx,
     h('a.icon-btn', { href: deps.exportUrl, download: '', 'aria-label': 'Download as Excel', 'data-tip': 'Download as Excel (.xlsx)' }, icon('download', 18)));
 
   const corner = h('div.sheet-corner', { 'data-tip': 'Select all' });
@@ -89,7 +93,9 @@ export function sheetView(deps: SheetDeps): SheetView {
   /** Holds the keyboard while a cell is selected: keys, copy and paste arrive here. */
   const sink = h('textarea.sheet-sink', { 'aria-label': 'Spreadsheet', autocapitalize: 'off', spellcheck: 'false', tabindex: '0' });
   const menuAnchor = h('div.sheet-menu-anchor');
-  const size = h('div.sheet-size', null, colHead, rowHead, cellsEl, overlay, editor, sink, menuAnchor);
+  /** Charts placed on the sheet: panels over the cells, each at its cell. */
+  const chartsEl = h('div.sheet-charts');
+  const size = h('div.sheet-size', null, colHead, rowHead, cellsEl, overlay, chartsEl, editor, sink, menuAnchor);
   const scroll = h('div.sheet-scroll', null, size);
   const tabs = h('div.sheet-tabs', { role: 'tablist' });
   const stats = h('span.sheet-stats');
@@ -309,7 +315,7 @@ export function sheetView(deps: SheetDeps): SheetView {
     const changed = (m: Y.Map<unknown>) => txn.changed.get(m as unknown as Y.AbstractType<Y.YEvent<any>>);
     const shape = changed(maps.sheets) || changed(maps.names) || changed(maps.rows) || changed(maps.cols);
     const cells = changed(maps.cells);
-    if (!shape && !cells && !changed(maps.fmt) && !changed(maps.widths)) return;
+    if (!shape && !cells && !changed(maps.fmt) && !changed(maps.widths) && !changed(maps.charts)) return;
     if (shape || !calc) {
       book = readBook(liveStore(doc));
       if (!book.byId.has(sheetId)) sheetId = book.sheets[0]?.id ?? '';
@@ -329,6 +335,7 @@ export function sheetView(deps: SheetDeps): SheetView {
       calc.update(book, list);
     }
     if (changed(maps.widths)) layout();
+    paintChartsSoon();
     placeEditor();
     if (sheet()) selectionChanged(); else { if (editing) endEdit(false); paint(); }
   }
@@ -525,6 +532,7 @@ export function sheetView(deps: SheetDeps): SheetView {
   scroll.addEventListener('pointerdown', (e) => {
     if (e.button !== 0 || !sheet()) return;
     const t = e.target as HTMLElement;
+    if (t.closest('.sheet-chart')) return; // a chart's own panel: its header moves it, its body is the chart's
     if (t === editor || t === fx) return;
     const p = at(e);
     if (editing) commitEdit();
@@ -591,7 +599,7 @@ export function sheetView(deps: SheetDeps): SheetView {
   };
   scroll.addEventListener('pointerup', endDrag);
   scroll.addEventListener('pointercancel', endDrag);
-  scroll.addEventListener('dblclick', (e) => { const p = at(e); if (!p.inCols && !p.inRows && e.target !== editor) startEdit(null, false); });
+  scroll.addEventListener('dblclick', (e) => { const p = at(e); if (!p.inCols && !p.inRows && e.target !== editor && !(e.target as HTMLElement).closest('.sheet-chart')) startEdit(null, false); });
   scroll.addEventListener('scroll', paint, { passive: true });
 
   // ------------------------------------------------------------------ menus
@@ -615,7 +623,7 @@ export function sheetView(deps: SheetDeps): SheetView {
   }
   scroll.addEventListener('contextmenu', (e) => {
     const s = sheet();
-    if (!s || e.target === editor) return;
+    if (!s || e.target === editor || (e.target as HTMLElement).closest('.sheet-chart')) return;
     e.preventDefault();
     const p = at(e);
     const sr0 = rect();
@@ -656,6 +664,101 @@ export function sheetView(deps: SheetDeps): SheetView {
     deps.openMenu(formatBtn, FORMATS.map((f) => ({ label: f.label, hint: f.sample, checked: f.code === current, onSelect: () => { change(() => { setFormat(doc, s, where, f.code); }); sink.focus(); } })));
   });
 
+  // ------------------------------------------------------------------ charts
+
+  const shownCharts = new Map<string, { el: HTMLElement; body: HTMLElement; title: HTMLElement; key: string; dispose: () => void }>();
+  function paintCharts() {
+    if (destroyed) return;
+    const s = sheet();
+    const list = s ? chartsOf(book, s) : [];
+    const seen = new Set<string>();
+    for (const c of list) {
+      seen.add(c.id);
+      const spec = parseChart(c.text);
+      const where = c.range.includes('#REF!') ? null : parseRange(c.range);
+      const table = calc && where ? tableOf(rangeValues(calc, s, where.rect.top, where.rect.left, Math.min(where.rect.bottom, s.rows.length - 1, where.rect.top + CHART_ROWS - 1), Math.min(where.rect.right, s.cols.length - 1, where.rect.left + CHART_COLS - 1))) : null;
+      const key = JSON.stringify([c.text, c.width, c.height, table]);
+      let m = shownCharts.get(c.id);
+      if (!m) {
+        const title = h('span.sheet-chart-title');
+        const body = h('div.sheet-chart-body');
+        const head = h('div.sheet-chart-head', null, title,
+          canEdit ? h('button.icon-btn', { type: 'button', 'aria-label': 'Change this chart', 'data-tip': 'Change', onclick: () => { const now = chartsOf(book, sheet()).find((x) => x.id === c.id); if (now) editChart(now); } }, icon('pencil', 15)) : null,
+          canEdit ? h('button.icon-btn', { type: 'button', 'aria-label': 'Remove this chart', 'data-tip': 'Remove', onclick: () => change(() => { deleteChart(doc, sheet(), c.id); }) }, icon('x', 15)) : null);
+        const el = h('div.sheet-chart', { 'data-chart': c.id }, head, body);
+        if (canEdit) head.addEventListener('pointerdown', (e) => moveChart(e, c.id, el));
+        chartsEl.append(el);
+        shownCharts.set(c.id, m = { el, body, title, key: '', dispose: () => undefined });
+      }
+      m.el.style.left = `${colX[c.col] ?? 0}px`;
+      m.el.style.top = `${c.row * ROW_H}px`;
+      m.el.style.width = `${c.width}px`;
+      m.title.textContent = spec.title || `${spec.type === 'code' ? 'Chart (code)' : 'Chart'} of ${c.range}`;
+      if (m.key !== key) {
+        m.key = key;
+        m.dispose();
+        // The title is on the panel; the picture has the panel's height.
+        m.dispose = mountChart(m.body, `height: ${c.height}\n${c.text.replace(/^title:.*\n?/m, '')}`, { table });
+      }
+    }
+    for (const [id, m] of shownCharts) if (!seen.has(id)) { m.dispose(); m.el.remove(); shownCharts.delete(id); }
+  }
+  let chartTimer = 0;
+  const paintChartsSoon = () => { clearTimeout(chartTimer); chartTimer = window.setTimeout(paintCharts, 120); };
+  /** Drag a chart by its header; it comes to rest on the cell under its corner. */
+  function moveChart(e: PointerEvent, id: string, el: HTMLElement) {
+    if (e.button !== 0 || (e.target as HTMLElement).closest('button')) return;
+    e.preventDefault();
+    const x0 = e.clientX, y0 = e.clientY, left0 = el.offsetLeft, top0 = el.offsetTop;
+    const head = e.currentTarget as HTMLElement;
+    head.setPointerCapture(e.pointerId);
+    const onMove = (ev: PointerEvent) => { el.style.left = `${Math.max(0, left0 + ev.clientX - x0)}px`; el.style.top = `${Math.max(0, top0 + ev.clientY - y0)}px`; };
+    const onUp = () => {
+      head.removeEventListener('pointermove', onMove);
+      head.removeEventListener('pointerup', onUp);
+      const s = sheet(), now = chartsOf(book, s).find((x) => x.id === id);
+      if (!now) return;
+      const row = clamp(Math.round(el.offsetTop / ROW_H), 0, s.rows.length - 1), col = colAt(el.offsetLeft + 1);
+      if (row !== now.row || col !== now.col) change(() => { putChart(doc, book, s, { ...now, row, col }); });
+      else paintCharts();
+    };
+    head.addEventListener('pointermove', onMove);
+    head.addEventListener('pointerup', onUp);
+  }
+  /** The dialog that places a chart or changes one. */
+  function editChart(chart: { id?: string; text: string; range: string; row: number; col: number; width?: number; height?: number }) {
+    if (!canEdit || !sheet()) return;
+    const spec = parseChart(chart.text);
+    const type = h('select.select', { 'aria-label': 'Kind' }, ...CHART_TYPES.map((t) => h('option', { value: t, selected: t === spec.type }, t === 'code' ? 'Your own code' : t[0].toUpperCase() + t.slice(1))));
+    const title = h('input.input', { type: 'text', value: spec.title, maxlength: '200', placeholder: 'Title' });
+    const range = h('input.input', { type: 'text', value: chart.range, spellcheck: 'false', placeholder: 'A1:C13' });
+    const stacked = h('input', { type: 'checkbox', checked: spec.stacked });
+    const flat = h('input', { type: 'checkbox', checked: spec.horizontal });
+    const code = h('textarea.comment-input.sheet-chart-code', { spellcheck: 'false', rows: '9', placeholder: '// data = { columns, rows }; return ECharts options, or draw into el\nreturn { xAxis: { type: "category", data: data.rows.map(r => r[0]) }, yAxis: {}, series: [{ type: "bar", data: data.rows.map(r => r[1]) }] };' }, spec.code);
+    const codeRow = h('label.field', null, h('span.field-label', null, 'Code'), code, h('span.meta', null, 'The body of a function (data, echarts, el, theme). It runs in each reader’s browser, in a sandbox with no network.'));
+    const options = h('div.sheet-chart-options', null, h('label.check', null, stacked, ' Stacked'), h('label.check', null, flat, ' Bars lying down'));
+    const sync = () => { codeRow.hidden = type.value !== 'code'; options.hidden = type.value === 'code' || type.value === 'pie' || type.value === 'scatter'; };
+    type.addEventListener('change', sync);
+    sync();
+    const save = h('button.btn.primary', { type: 'button' }, chart.id ? 'Save' : 'Place chart');
+    const dlg = deps.openDialog({
+      title: chart.id ? 'Chart' : 'New chart', size: 'md',
+      body: h('div.sheet-chart-form', null,
+        h('label.field', null, h('span.field-label', null, 'Kind'), type),
+        h('label.field', null, h('span.field-label', null, 'Title'), title),
+        h('label.field', null, h('span.field-label', null, 'Cells'), range, h('span.meta', null, 'The first row is the headings; the first column is the names (or the x values).')),
+        options, codeRow),
+      footer: save,
+    });
+    save.addEventListener('click', () => {
+      const text = chartText({ type: type.value as ChartType, title: title.value.trim(), x: spec.x, y: spec.y, stacked: stacked.checked, horizontal: flat.checked, code: code.value });
+      let ok = false;
+      if (!canEdit) return;
+      try { doc.transact(() => { putChart(doc, book, sheet(), { ...chart, text, range: range.value.trim() }); }, LOCAL); ok = true; } catch (e) { deps.toast((e as Error).message, { kind: 'error' }); }
+      if (ok) { dlg.close(); sink.focus(); }
+    });
+  }
+
   // ------------------------------------------------------------------ life
 
   const resize = new ResizeObserver(() => paint());
@@ -663,7 +766,11 @@ export function sheetView(deps: SheetDeps): SheetView {
   function applyCanEdit() {
     el.classList.toggle('read-only', !canEdit);
     fx.readOnly = !canEdit;
-    undoBtn.hidden = redoBtn.hidden = moreRows.hidden = !canEdit;
+    undoBtn.hidden = redoBtn.hidden = moreRows.hidden = chartBtn.hidden = !canEdit;
+    for (const m of shownCharts.values()) m.dispose();
+    shownCharts.clear();
+    chartsEl.replaceChildren();
+    paintChartsSoon();
     formatBtn.disabled = !canEdit;
     paintTabs();
     paintOverlay();
@@ -682,6 +789,7 @@ export function sheetView(deps: SheetDeps): SheetView {
       document.removeEventListener('keydown', onDocKey);
       deps.awareness.off('change', onAwareness);
       resize.disconnect();
+      for (const m of shownCharts.values()) m.dispose();
       undo.destroy();
       calc?.destroy();
       deps.awareness.setLocalStateField('sheet', null);

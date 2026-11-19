@@ -5,7 +5,7 @@
 // one of them (never a mixture), and a row inserted by one person does not
 // disturb what another is typing below it.
 //
-// The Y.Doc holds seven root maps of plain strings and numbers, nothing nested:
+// The Y.Doc holds eight root maps of plain strings and numbers, nothing nested:
 //
 //   sheets  <sheet>                -> order key        (the sheet exists)
 //   names   <sheet>                -> its name
@@ -14,6 +14,7 @@
 //   cells   <sheet>:<row>:<col>    -> what was typed   (a formula starts with "=")
 //   fmt     <sheet>:<row>:<col>    -> number format    (<sheet>::<col> for a whole column)
 //   widths  <sheet>:<col>          -> column width, px
+//   charts  <sheet>:<chart>        -> a chart placed on the sheet (JSON: its settings, its range, where it sits)
 //
 // Rows, columns and sheets have ids; their place is an order key (fractional
 // indexing), so moving one is a single write and two people inserting at the
@@ -35,7 +36,7 @@ import { generateNKeysBetween } from 'fractional-indexing';
 
 /** The type of a document that is a spreadsheet. */
 export const SHEET = 'sheet';
-export const SHEET_MAPS = ['sheets', 'names', 'rows', 'cols', 'cells', 'fmt', 'widths'] as const;
+export const SHEET_MAPS = ['sheets', 'names', 'rows', 'cols', 'cells', 'fmt', 'widths', 'charts'] as const;
 export type SheetMap = typeof SHEET_MAPS[number];
 
 export const MAX_ROWS = 100_000;
@@ -450,10 +451,8 @@ function deleteLines(doc: Y.Doc, book: Book, sheet: Sheet, map: 'rows' | 'cols',
   const end = index + ids.length - 1;
   // A range that loses an end keeps what is left of it (SUM(B2:B9) without row 9 is SUM(B2:B8)), as in Excel.
   // Written first, while every row and column still has its id; a range that goes entirely, or a single cell, reads #REF!.
-  for (const f of formulasTouching(book, sheet, gone, axis === 'row' ? 0 : 1)) {
-    if (f.sheet.id === sheet.id && f[axis] >= index && f[axis] <= end) continue; // going too
-    const next = mapRefs(f.text, (ref, original) => {
-      if (!ref.b || (ref.sheet === null ? f.sheet : book.byName.get(ref.sheet.toLowerCase()))?.id !== sheet.id) return original;
+  const shrink = (text: string, home: Sheet) => mapRefs(text, (ref, original) => {
+      if (!ref.b || (ref.sheet === null ? home : book.byName.get(ref.sheet.toLowerCase()))?.id !== sheet.id) return original;
       const x = ref.a[axis], y = ref.b[axis];
       if (x === null || y === null) return original;
       let lo = Math.min(x, y), hi = Math.max(x, y);
@@ -462,7 +461,17 @@ function deleteLines(doc: Y.Doc, book: Book, sheet: Sheet, map: 'rows' | 'cols',
       if (hi >= index && hi <= end) hi = index - 1;
       return `${prefixOf(original)}${cornerText({ ...ref.a, [axis]: lo })}:${cornerText({ ...ref.b, [axis]: hi })}`;
     });
+  for (const f of formulasTouching(book, sheet, gone, axis === 'row' ? 0 : 1)) {
+    if (f.sheet.id === sheet.id && f[axis] >= index && f[axis] <= end) continue; // going too
+    const next = shrink(f.text, f.sheet);
     if (next !== f.text) setInput(doc, book, f.sheet, f.row, f.col, next);
+  }
+  // Charts on the sheet: their cells shrink the same way, and one sitting on a line that goes moves to the next that stays.
+  const size = map === 'rows' ? sheet.rows.length : sheet.cols.length;
+  for (const c of chartsOf(book, sheet)) {
+    const at = c[axis] >= index && c[axis] <= end ? (end + 1 < size ? end + 1 : Math.max(0, index - 1)) : c[axis];
+    const range = c.range.includes(REF_ERROR) ? c.range : shrink(`=${c.range}`, sheet).slice(1);
+    if (at !== c[axis] || range !== c.range) putChart(doc, book, sheet, { ...c, [axis]: at, range });
   }
   const part = map === 'rows' ? 1 : 2;
   for (const name of ['cells', 'fmt'] as const) {
@@ -522,12 +531,15 @@ export function reorderRows(doc: Y.Doc, book: Book, sheet: Sheet, from: number, 
     for (const [i, key] of made.rekey) m.set(`${sheet.id}:${sheet.rows[i + order.length]}`, key);
   }
   order.forEach((was, i) => { if (sheet.rowKeys[was] !== slots[i]) m.set(`${sheet.id}:${sheet.rows[was]}`, slots[i]); });
+  const charts = chartsOf(book, sheet);
   const after = readBook(book.store);
   for (const f of formulas) {
     const home = after.byId.get(f.sheetId)!;
     const row = home.rowAt.get(f.rowId);
     if (row !== undefined) setInput(doc, after, home, row, f.col, f.text);
   }
+  // A chart covers the same area and sits at the same place after a sort, like a formula outside the sorted rows.
+  for (const c of charts) if (!c.range.includes(REF_ERROR)) putChart(doc, after, after.byId.get(sheet.id)!, c);
 }
 
 export function addSheet(doc: Y.Doc, book: Book, name: string, rows = NEW_ROWS, cols = NEW_COLS): string {
@@ -612,6 +624,60 @@ export function initBook(doc: Y.Doc) {
   addSheet(doc, readBook(liveStore(doc)), 'Sheet1');
 }
 
+// ------------------------------------------------------------------ charts on a sheet
+//
+// A chart sits on a sheet at a cell and draws a range of that sheet. Its range
+// is kept the way a formula's references are (by row and column id), so it
+// follows its cells; where it sits is a row and a column id too.
+
+export interface SheetChart {
+  id: string;
+  /** Its settings, as a chart block's text without rows or a data line (see chart.ts). */
+  text: string;
+  /** The cells it draws, as an address ("A1:C13"; "#REF!" when they are gone). */
+  range: string;
+  /** Where its top-left corner sits. */
+  row: number; col: number;
+  width: number; height: number;
+}
+interface StoredChart { t: string; g: string; r: string; c: string; w: number; h: number }
+const CHART_W = 480, CHART_H = 300;
+/** The longest a stored chart may be (documents.ts refuses longer from a browser). */
+export const MAX_CHART_CHARS = 24_000;
+
+export function chartsOf(book: Book, sheet: Sheet): SheetChart[] {
+  const out: SheetChart[] = [];
+  for (const [key, v] of book.store.entries('charts')) {
+    if (!key.startsWith(`${sheet.id}:`) || typeof v !== 'string') continue;
+    let c: StoredChart;
+    try { c = JSON.parse(v) as StoredChart; } catch { continue; }
+    if (!c || typeof c !== 'object') continue; // not a chart: someone wrote something else here
+    out.push({
+      id: key.slice(sheet.id.length + 1), text: String(c.t ?? ''), range: decodeFormula(book, sheet, `=${c.g ?? ''}`).slice(1),
+      row: sheet.rowAt.get(c.r) ?? 0, col: sheet.colAt.get(c.c) ?? 0, width: Number(c.w) || CHART_W, height: Number(c.h) || CHART_H,
+    });
+  }
+  return out.sort((a, b) => a.row - b.row || a.col - b.col || (a.id < b.id ? -1 : 1));
+}
+
+/** Place a chart on a sheet, or (with `id`) change the one there. Returns its id. */
+export function putChart(doc: Y.Doc, book: Book, sheet: Sheet, chart: { id?: string; text: string; range: string; row: number; col: number; width?: number; height?: number }): string {
+  const range = chart.range.includes(REF_ERROR) ? null : parseRange(chart.range);
+  if (!chart.range.includes(REF_ERROR) && (!range || range.sheet)) throw new Error(`A chart on a sheet draws cells of that sheet, such as "A1:C13" (got "${chart.range}").`);
+  const m = doc.getMap('charts');
+  const id = chart.id ?? newId(5, (x) => m.has(`${sheet.id}:${x}`));
+  const row = sheet.rows[Math.max(0, Math.min(sheet.rows.length - 1, chart.row))], col = sheet.cols[Math.max(0, Math.min(sheet.cols.length - 1, chart.col))];
+  const stored: StoredChart = { t: chart.text, g: encodeFormula(book, sheet, `=${chart.range}`).slice(1), r: row, c: col, w: Math.round(chart.width ?? CHART_W), h: Math.round(chart.height ?? CHART_H) };
+  const json = JSON.stringify(stored);
+  // As it is stored (with its quotes and line breaks escaped), which is what the server measures.
+  if (json.length > MAX_CHART_CHARS) throw new Error('A chart’s settings and code are too long (about 20,000 characters at most).');
+  if (m.get(`${sheet.id}:${id}`) !== json) m.set(`${sheet.id}:${id}`, json);
+  return id;
+}
+export function deleteChart(doc: Y.Doc, sheet: Sheet, id: string) {
+  doc.getMap('charts').delete(`${sheet.id}:${id}`);
+}
+
 // ------------------------------------------------------------------ comparing two states
 
 export interface EntryChange { map: SheetMap; key: string; before: unknown; after: unknown }
@@ -677,12 +743,12 @@ export function bookChanges(a: Store, b: Store): BookChanges {
   }
   // Cells are compared as stored (references as ids), so a formula does not count as changed because a row was inserted above it.
   const entries = diffStores(a, b);
-  const looks = new Map<string, { fmt: number; widths: number }>();
+  const looks = new Map<string, { fmt: number; widths: number; charts: number }>();
   for (const c of entries) {
-    if (c.map === 'fmt' || c.map === 'widths') {
+    if (c.map === 'fmt' || c.map === 'widths' || c.map === 'charts') {
       const sheet = after.byId.get(c.key.slice(0, c.key.indexOf(':')));
       if (!sheet || !before.byId.has(sheet.id)) continue;
-      const n = looks.get(sheet.name) ?? { fmt: 0, widths: 0 };
+      const n = looks.get(sheet.name) ?? { fmt: 0, widths: 0, charts: 0 };
       n[c.map]++;
       looks.set(sheet.name, n);
     }
@@ -700,7 +766,7 @@ export function bookChanges(a: Store, b: Store): BookChanges {
   }
   const place = (w: string) => { const p = parseRange(w)!; return [p.sheet ?? '', p.rect.top, p.rect.left] as const; };
   cells.sort((x, y) => { const p = place(x.where), q = place(y.where); return p[0] < q[0] ? -1 : p[0] > q[0] ? 1 : p[1] - q[1] || p[2] - q[2]; });
-  for (const [name, n] of looks) notes.push(`${name}: ${[n.fmt ? 'number formats' : '', n.widths ? 'column widths' : ''].filter(Boolean).join(' and ')} changed.`);
+  for (const [name, n] of looks) notes.push(`${name}: ${[n.fmt ? 'number formats' : '', n.widths ? 'column widths' : '', n.charts ? 'charts' : ''].filter(Boolean).join(' and ')} changed.`);
   return { cells, notes, entries };
 }
 
