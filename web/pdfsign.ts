@@ -373,6 +373,8 @@ export async function mountSign(o: SignOptions): Promise<SignView> {
       });
       const lift = () => { last = null; };
       pad.addEventListener('pointerup', lift); pad.addEventListener('pointercancel', lift);
+      // A finger on the pad only draws. The touch itself is refused: touch-action alone does not hold the page still on every phone, and a page that scrolls takes the stroke away.
+      for (const type of ['touchstart', 'touchmove'] as const) pad.addEventListener(type, (e) => e.preventDefault(), { passive: false });
       const file = h('input', { type: 'file', accept: 'image/png,image/jpeg,image/webp', hidden: true });
       file.addEventListener('change', async () => {
         const f = file.files?.[0];
