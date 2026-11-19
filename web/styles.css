@@ -331,11 +331,11 @@ h1, h2, h3 { color: var(--text-strong); }
 .uploading { display: inline-flex; align-items: center; gap: 10px; }
 .toast-url { display: inline-block; max-width: 100%; margin-top: 2px; font: 12px/1.4 var(--font-mono); color: var(--inverse-2); overflow-wrap: anywhere; user-select: all; }
 
-dialog.dialog { padding: 0; border: 0; background: transparent; color: var(--text); max-width: calc(100vw - 32px); max-height: calc(100dvh - 32px); overflow: visible; }
+dialog.dialog { padding: 0; border: 0; background: transparent; color: var(--text); max-width: calc(100vw - 32px); max-height: calc(100vh - 32px); max-height: calc(100dvh - 32px); overflow: visible; }
 dialog.dialog::backdrop { background: rgba(12, 17, 27, 0.42); animation: fade-in 0.15s; }
 dialog.dialog.closing { opacity: 0; transition: opacity 0.12s; }
 .dialog-card {
-  display: flex; flex-direction: column; max-height: calc(100dvh - 48px);
+  display: flex; flex-direction: column; max-height: calc(100vh - 48px); max-height: calc(100dvh - 48px);
   background: var(--surface); border-radius: 16px; box-shadow: var(--shadow-3); border: 1px solid var(--border);
   animation: pop 0.16s ease-out;
 }
@@ -1579,8 +1579,8 @@ textarea.sign-input { padding-top: calc(var(--pt) * 2); }
   .sign-dialog .dialog-head { padding-top: 8px; padding-bottom: 0; }
   .sign-dialog .dialog-body { padding-top: 4px; padding-bottom: 8px; }
   .sign-dialog .dialog-foot { padding-top: 8px; padding-bottom: 8px; }
-  .sign-dialog .dialog-help { display: none; }
-  .sign-dialog .sign-pad { width: min(100%, (100dvh - 128px) * 1120 / 360); align-self: center; }
+  .sign-dialog .sign-pad-wrap .dialog-help { display: none; }
+  .sign-dialog .sign-pad { width: min(100%, (100dvh - 128px) * var(--pad-ratio)); align-self: center; }
 }
 .sign-chip { margin-left: 8px; border-color: #b7791f; color: #7a4d00; background: rgba(255, 199, 0, 0.25); font-family: var(--font-ui); font-weight: 600; }
 .sign-chip.mine { background: #f5b301; border-color: #f5b301; color: #1b1300; }
